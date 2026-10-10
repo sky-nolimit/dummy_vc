@@ -1,0 +1,287 @@
+<?xml version="1.0" ?>
+<robot name="dummy2_urdf" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+<xacro:include filename="$(find dummy2_urdf_description)/urdf/materials.xacro" />
+<xacro:include filename="$(find dummy2_urdf_description)/urdf/dummy2_urdf.trans" />
+<xacro:include filename="$(find dummy2_urdf_description)/urdf/dummy2_urdf.gazebo" />
+<link name="base_link">
+  <inertial>
+    <origin xyz="-2.0924404922447642e-07 0.0002265177622702009 0.038857658386839265" rpy="0 0 0"/>
+    <mass value="3.5330582052606796"/>
+    <inertia ixx="0.006118" iyy="0.006527" izz="0.007083" ixy="-0.0" iyz="-3.1e-05" ixz="-0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find dummy2_urdf_description)/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find dummy2_urdf_description)/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="link1_v1_1">
+  <inertial>
+    <origin xyz="-0.0056980560460294935 0.0064861638164701 0.019357188251092616" rpy="0 0 0"/>
+    <mass value="0.4200298104778203"/>
+    <inertia ixx="0.000188" iyy="0.000156" izz="0.000263" ixy="6.2e-05" iyz="-4.3e-05" ixz="2.7e-05"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.0 0.0 -0.0805" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find dummy2_urdf_description)/meshes/link1_v1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0.0 0.0 -0.0805" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find dummy2_urdf_description)/meshes/link1_v1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="link2_3_v4_1">
+  <inertial>
+    <origin xyz="0.01784442516054535 0.001984148554351424 0.08366314329154671" rpy="0 0 0"/>
+    <mass value="1.8966297326812738"/>
+    <inertia ixx="0.00634" iyy="0.006744" izz="0.001194" ixy="-4e-06" iyz="6.4e-05" ixz="0.000771"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.011639 -0.034477 -0.1155" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find dummy2_urdf_description)/meshes/link2_3_v4_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0.011639 -0.034477 -0.1155" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find dummy2_urdf_description)/meshes/link2_3_v4_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="link4_v3_1">
+  <inertial>
+    <origin xyz="-0.010734927861478562 -0.02899910919329468 0.04907873909557703" rpy="0 0 0"/>
+    <mass value="0.9123222504571403"/>
+    <inertia ixx="0.00082" iyy="0.000695" izz="0.00053" ixy="-4.2e-05" iyz="0.000139" ixz="8.7e-05"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.023511 -0.034477 -0.2835" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find dummy2_urdf_description)/meshes/link4_v3_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.023511 -0.034477 -0.2835" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find dummy2_urdf_description)/meshes/link4_v3_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="link5_v3_1">
+  <inertial>
+    <origin xyz="-0.005062328590247776 0.05998132886165681 0.0006226400248255382" rpy="0 0 0"/>
+    <mass value="1.0415582650622635"/>
+    <inertia ixx="0.001817" iyy="0.000592" izz="0.002009" ixy="0.000108" iyz="-1.2e-05" ixz="8e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.010349 -0.03602 -0.345967" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find dummy2_urdf_description)/meshes/link5_v3_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.010349 -0.03602 -0.345967" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find dummy2_urdf_description)/meshes/link5_v3_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="link6_v3_1">
+  <inertial>
+    <origin xyz="-0.015134812773935778 0.07204733917419315 5.247838804928184e-05" rpy="0 0 0"/>
+    <mass value="0.792974216910335"/>
+    <inertia ixx="0.000883" iyy="0.000353" izz="0.000975" ixy="0.000146" iyz="1e-06" ixz="-0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.033149 -0.14602 -0.345967" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find dummy2_urdf_description)/meshes/link6_v3_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.033149 -0.14602 -0.345967" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find dummy2_urdf_description)/meshes/link6_v3_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="link7_v1_1">
+  <inertial>
+    <origin xyz="-0.00010370692516778121 0.030002778403636243 0.0001258592869731734" rpy="0 0 0"/>
+    <mass value="0.35021823126723256"/>
+    <inertia ixx="0.000175" iyy="0.000154" izz="0.000176" ixy="-1e-06" iyz="1e-06" ixz="-0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.012149 -0.26452 -0.345967" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find dummy2_urdf_description)/meshes/link7_v1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.012149 -0.26452 -0.345967" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find dummy2_urdf_description)/meshes/link7_v1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="dummy_hand_v1_1">
+  <inertial>
+    <origin xyz="0.0002308021928914654 0.0041804387610880345 2.4830506925810347e-05" rpy="0 0 0"/>
+    <mass value="0.16020132187330405"/>
+    <inertia ixx="1.6e-05" iyy="0.000181" izz="0.000168" ixy="0.0" iyz="-0.0" ixz="-5e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.012149 -0.316832 -0.345967" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find dummy2_urdf_description)/meshes/dummy_hand_v1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.012149 -0.316832 -0.345967" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find dummy2_urdf_description)/meshes/dummy_hand_v1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="dummy_leftfinger_v1_1">
+  <inertial>
+    <origin xyz="0.018039556958137283 0.02262433555604698 0.007487610379991516" rpy="0 0 0"/>
+    <mass value="0.0823609512502398"/>
+    <inertia ixx="2.7e-05" iyy="2.2e-05" izz="4.2e-05" ixy="7e-06" iyz="-3e-06" ixz="3e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.036579 -0.320832 -0.335365" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find dummy2_urdf_description)/meshes/dummy_leftfinger_v1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0.036579 -0.320832 -0.335365" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find dummy2_urdf_description)/meshes/dummy_leftfinger_v1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="dummy_rightfiger_v1_1">
+  <inertial>
+    <origin xyz="-0.01803918941317663 0.02262433555604687 -0.00748696328708276" rpy="0 0 0"/>
+    <mass value="0.08236095125024051"/>
+    <inertia ixx="2.7e-05" iyy="2.2e-05" izz="4.2e-05" ixy="-7e-06" iyz="3e-06" ixz="3e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.061406 -0.320832 -0.356601" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find dummy2_urdf_description)/meshes/dummy_rightfiger_v1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.061406 -0.320832 -0.356601" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="file://$(find dummy2_urdf_description)/meshes/dummy_rightfiger_v1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<joint name="dummy2_joint1" type="revolute">
+  <origin xyz="0.0 0.0 0.0805" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="link1_v1_1"/>
+  <axis xyz="0.0 -0.0 -1.0"/>
+  <limit upper="3.141593" lower="-3.141593" effort="100" velocity="100"/>
+</joint>
+
+<joint name="dummy2_joint2" type="revolute">
+  <origin xyz="-0.011639 0.034477 0.035" rpy="0 0 0"/>
+  <parent link="link1_v1_1"/>
+  <child link="link2_3_v4_1"/>
+  <axis xyz="1.0 0.0 0.0"/>
+  <limit upper="1.308997" lower="-2.094395" effort="100" velocity="100"/>
+</joint>
+
+<joint name="dummy2_joint3" type="revolute">
+  <origin xyz="0.03515 0.0 0.168" rpy="0 0 0"/>
+  <parent link="link2_3_v4_1"/>
+  <child link="link4_v3_1"/>
+  <axis xyz="1.0 -0.0 0.0"/>
+  <limit upper="1.308997" lower="-1.570796" effort="100" velocity="100"/>
+</joint>
+
+<joint name="dummy2_joint4" type="revolute">
+  <origin xyz="-0.013162 0.001543 0.062467" rpy="0 0 0"/>
+  <parent link="link4_v3_1"/>
+  <child link="link5_v3_1"/>
+  <axis xyz="-0.0 1.0 0.0"/>
+  <limit upper="3.141593" lower="-3.141593" effort="100" velocity="100"/>
+</joint>
+
+<joint name="dummy2_joint5" type="revolute">
+  <origin xyz="0.0228 0.11 0.0" rpy="0 0 0"/>
+  <parent link="link5_v3_1"/>
+  <child link="link6_v3_1"/>
+  <axis xyz="1.0 0.0 0.0"/>
+  <limit upper="1.745329" lower="-1.745329" effort="100" velocity="100"/>
+</joint>
+
+<joint name="dummy2_joint6" type="revolute">
+  <origin xyz="-0.021 0.1185 0.0" rpy="0 0 0"/>
+  <parent link="link6_v3_1"/>
+  <child link="link7_v1_1"/>
+  <axis xyz="0.0 -1.0 -0.0"/>
+  <limit upper="3.141593" lower="-3.141593" effort="100" velocity="100"/>
+</joint>
+
+<joint name="dummy2_hand_joint" type="fixed">
+  <origin xyz="0.0 0.052312 0.0" rpy="0 0 0"/>
+  <parent link="link7_v1_1"/>
+  <child link="dummy_hand_v1_1"/>
+</joint>
+
+<joint name="dummy2_finger_joint1" type="prismatic">
+  <origin xyz="-0.048728 0.004 -0.010602" rpy="0 0 0"/>
+  <parent link="dummy_hand_v1_1"/>
+  <child link="dummy_leftfinger_v1_1"/>
+  <axis xyz="1.0 -0.0 0.000761"/>
+  <limit upper="0.023" lower="0.0" effort="100" velocity="100"/>
+</joint>
+
+<joint name="dummy2_finger_joint2" type="prismatic">
+  <origin xyz="0.049257 0.004 0.010634" rpy="0 0 0"/>
+  <parent link="dummy_hand_v1_1"/>
+  <child link="dummy_rightfiger_v1_1"/>
+  <axis xyz="-1.0 0.0 -0.000761"/>
+  <limit upper="0.023" lower="0.0" effort="100" velocity="100"/>
+</joint>
+
+</robot>

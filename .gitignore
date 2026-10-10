@@ -1,0 +1,30 @@
+# ============================================================
+# Dummy 机械臂视觉抓取工作区
+# ============================================================
+
+# --- ROS 2 / colcon 构建产物 ---
+build/
+install/
+log/
+*.pyc
+__pycache__/
+
+# --- 编辑器 / IDE ---
+.vscode/
+.idea/
+*.swp
+*~
+
+# --- 阶段 0 实测的原始记录（体积大且机器相关，不入库；
+#     提取出的参数表 docs/stage0_params.yaml 要入库）---
+tools/stage0_raw/
+
+# --- Python ---
+*.egg-info/
+.pytest_cache/
+.coverage
+
+# --- 参考资料里的第三方二进制（zadig 是 Windows USB 驱动安装程序，
+#     在 Ubuntu 上永远不会用到，node_modules 同理）---
+reference/**/zadig-*.exe
+reference/**/node_modules/
