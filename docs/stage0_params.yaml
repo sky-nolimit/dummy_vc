@@ -1,0 +1,122 @@
+# =============================================================================
+# 阶段 0 实测参数表
+# =============================================================================
+#
+# 这张表是后续所有代码的输入，请按 docs/02-阶段0标定操作手册.md 逐项填写。
+# 所有标了 TODO 的值都还没实测 —— 用占位值跑代码会得到系统性错误，
+# 而且症状会伪装成"标定不准"，极难排查。
+#
+# 填写方法：每测一项就改掉对应的 TODO，并写清测量条件。
+# =============================================================================
+
+meta:
+  measured_by: TODO
+  measured_on: TODO          # 日期
+  firmware_serial: "327934543234"   # 已从接口树读到
+  notes: TODO
+
+
+# -----------------------------------------------------------------------------
+# 0.2 / 0.3 关节方向与单位
+# -----------------------------------------------------------------------------
+joints:
+  # device_unit: 设备 set_position() / angle 使用的单位
+  #   取值 "rad" 或 "deg" —— 在手册 0.2 里用 delta=1.0 观察实物转约 57° 还是约 1° 判定
+  device_unit: TODO
+
+  # 每个关节的 URDF 轴与设备实际转向是否一致。
+  # sign = +1 表示「URDF 正向 = 设备正向」；-1 表示相反。
+  # 判定方法：在 RViz 里看模型转向与实物转向是否一致。
+  #
+  # URDF 里各关节的轴（供对照）：
+  #   j1: -z    j2: +x    j3: +x    j4: +y    j5: -x    j6: -y
+  sign:
+    dummy2_joint1: TODO
+    dummy2_joint2: TODO
+    dummy2_joint3: TODO
+    dummy2_joint4: TODO
+    dummy2_joint5: TODO
+    dummy2_joint6: TODO
+
+  # offset: 使「URDF 角度 = sign * (device_angle - offset)」成立的偏置，单位与 device_unit 一致。
+  # 参考项目 dummy_moveit_ws 的经验值是 j3 有 +90° 偏置，但那是另一台机器，不可直接沿用。
+  offset:
+    dummy2_joint1: TODO
+    dummy2_joint2: TODO
+    dummy2_joint3: TODO
+    dummy2_joint4: TODO
+    dummy2_joint5: TODO
+    dummy2_joint6: TODO
+
+  # 实测的关节限位（比 URDF 里写的更可靠，URDF 的值可能是建模软件的默认值）
+  # 单位：弧度
+  limits:
+    dummy2_joint1: { lower: TODO, upper: TODO }
+    dummy2_joint2: { lower: TODO, upper: TODO }
+    dummy2_joint3: { lower: TODO, upper: TODO }
+    dummy2_joint4: { lower: TODO, upper: TODO }
+    dummy2_joint5: { lower: TODO, upper: TODO }
+    dummy2_joint6: { lower: TODO, upper: TODO }
+
+
+# -----------------------------------------------------------------------------
+# 0.4 / 0.5 夹爪几何
+# -----------------------------------------------------------------------------
+gripper:
+  # 归一化开口 0.0 = ? 1.0 = ?
+  # 如果实测发现 0 是全开、1 是全闭（与假设相反），把这里改成 inverted: true 并说明
+  frac_to_angle_inverted: TODO      # true / false
+
+  # 全开对应的设备角度（对应节点参数 hand_max_angle）
+  max_angle: TODO
+
+  # 角度 -> 开口宽度 映射。至少 5 个数据点，实测填写。
+  # width_mm 是两指指尖之间的净开口，用尺子量。
+  angle_to_width:
+    - { angle: 0.00, open_frac: 0.00, width_mm: TODO }
+    - { angle: TODO, open_frac: 0.25, width_mm: TODO }
+    - { angle: TODO, open_frac: 0.50, width_mm: TODO }
+    - { angle: TODO, open_frac: 0.75, width_mm: TODO }
+    - { angle: TODO, open_frac: 1.00, width_mm: TODO }
+
+  # 由上面数据推出：宽度 = a * angle + b
+  width_fit: { a: TODO, b: TODO, r2: TODO }
+
+  # 手指 prismatic 关节的 URDF 位置换算（URDF 行程 0~0.023 m 各指）
+  finger_travel_m: 0.023
+
+
+# -----------------------------------------------------------------------------
+# 0.6 夹持力
+# -----------------------------------------------------------------------------
+gripper_force:
+  # set_current_limit() 的安全区间。用纸杯/鸡蛋测出的两个阈值，单位与设备一致。
+  hold_min: TODO            # 再小就打滑
+  crush_max: TODO           # 再大就压坏
+  recommended: TODO         # 实际使用的值，取两者之间偏保守
+  tested_object: TODO       # 用什么物体测的
+
+
+# -----------------------------------------------------------------------------
+# 0.7 set_position_with_time 的单位与阻塞性
+# -----------------------------------------------------------------------------
+timed_move:
+  pos_unit: TODO            # "rad" 或 "deg"
+  time_unit: TODO           # "s" 或 "ms"
+  blocking: TODO            # true = 固件走完才返回；false = 立即返回
+  measured_blocking_secs: TODO   # 请求 time=1.0 时实测的阻塞耗时
+
+
+# -----------------------------------------------------------------------------
+# 0.8 TCP 偏移
+# -----------------------------------------------------------------------------
+tcp:
+  # link7_v1_1 -> 两指夹持中心（指尖前端中点）的偏移，单位米
+  # 写进 xacro 的 gripper_tcp_joint origin
+  link7_to_tcp_xyz: [TODO, TODO, TODO]
+  # 已知：URDF 里 dummy2_hand_joint 是 link7 -> 手爪，偏移 (0, 0.052312, 0)
+  hand_offset_y: 0.052312
+  # 测量方法说明
+  method: TODO
+  # 验证：手动摆位后用尺子量 gripper_tcp 到基座距离，与 TF 对比，误差应 < 5 mm
+  verified_error_mm: TODO

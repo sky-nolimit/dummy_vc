@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>dummy_vc_calibration</name>
+  <version>0.1.0</version>
+  <description>
+    阶段 0 硬件标定节点：实测关节方向/单位、夹爪角度与开口映射、
+    夹持力上限、set_position_with_time 的时间单位、TCP 偏移。
+    采用「预览 - 确认 - 执行」两段式，所有动作先在 RViz 预览。
+  </description>
+  <maintainer email="dummy-vc@localhost">Dummy VC</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>dummy2_urdf_description</depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

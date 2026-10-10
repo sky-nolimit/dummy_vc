@@ -16,16 +16,21 @@ Dummy_vc/
 ├── dummy_vc_ws/           ★ 唯一的 ROS 2 工作区，所有构建在这里发生
 │   └── src/
 │       ├── dummy2_urdf/           机械臂模型（URDF/Xacro + STL）—— 唯一模型来源
-│       └── dummy_ros2_driver/     ROS 2 控制器（lifecycle 节点 + fibre 驱动）—— 唯一硬件通道
+│       ├── dummy_ros2_driver/     ROS 2 控制器（lifecycle 节点 + fibre 驱动）—— 唯一硬件通道
+│       └── dummy_vc_calibration/  阶段 0 硬件标定节点（预览-确认-执行）
 │
-├── docs/                  方案、参数表、决策记录
-│   ├── 01-视觉抓取方案.md          完整技术方案（含分阶段计划与风险清单）
-│   └── stage0_params.yaml          阶段 0 实测参数表（待生成，是后续代码的输入）
+├── docs/                  方案、参数表、操作手册
+│   ├── 01-视觉抓取方案.md          完整技术方案（分阶段计划与风险清单）
+│   ├── 02-阶段0标定操作手册.md      阶段 0 的逐步操作指引
+│   └── stage0_params.yaml          实测参数表模板（待填写，是后续代码的输入）
 │
 ├── tools/                 不依赖 ROS 的独立工具脚本
+│   ├── check_syntax.py            全仓库 Python 语法检查
+│   └── check_encoding.py          编码 / BOM / mojibake 检查
 │
 └── reference/             只读参考资料，永不参与构建
-    └── dummy_moveit_ws/            参考项目（他人的 MoveIt 工作空间）
+    ├── dummy_moveit_ws/           参考项目（他人的 MoveIt 工作空间）
+    └── upstream-local-changes/    上游未提交改动的存档（patch）
 ```
 
 ### 两类目录必须分清
@@ -70,10 +75,24 @@ Dummy_vc/
 ## 常用命令
 
 ```bash
-# 构建（每次都从工作区根目录执行）
+# 构建（每次都从工作区目录执行）
 cd dummy_vc_ws
 colcon build --symlink-install
 source install/setup.bash
+```
+
+```bash
+# 阶段 0 标定（真机）
+ros2 launch dummy_vc_calibration stage0.launch.py
+
+# 先空跑验证，不接硬件
+ros2 launch dummy_vc_calibration stage0.launch.py dry_run:=true
+```
+
+```bash
+# 改完源码后的自检（Windows / Ubuntu 都能跑，不需要 ROS）
+python tools/check_syntax.py
+python tools/check_encoding.py <文件>
 ```
 
 ```bash
@@ -81,13 +100,38 @@ source install/setup.bash
 ls reference/dummy_moveit_ws/
 ```
 
----
+## 当前进度
+
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| — | 工作区整合 | ✅ 完成 |
+| — | 硬件接口探测（夹爪接口确认） | ✅ 完成 |
+| **0** | **硬件实测标定** | ⬅ **当前，见 [操作手册](docs/02-阶段0标定操作手册.md)** |
+| 1 | 修驱动 + 补 xacro（关节名、TF、单位） | 待开始 |
+| 2 | MoveIt 配置 | 待开始 |
+| 3 | 驱动补强（轨迹执行、夹爪接口、限速） | 待开始 |
+| 4 | 视觉感知 | 待开始（相机未到货，可先用 USB 相机搭框架） |
+| 5 | 抓取规划 + 任务状态机 | 待开始 |
+| 6 | 深度相机接入 + 手眼标定 | 待开始（等相机） |
+
+## 编码注意事项
+
+本仓库在 **Windows 上编辑、Ubuntu 上构建**。整合过程中已经发生过一次真实事故：用 PowerShell 写文件时的编码往返，把源文件里的中文全部损坏成乱码（中文被当 GBK 解读后重新按 UTF-8 写出，并附带了 UTF-8 BOM）。
+
+因此有两条硬约定：
+
+1. **`dummy_vc_ws/src/` 下的 Python 源文件一律只用 ASCII（英文）。** 需要中文说明就写进 `docs/` 的 Markdown。
+2. 改动源文件后用 `tools/check_syntax.py` 和 `tools/check_encoding.py` 验证。
 
 ## 完整方案
 
-技术方案、六个阻塞问题、分阶段实施计划、手眼标定流程、风险清单，全部在：
+技术方案、六个阻塞问题、分阶段实施计划、手眼标定流程、风险清单：
 
 **→ [docs/01-视觉抓取方案.md](docs/01-视觉抓取方案.md)**
+
+阶段 0 的逐步操作指引：
+
+**→ [docs/02-阶段0标定操作手册.md](docs/02-阶段0标定操作手册.md)**
 
 ---
 
@@ -100,9 +144,34 @@ ls reference/dummy_moveit_ws/
 - 运行环境：Ubuntu 22.04 + ROS 2 Humble
 - 首期目标：可复现的桌面抓取 Demo（识别 → 规划 → 抓取 → 放置）
 
-## 当前分支状态（整合时的快照）
+## 版本控制说明
 
-- `dummy_vc_ws/src/dummy2_urdf`：`main` @ `5e1e401`，工作区干净
-- `dummy_vc_ws/src/dummy_ros2_driver`：`high_frequency` @ `03a5b1a`，**工作区有未提交改动**（`dummy_controller.py` 52 增 99 删），`probe_device.py` 为未跟踪文件。这些改动已随整合原样保留。
+本仓库（根目录）是**唯一的 git 仓库**。原先三个项目各自带一个嵌套 `.git`，整合时已移除，由本仓库统一接管历史——这样 `git diff` 就能直接看到我们对上游文件做的每一处修改。
 
-两个上游仓库的 `.git` 目录均保持原样，以便将来能追溯上游历史。**本项目不对上游做 pull**（硬件已验证的是当前这个 commit）。
+移除嵌套 `.git` 之前已逐项核实安全性：
+
+| 仓库 | 移除前状态 | 结论 |
+|---|---|---|
+| `dummy2_urdf` | `main` @ `5e1e401`，工作区干净 | 全部提交存在于远端，可随时重新 clone |
+| `dummy_ros2_driver` | `high_frequency` @ `03a5b1a`，**有未提交改动** | 无未推送提交、无 stash；改动已存档 |
+| `dummy_moveit_ws` | `main` @ `cfcee7d`，**有 9 个文件未提交改动** | 无未推送提交、无 stash；改动已存档 |
+
+**上游未提交改动的存档在 [`reference/upstream-local-changes/`](reference/upstream-local-changes/)**：
+
+| 文件 | 内容 |
+|---|---|
+| `driver-uncommitted-2025.patch` | `dummy_ros2_driver` 的 52 增 99 删改动（基于 `03a5b1a`） |
+| `reference-uncommitted-2025.patch` | `dummy_moveit_ws` 的 9 文件改动（基于 `cfcee7d`） |
+| `probe_device.py.snapshot` | 该未跟踪文件的副本 |
+
+这些存档值得保留，因为其中包含**上游从未提交、也从未公开**的修复。例如 `aruco_tracker_node.py` 里把原作者自己的机器路径 `/home/hata_ros/apps/dummy_ws/...` 改成了自动查找 + 环境变量覆盖；`aruco_detector_node.py` 把 `transform_pose` 移进了 `try` 块（原代码在 TF 不可用时仍会执行并抛异常）。参考项目里的 `dummy_vision` 用的正是 `camera_color_optical_frame` + `base_link` 这条链，与本项目的 eye-in-hand 方案同路，有直接借鉴价值。
+
+**不对上游做 pull**：硬件已验证的就是当前这两个 commit，拉取更新会引入未经验证的变更。若将来确需重新获取上游，clone 地址见下方「原始来源」。
+
+## 原始来源
+
+| 项目 | 上游地址 |
+|---|---|
+| `dummy2_urdf` | https://github.com/SuJerry01/dummy2_urdf.git |
+| `dummy_ros2_driver` | https://github.com/yeyiru/dummy_ros2_driver.git |
+| `dummy_moveit_ws` | https://github.com/tonggeshuaiqiwudizuijunlang/dummy_moveit_ws.git |
