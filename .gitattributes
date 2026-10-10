@@ -1,0 +1,63 @@
+# =============================================================================
+# 换行符规范
+# =============================================================================
+#
+# 背景：本仓库在 Windows 上编辑、在 Ubuntu 22.04 上构建运行。
+# Windows 的 git 默认 core.autocrlf=true，会在检出时把 LF 转成 CRLF。
+#
+# 对 ROS 2 来说 CRLF 会真的出问题：
+#   - 脚本的 shebang 变成 "#!/usr/bin/env python3\r"
+#     → Linux 报 "bad interpreter: No such file or directory"
+#   - .launch.py / .sh 里的行继续符和解析会出错
+#   - 哪怕不出错，工作区与仓库不一致也会让 git status 报一堆虚假修改
+#
+# 规则：源码一律以 LF 存入库中，且检出时也保持 LF，两个平台行为一致。
+# 二进制文件由 git 自动识别，不要强行当文本处理（避免 .stl 被损坏）。
+# =============================================================================
+
+# 默认：自动识别文本/二进制，文本统一 LF
+* text=auto eol=lf
+
+# --- 明确的文本文件（防止被误判为二进制） ---
+*.py        text eol=lf
+*.pyi       text eol=lf
+*.xml       text eol=lf
+*.xacro     text eol=lf
+*.urdf      text eol=lf
+*.srdf      text eol=lf
+*.yaml      text eol=lf
+*.yml       text eol=lf
+*.rviz      text eol=lf
+*.json      text eol=lf
+*.md        text eol=lf linguist-documentation
+*.txt       text eol=lf
+*.cfg       text eol=lf
+*.sh        text eol=lf
+*.bash      text eol=lf
+*.cmake     text eol=lf
+CMakeLists.txt text eol=lf
+Dockerfile  text eol=lf
+.gitignore  text eol=lf
+.gitattributes text eol=lf
+
+# --- 明确的二进制文件，禁止任何转换 ---
+*.stl       binary
+*.STL       binary
+*.stp       binary
+*.step      binary
+*.dae       binary
+*.obj       binary
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.pdf       binary
+*.exe       binary
+*.dll       binary
+*.so        binary
+*.pack      binary
+*.idx       binary
+
+# --- git 自动生成的 diff/patch：绝不能被改写，否则无法再应用 ---
+*.patch     -text
+*.diff      -text
