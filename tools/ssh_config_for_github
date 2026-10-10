@@ -1,0 +1,37 @@
+# =============================================================================
+# SSH 配置 —— 解决 GitHub 22 端口被封锁
+# =============================================================================
+#
+# 症状：ssh -T git@github.com 报
+#         ssh: connect to host github.com port 22: Connection refused
+#
+# 原因：github.com:22 被网络封锁（国内网络、公司网、校园网常见）。
+#       与你的密钥、git 配置无关，纯粹是端口不通。
+#       "Connection refused" 说明 TCP 连接被主动拒绝，通常是中间设备拦截。
+#
+# 解法：GitHub 提供 443 端口的 SSH 入口 ssh.github.com，
+#       走 HTTPS 端口，防火墙通常放行。官方文档：
+#       https://docs.github.com/en/authentication/troubleshooting-ssh/using-ssh-over-the-https-port
+#
+# 安装位置：把本文件复制为 ~/.ssh/config
+#   Windows:  C:\Users\<用户名>\.ssh\config
+#   Linux:    ~/.ssh/config     并 chmod 600 ~/.ssh/config
+#
+# 本文件是纯 ASCII，避免 PowerShell 5.1 按 ANSI 解码无 BOM 文件时的乱码问题。
+# =============================================================================
+
+Host github.com
+    HostName ssh.github.com
+    Port 443
+    User git
+    # 保持长连接，避免频繁握手
+    ServerAliveInterval 30
+    ServerAliveCountMax 3
+
+# 让 ssh.github.com 也能直接使用，便于单独测试
+Host ssh.github.com
+    HostName ssh.github.com
+    Port 443
+    User git
+    ServerAliveInterval 30
+    ServerAliveCountMax 3
