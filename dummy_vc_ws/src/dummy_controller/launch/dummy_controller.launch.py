@@ -12,9 +12,9 @@ This launch file exists for two reasons:
    follow the real arm" test a single step.
 
 Usage:
-    ros2 launch dummy_ros2_driver dummy_controller.launch.py
-    ros2 launch dummy_ros2_driver dummy_controller.launch.py activate:=false
-    ros2 launch dummy_ros2_driver dummy_controller.launch.py robot_state_publisher:=false
+    ros2 launch dummy_controller dummy_controller.launch.py
+    ros2 launch dummy_controller dummy_controller.launch.py activate:=false
+    ros2 launch dummy_controller dummy_controller.launch.py robot_state_publisher:=false
 """
 import os
 

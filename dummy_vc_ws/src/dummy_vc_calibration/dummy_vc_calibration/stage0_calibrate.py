@@ -35,7 +35,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 # ---------------------------------------------------------------------------
 # Make the vendored fibre library importable.
-# dummy_ros2_driver is installed as an ament_python package, so its top level
+# dummy_controller is installed as an ament_python package, so its top level
 # (which contains dummy_cli_tool/) ends up under install/<pkg>/lib/python3.x/
 # site-packages. That directory is not on sys.path by default.
 # ---------------------------------------------------------------------------
