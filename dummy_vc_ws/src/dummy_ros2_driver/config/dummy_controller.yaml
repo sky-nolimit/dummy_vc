@@ -1,0 +1,25 @@
+# Stage 0 measured values are loaded from here.
+#
+# Every value below starts at a NEUTRAL default. Until you fill in the real
+# measured values from docs/02-阶段0标定操作手册.md, the arm will still move,
+# but the joint angles published as /joint_states will NOT match the URDF.
+# The visible symptom is: the real arm moves, but the model in RViz moves
+# differently (typically j3 off by 90 degrees, j5/j6 mirrored).
+#
+#   urdf_angle = sign * device_angle + offset
+#
+# See docs/stage0_params.yaml for the full parameter table.
+dummy_controller:
+  ros__parameters:
+    # Per-joint sign. +1.0 means "URDF positive direction == device positive".
+    # The reference project dummy_moveit_ws needed [1,1,1,1,-1,-1],
+    # but that is a different machine. Measure yours.
+    joint_sign: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+
+    # Per-joint zero offset in radians.
+    # The reference project had a +90 degree (1.5707963 rad) offset on j3.
+    joint_offset: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+    # Named poses, in URDF degrees.
+    home_joints_deg:  [0.0,  0.0,  90.0, 0.0, 0.0, 0.0]
+    reset_joints_deg: [0.0, -75.0, 180.0, 0.0, 0.0, 0.0]

@@ -7,10 +7,9 @@ from rclpy.lifecycle import State
 from rclpy.lifecycle import TransitionCallbackReturn
 from rclpy.timer import Timer
 
-from geometry_msgs.msg import PoseStamped, TransformStamped
+from geometry_msgs.msg import PoseStamped
 from trajectory_msgs.msg import JointTrajectory
 from scipy.spatial.transform import Rotation as R
-from tf2_ros import TransformBroadcaster
 from sensor_msgs.msg import JointState
 
 import numpy as np
@@ -20,21 +19,100 @@ class dummy_controller(LifecycleNode):
     def __init__(self):
         super().__init__('dummy_controller')
         self.dummy_driver = None
-        
-        # 7字位置
-        # self.ready_joints = np.array([0.0, 0.0, 90.0, 0.0, 0.0, 0.0])
+
+        # ------------------------------------------------------------------
+        # 关节名必须与 dummy2_urdf 一致，否则 robot_state_publisher 匹配不上，
+        # TF 树是死的（RViz 里机械臂不动，MoveIt 算不出正确末端位姿）。
+        #
+        # 上游原版用的是 joint_1..joint_6（下划线），URDF 用的是 dummy2_joint1..6，
+        # 两者从来没有对齐过。这是阶段 1 修的第一个问题。
+        # ------------------------------------------------------------------
+        self.joint_names = [f'dummy2_joint{i}' for i in range(1, 7)]
+
+        # ------------------------------------------------------------------
+        # 设备角度 -> URDF 关节角 的换算
+        #
+        #   urdf_angle = sign * device_angle + offset
+        #
+        # sign 与 offset 必须由阶段 0.3 实测确定，默认值 +1 / 0 只是起点。
+        # 参考项目 dummy_moveit_ws 的经验值是 j3 有 +90 度偏置、j5/j6 方向
+        # 相反，但那是另一台机器，不可直接沿用。
+        #
+        # 这两个数组会用 ROS 参数覆盖，见 declare_parameters 处。
+        # ------------------------------------------------------------------
+        self.joint_sign = [1.0] * 6
+        self.joint_offset = [0.0] * 6
+
+        # 位置参数：单位是**度**（与硬件 move_j 的约定一致）。
+        # 注意这与 URDF/MoveIt 的弧度不同，转换只在本节点边界做。
         self.home_joints = np.array([0.0, 0.0, 90.0, 0.0, 0.0, 0.0])
-        # Reset位置，收起
         self.reset_joints = np.array([0.0, -75.0, 180.0, 0.0, 0.0, 0.0])
-        self.current_joints = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-        self.current_end_pose = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-        
-        self.joint_names = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
+
+        # 内部状态统一用**弧度**（ROS 惯例）
+        self.current_joints = np.zeros(6)
+        self.current_end_pose = np.zeros(6)
+
+        # 轨迹执行
+        self._traj_executing = False
 
         self.get_logger().info("dummy_controller_node Lifecycle node constructor called")
-    
+        self.get_logger().warn(
+            "joint_sign / joint_offset are defaults (+1 / 0). "
+            "Run stage 0.3 and set them, or the arm will mirror.")
+
+    def _declare_params(self):
+        """声明并读取参数。on_configure 之后调用。"""
+        default_sign = [1.0] * 6
+        default_offset = [0.0] * 6
+        self.declare_parameter('joint_sign', default_sign)
+        self.declare_parameter('joint_offset', default_offset)
+        self.declare_parameter('home_joints_deg', [0.0, 0.0, 90.0, 0.0, 0.0, 0.0])
+        self.declare_parameter('reset_joints_deg', [0.0, -75.0, 180.0, 0.0, 0.0, 0.0])
+
+        self.joint_sign = list(self.get_parameter('joint_sign').value)
+        self.joint_offset = list(self.get_parameter('joint_offset').value)
+        self.home_joints = np.array(self.get_parameter('home_joints_deg').value)
+        self.reset_joints = np.array(self.get_parameter('reset_joints_deg').value)
+
+        if len(self.joint_sign) != 6 or len(self.joint_offset) != 6:
+            self.get_logger().error(
+                'joint_sign / joint_offset must have exactly 6 elements; '
+                'falling back to identity')
+            self.joint_sign = [1.0] * 6
+            self.joint_offset = [0.0] * 6
+
+        self.get_logger().info(f'joint_sign   = {self.joint_sign}')
+        self.get_logger().info(f'joint_offset = {self.joint_offset}')
+
+    # ----------------------------------------------------------------------
+    # 设备角度 <-> URDF 关节角
+    # ----------------------------------------------------------------------
+    def device_to_urdf(self, device_angles):
+        """设备原始角度 -> URDF 关节角（弧度）。"""
+        out = []
+        for i in range(6):
+            out.append(self.joint_sign[i] * float(device_angles[i])
+                       + self.joint_offset[i])
+        return np.array(out)
+
+    def urdf_to_device(self, urdf_angles):
+        """URDF 关节角（弧度）-> 设备原始角度。"""
+        out = []
+        for i in range(6):
+            s = self.joint_sign[i]
+            if abs(s) < 1e-12:
+                self.get_logger().error(f'joint_sign[{i}] is zero, using 1.0')
+                s = 1.0
+            out.append((float(urdf_angles[i]) - self.joint_offset[i]) / s)
+        return np.array(out)
+
+    def urdf_rad_to_device_deg(self, urdf_angles):
+        """URDF 关节角（弧度）-> 交给硬件 move_j 的角度（度）。"""
+        return np.degrees(self.urdf_to_device(urdf_angles))
+
     # ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓ Lifecycle node callback ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓
     def on_configure(self, state: State) -> TransitionCallbackReturn:
+        self._declare_params()
         self.init_dummy()
         self.home_dummy()
         # t1 = time.time()
@@ -125,8 +203,8 @@ class dummy_controller(LifecycleNode):
         # MoveIt2 / robot_state_publisher 默认订阅 /joint_states
         self.joint_pub = self.create_publisher(JointState, '/joint_states', 10)
 
-        # TF Broadcaster
-        self.tf_broadcaster = TransformBroadcaster(self)
+        # TF 不再由本节点发布：tool0 / gripper_tcp / camera_link 等全部在
+        # dummy2_urdf.xacro 里静态定义，交给 robot_state_publisher。
 
         # Timer 50ms (20Hz)，6 次硬件往返约 30~60ms，50ms 更稳妥
         self.poll_timer = self.create_timer(0.05, self.call_poll_position)
@@ -148,15 +226,22 @@ class dummy_controller(LifecycleNode):
         self.pub_current_end_pose()
 
     def current_joints_callback(self):
-        # 通过 robot.joint_N.angle 读取关节角度（返回弧度）
+        """读取设备原始关节角，换算成 URDF 关节角。
+
+        注意：设备返回的是**原始角度**（弧度），必须经过 sign/offset 换算才
+        能作为 URDF 的关节角。上游原版直接把原始值当 URDF 角度发布，所以
+        j3 会差 90 度、j5/j6 会反向。
+        """
         robot = self.dummy_driver.robot
-        j1 = robot.joint_1.angle
-        j2 = robot.joint_2.angle
-        j3 = robot.joint_3.angle
-        j4 = robot.joint_4.angle
-        j5 = robot.joint_5.angle
-        j6 = robot.joint_6.angle
-        return np.array([j1, j2, j3, j4, j5, j6])
+        raw = [
+            robot.joint_1.angle,
+            robot.joint_2.angle,
+            robot.joint_3.angle,
+            robot.joint_4.angle,
+            robot.joint_5.angle,
+            robot.joint_6.angle,
+        ]
+        return self.device_to_urdf(raw)
 
     def current_end_callback(self):
         # 设备不支持末端位姿读取，返回零值
@@ -181,58 +266,22 @@ class dummy_controller(LifecycleNode):
             self.get_logger().error(f'Parse joint error: {str(e)}')
     
     def pub_current_end_pose(self):
-        try:
-            # 设备不支持末端位姿读取，current_end_pose 全为零
-            # 只发布静态 TF（tool0, camera_frame, isaac_frame），跳过动态 base_link→joint6
-            # base_link→joint6 的 TF 应由 robot_state_publisher 根据 URDF + /joint_states 计算
-            stamp = self.get_clock().now().to_msg()
+        """不发布手写 TF。
 
-            # --- Tool0 TF (relative to joint6) ---
-            tool0_tf = TransformStamped()
-            tool0_tf.header.stamp = stamp
-            tool0_tf.header.frame_id = "joint6"
-            tool0_tf.child_frame_id = "tool0"
-            tool0_tf.transform.translation.x = 0.0
-            tool0_tf.transform.translation.y = 0.0
-            tool0_tf.transform.translation.z = 0.07
-            tool0_tf.transform.rotation.x = 0.0
-            tool0_tf.transform.rotation.y = 0.0
-            tool0_tf.transform.rotation.z = 0.0
-            tool0_tf.transform.rotation.w = 1.0
-            self.tf_broadcaster.sendTransform(tool0_tf)
+        上游原版在这里广播 joint6 -> tool0 和 joint6 -> camera_frame，
+        但 URDF 里根本没有叫 joint6 的 frame（只有 dummy2_joint6 这个**关节**
+        和 link7_v1_1 这些**链接**），相机节点的 frame_id 又是第三个名字
+        fingerprint_camera。结果是 TF 树断裂，RViz 里坐标系对不上。
 
-            # --- Camera TF (relative to joint6) ---
-            camera_tf = TransformStamped()
-            camera_tf.header.stamp = stamp
-            camera_tf.header.frame_id = "joint6"
-            camera_tf.child_frame_id = "camera_frame"
-            camera_tf.transform.translation.x = -0.04
-            camera_tf.transform.translation.y = 0.02
-            camera_tf.transform.translation.z = 0.025
-            camera_tf.transform.rotation.x = 0.0
-            camera_tf.transform.rotation.y = 0.0
-            camera_tf.transform.rotation.z = 0.0
-            camera_tf.transform.rotation.w = 1.0
-            self.tf_broadcaster.sendTransform(camera_tf)
+        阶段 1 起，tool0 / gripper_tcp / camera_link / camera_color_optical_frame
+        全部在 dummy2_urdf.xacro 里静态定义，由 robot_state_publisher 统一发布。
+        本节点只负责发 /joint_states，不再碰 TF。
 
-            # ISAAC TF
-            r = R.from_euler('z', 90, degrees=True)
-            isaac_quat = r.as_quat()
-            isaac_tf = TransformStamped()
-            isaac_tf.header.stamp = stamp
-            isaac_tf.header.frame_id = "base_link"
-            isaac_tf.child_frame_id = "isaac_frame"
-            isaac_tf.transform.translation.x = 0.0
-            isaac_tf.transform.translation.y = 0.0
-            isaac_tf.transform.translation.z = 0.0
-            isaac_tf.transform.rotation.x = isaac_quat[0]
-            isaac_tf.transform.rotation.y = isaac_quat[1]
-            isaac_tf.transform.rotation.z = isaac_quat[2]
-            isaac_tf.transform.rotation.w = isaac_quat[3]
-            self.tf_broadcaster.sendTransform(isaac_tf)
-        except Exception as e:
-            self.get_logger().error(f"Parse pose error: {str(e)}")
-    
+        如果将来需要末端位姿，正确做法是从 /joint_states 做正运动学，
+        或者直接用 tf2 查询 base_link -> gripper_tcp。
+        """
+        return
+
     def reset_pub_sub(self):
         # --- 銷毀原有 pub/sub ---
         if hasattr(self, 'pose_sub') and self.pose_sub is not None:
@@ -252,38 +301,35 @@ class dummy_controller(LifecycleNode):
             self.destroy_publisher(self.joint_pub)
             self.get_logger().info("Destroyed joint_pub")
 
-        if hasattr(self, 'tf_broadcaster') and self.tf_broadcaster is not None:
-            self.tf_broadcaster = None
-            self.get_logger().info("Destroyed tf_broadcaster")
-        
         if hasattr(self, 'poll_timer') and self.poll_timer is not None:
             self.destroy_timer(self.poll_timer)
             self.get_logger().info("Destroyed poll_timer")
     
+    def _send_named_pose(self, urdf_deg, label):
+        """把「URDF 弧度下的目标姿态」下发到硬件。
+
+        输入是按**度**表示的 URDF 关节角（home_joints / reset_joints 的格式）。
+        先转成弧度，再经 urdf_to_device 逆变换，最后由 move_j 按度下发。
+        """
+        urdf_rad = np.radians(np.asarray(urdf_deg, dtype=float))
+        device_deg = self.urdf_rad_to_device_deg(urdf_rad)
+        try:
+            self.move_joints(device_deg)
+            self.get_logger().info(
+                f'{label}: urdf_deg={np.round(np.asarray(urdf_deg, dtype=float), 2).tolist()} '
+                f'-> device_deg={np.round(device_deg, 2).tolist()}')
+        except Exception as exc:
+            self.get_logger().error(f'{label} failed: {exc}')
+
     def home_dummy(self, wait=True):
-        self.dummy_driver.robot.move_j(
-            self.home_joints[0], self.home_joints[1], self.home_joints[2],
-            self.home_joints[3], self.home_joints[4], self.home_joints[5])
-        # if wait:
-        #     # 等待到位
-        #     # self.check_joints_place(self.home_joints)
-        #     asyncio.ensure_future(self.check_joints_place(self.home_joints))
+        self._send_named_pose(self.home_joints, 'home')
 
     def stop_dummy(self):
-        self.dummy_driver.robot.move_j(
-            self.current_joints[0], self.current_joints[1], self.current_joints[2],
-            self.current_joints[3], self.current_joints[4], self.current_joints[5])
-        self.get_logger().info("Dummy Emergency Stop")
+        # current_joints 已经是 URDF 弧度，先转回度再走同一条下发路径
+        self._send_named_pose(np.degrees(self.current_joints), 'emergency stop')
 
     def reset_dummy(self, wait=True):
-        self.dummy_driver.robot.move_j(
-            self.reset_joints[0], self.reset_joints[1], self.reset_joints[2],
-            self.reset_joints[3], self.reset_joints[4], self.reset_joints[5])
-        # if wait:
-        #     # 等待到位
-        #     asyncio.ensure_future(self.check_joints_place(self.reset_joints))
-            # self.check_joints_place(self.reset_joints)
-        # self.get_logger().info("Dummy reset the position")
+        self._send_named_pose(self.reset_joints, 'reset')
 
     async def check_joints_place(self, target_joints_deg):
         # target_joints_deg 是度，current_joints 是弧度，需要统一单位比较
@@ -314,22 +360,112 @@ class dummy_controller(LifecycleNode):
         self.dummy_driver.robot.move_l(x, y, z, roll, pitch, yaw)
 
     def joints_callback(self, msg: JointTrajectory):
+        """执行一条关节轨迹。
+
+        上游原版只取 msg.points[0]，等于把整条插值路径丢掉、直接跳到终点。
+        MoveIt 规划出来的是几十个 waypoint，这样写轻则动作难看，重则瞬时
+        大角度跳变损伤减速器。
+
+        阶段 1 起按 time_from_start 节拍依次下发**全部** waypoint。
+
+        joint_names 的顺序可能与我们的关节顺序不同，必须按名字重排，
+        不能假设它们已经是 dummy2_joint1..6 的顺序。
+        """
+        if self._traj_executing:
+            self.get_logger().warn(
+                'A trajectory is already executing, ignoring the new one')
+            return
         if not msg.points:
-            self.get_logger().warn("Received JointTrajectory with no points")
+            self.get_logger().warn('Received JointTrajectory with no points')
             return
 
-        positions = msg.points[0].positions
-        if len(positions) < 6:
-            self.get_logger().warn(f"Expected 6 joint values, got {len(positions)}")
+        # 按名字重排到我们的关节顺序
+        order = self._trajectory_joint_order(msg.joint_names)
+        if order is None:
             return
-        # MoveIt2 发送的是弧度，move_j 需要度
-        joints_deg = np.degrees(np.array(positions))
-        self.move_joints(joints_deg)
+
+        self._traj_executing = True
+        try:
+            self._execute_trajectory(msg, order)
+        finally:
+            self._traj_executing = False
+
+    def _trajectory_joint_order(self, traj_names):
+        """把轨迹的关节顺序映射到本节点的顺序。
+
+        返回 order，其中 order[i] 是「本节点第 i 个关节」在轨迹里的下标。
+        名字对不上时返回 None。
+        """
+        if not traj_names:
+            # 没给名字：只能假设顺序一致
+            self.get_logger().warn(
+                'JointTrajectory has empty joint_names, assuming order matches')
+            return list(range(6))
+
+        order = []
+        for want in self.joint_names:
+            if want in traj_names:
+                order.append(traj_names.index(want))
+                continue
+            # 兼容上游命名，避免因为历史话题名直接拒绝执行
+            legacy = 'joint_' + want.replace('dummy2_joint', '')
+            if legacy in traj_names:
+                self.get_logger().warn(
+                    f'Using legacy joint name {legacy} for {want}; '
+                    'update the publisher to dummy2_jointN')
+                order.append(traj_names.index(legacy))
+                continue
+            self.get_logger().error(
+                f'JointTrajectory does not contain {want} '
+                f'(got {list(traj_names)}), refusing to execute')
+            return None
+        return order
+
+    def _execute_trajectory(self, msg, order):
+        total = len(msg.points)
+        self.get_logger().info(
+            f'Executing trajectory: {total} waypoints, '
+            f'joint order map {order}')
+
+        t_start = time.monotonic()
+        for idx, point in enumerate(msg.points):
+            if len(point.positions) < len(order):
+                self.get_logger().error(
+                    f'Waypoint {idx} has {len(point.positions)} positions, '
+                    f'need at least {len(order)}; aborting')
+                return
+
+            # 轨迹顺序 -> 本节点顺序
+            urdf_rad = np.array([point.positions[order[i]] for i in range(6)])
+
+            # 按 time_from_start 节拍等待
+            target_t = (point.time_from_start.sec
+                        + point.time_from_start.nanosec * 1e-9)
+            wait = t_start + target_t - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+
+            # URDF 弧度 -> 设备角度（含 sign/offset 逆变换）-> 度
+            device_deg = self.urdf_rad_to_device_deg(urdf_rad)
+            try:
+                self.move_joints(device_deg)
+            except Exception as exc:
+                self.get_logger().error(
+                    f'Waypoint {idx} command failed: {exc}; aborting trajectory')
+                return
+
+            if idx % 10 == 0 or idx == total - 1:
+                self.get_logger().info(
+                    f'  waypoint {idx + 1}/{total} '
+                    f't={target_t:.2f}s deg={np.round(device_deg, 2).tolist()}')
+
+        self.get_logger().info('Trajectory execution complete')
 
     def move_joints(self, joints_deg):
+        """下发关节角度（度）。"""
         self.dummy_driver.robot.move_j(joints_deg[0], joints_deg[1], joints_deg[2],
                                        joints_deg[3], joints_deg[4], joints_deg[5])
-    
+
     def off_dummy(self):
         self.dummy_driver.robot.set_enable(False)
         self.dummy_driver = None
