@@ -164,16 +164,30 @@ class Stage0Calibrate(Node):
         self.timer = self.create_timer(self.send_period, self.on_timer)
 
         # ---- connect ----
+        #
+        # IMPORTANT: dry_run only disables COMMANDING the hardware. It must
+        # still connect and read back, otherwise read-only operations such as
+        # /calib/compare_driver return a meaningless all-zero result.
+        # (That bug made the 0.3 cross-check report driver=0 device=0 for every
+        # joint, which looks like a valid measurement but is just no data.)
         self.get_logger().info('=' * 70)
-        if self.dry_run:
-            self.get_logger().warn(
-                'dry_run=True: this node will NOT command the hardware')
-        elif not _HAVE_DRIVER:
+        if not _HAVE_DRIVER:
             self.get_logger().error(f'cannot import dummy_cli_tool: {_IMPORT_ERR}')
             self.get_logger().error(
                 'run colcon build and source install/setup.bash first')
         else:
             self.connect_device()
+
+        if self.dry_run:
+            if self.robot is not None:
+                self.get_logger().warn(
+                    'dry_run=True: connected READ-ONLY. Commands are blocked, '
+                    'readback and /calib/compare_driver still work.')
+            else:
+                self.get_logger().warn(
+                    'dry_run=True: device not connected, readback unavailable. '
+                    'If dummy_controller is running it holds the fibre device; '
+                    'stop it, or use /calib/compare_driver data from the driver.')
 
         self.print_help()
         self.get_logger().info('=' * 70)
@@ -189,11 +203,18 @@ class Stage0Calibrate(Node):
         except Exception as exc:  # noqa: BLE001
             self.get_logger().error(f'find_any raised: {exc}')
             self.dev = None
+            self.get_logger().error(
+                'If dummy_controller is running it holds the fibre device. '
+                'Stop it first, or start this node with dry_run:=true and use '
+                'the driver-published /joint_states instead of direct readback.')
             return
 
         if self.dev is None:
             self.get_logger().error(
                 'device not found. Check USB connection and udev rules.')
+            self.get_logger().error(
+                'If dummy_controller is already running, it holds the device. '
+                'Only one process can own the fibre link at a time.')
             return
 
         self.robot = self.dev.robot
@@ -202,26 +223,33 @@ class Stage0Calibrate(Node):
             f'connected, serial = {getattr(self.dev, "serial_number", "?")}')
 
         # Conservative start: clamp gripper current BEFORE enabling it.
-        try:
-            self.hand.set_current_limit(self.safe_current_limit)
-            self.gripper_current_limit = self.safe_current_limit
+        # Skipped in dry_run: that mode must be strictly read-only.
+        if self.dry_run:
             self.get_logger().info(
-                f'gripper current limit set to {self.safe_current_limit}')
-        except Exception as exc:  # noqa: BLE001
-            self.get_logger().warn(f'set_current_limit failed: {exc}')
+                'dry_run: skipping set_current_limit / set_enable / homing')
+        else:
+            try:
+                self.hand.set_current_limit(self.safe_current_limit)
+                self.gripper_current_limit = self.safe_current_limit
+                self.get_logger().info(
+                    f'gripper current limit set to {self.safe_current_limit}')
+            except Exception as exc:  # noqa: BLE001
+                self.get_logger().warn(f'set_current_limit failed: {exc}')
 
-        try:
-            self.robot.set_enable(True)
-            self.hand.set_enable(True)
-            self.get_logger().info('joints and hand enabled')
-        except Exception as exc:  # noqa: BLE001
-            self.get_logger().error(f'enable failed: {exc}')
-            return
+            try:
+                self.robot.set_enable(True)
+                self.hand.set_enable(True)
+                self.get_logger().info('joints and hand enabled')
+            except Exception as exc:  # noqa: BLE001
+                self.get_logger().error(f'enable failed: {exc}')
+                return
 
         # Seed the ghost target from the real pose so nothing jumps.
+        # Works in dry_run too: this is a read, not a command.
         self.read_device()
         self.joint_target = OrderedDict(self.joint_actual)
-        self.get_logger().info('ghost target seeded from current pose')
+        if self.robot is not None:
+            self.get_logger().info('ghost target seeded from current pose')
 
     def read_device(self):
         """Read back device state. Never let an exception escape."""
@@ -497,6 +525,11 @@ class Stage0Calibrate(Node):
         """Compare driver-published joint angles against raw device angles.
 
         This is how step 0.3 gets the URDF<->device sign and unit mapping.
+
+        The arm must be at a NON-ZERO pose for this to be informative. If both
+        columns read exactly 0 for every joint, either the arm really is at a
+        singular zero pose, or (more likely) the device was not read at all:
+        check the startup log for "connected, serial = ...".
         """
         if self._last_driver_js is None:
             response.success = False
@@ -506,7 +539,16 @@ class Stage0Calibrate(Node):
 
         names = list(self._last_driver_js.name)
         pos = list(self._last_driver_js.position)
+
+        device_ok = self.robot is not None
         lines = ['driver vs device raw:']
+        if not device_ok:
+            lines.append('  WARNING: this node did NOT connect to the device,')
+            lines.append('  so the "device" column is all zeros and means')
+            lines.append('  nothing. Check startup log for a connection line.')
+        lines.append(f'  device_connected={device_ok}')
+
+        all_zero = True
         for i, jname in enumerate(URDF_JOINTS):
             drv = None
             for cand in (jname, f'joint_{i + 1}'):
@@ -514,11 +556,41 @@ class Stage0Calibrate(Node):
                     drv = pos[names.index(cand)]
                     break
             raw = self.joint_actual[jname]
+            if abs(raw) > 1e-4 or (drv is not None and abs(drv) > 1e-4):
+                all_zero = False
+
             if drv is None:
                 lines.append(f'  {jname}: driver did not publish')
-            else:
-                lines.append(f'  {jname}: driver={drv:+.5f} device={raw:+.5f} '
-                             f'diff={drv - raw:+.5f}')
+                continue
+
+            diff = drv - raw
+            note = ''
+            # A difference near +/-2*pi means the two sides wrap differently.
+            twopi = 2.0 * math.pi
+            if device_ok and abs(abs(diff) - twopi) < 0.05:
+                note = '  <-- looks like a 2*pi wrap difference'
+            elif device_ok and abs(diff) > 1e-4:
+                # if the ratio is close to -1, the sign is inverted
+                if abs(raw) > 1e-3 and abs(drv + raw) < 0.05 * abs(raw):
+                    note = '  <-- sign inverted (driver = -device)'
+                else:
+                    note = '  <-- non-zero offset'
+
+            lines.append(
+                f'  {jname}: driver={drv:+.6f} device={raw:+.6f} '
+                f'diff={diff:+.6f}{note}')
+
+        lines.append('')
+        if all_zero and device_ok:
+            lines.append('  All values are zero. This carries NO sign or')
+            lines.append('  offset information. Move the arm to a clearly')
+            lines.append('  non-zero pose (e.g. 30-45 degrees on several')
+            lines.append('  joints) and call this again.')
+        elif all_zero and not device_ok:
+            lines.append('  All zeros AND the device was never read.')
+            lines.append('  Stop dummy_controller so this node can own the')
+            lines.append('  fibre link, then start with dry_run:=true.')
+
         response.success = True
         response.message = '\n'.join(lines)
         self.get_logger().info(' | '.join(lines))
