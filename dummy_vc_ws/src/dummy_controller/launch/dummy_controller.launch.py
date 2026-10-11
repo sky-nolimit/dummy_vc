@@ -1,6 +1,6 @@
 """Bring up the Dummy arm driver together with robot_state_publisher.
 
-This launch file exists for two reasons:
+Why this launch file exists:
 
 1. The lifecycle node creates its subscriptions only in on_activate. Upstream
    has no launch file for that, so the node silently does nothing until you
@@ -8,13 +8,24 @@ This launch file exists for two reasons:
    activate transitions are emitted automatically.
 
 2. robot_state_publisher needs the URDF to compute TF from /joint_states.
-   Running it alongside the driver in one command makes the "does the model
-   follow the real arm" test a single step.
+   Running it alongside the driver makes "does the model follow the real arm"
+   a single step.
+
+3. Every calibration value is exposed as a launch argument, so you can try a
+   different value without editing the YAML and without rebuilding:
+
+       ros2 launch dummy_controller dummy_controller.launch.py \\
+         joint_offset_deg:="[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]"
+
+   This matters because ROS 2 launch does not reliably forward
+   `--ros-args -p name:=value` to a node declared with parameters=[file].
+   Explicit launch arguments are the dependable path.
 
 Usage:
     ros2 launch dummy_controller dummy_controller.launch.py
     ros2 launch dummy_controller dummy_controller.launch.py activate:=false
-    ros2 launch dummy_controller dummy_controller.launch.py robot_state_publisher:=false
+    ros2 launch dummy_controller dummy_controller.launch.py \\
+        joint_offset_deg:="[0.03, 2.03, 0.0, -0.03, 0.18, -0.03]"
 """
 import os
 
@@ -31,6 +42,37 @@ from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import LifecycleNode, Node
 
+# Defaults mirror config/dummy_controller.yaml. Keep the two in sync; the
+# checker tools/check_coord_spaces.py verifies that the YAML, the driver code
+# defaults and these values all agree.
+DEFAULTS = {
+    'joint_sign': '[1.0, 1.0, -1.0, 1.0, 1.0, 1.0]',
+    'joint_offset_deg': '[0.215, 74.572, -90.125, -0.910, -0.035, -0.040]',
+    'move_j_offset_deg': '[0.0, 0.0, 87.7, 0.0, 0.0, 0.0]',
+    'urdf_offset_deg': '[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]',
+    'home_joints_deg': '[0.0, 0.0, 90.0, 0.0, 0.0, 0.0]',
+    'reset_joints_deg': '[0.0, -75.0, 180.0, 0.0, 0.0, 0.0]',
+}
+
+DESCRIPTIONS = {
+    'joint_sign':
+        'Per-joint direction. Flip a joint to -1.0 if the model turns the '
+        'opposite way from the real arm. Order: j1..j6.',
+    'joint_offset_deg':
+        'Per-joint offset between the device ANGLE readback and the URDF '
+        'angle, in degrees. Derived from the 7-pose readback.',
+    'move_j_offset_deg':
+        'Per-joint offset between the device move_j space (what home/reset '
+        'use) and the ANGLE readback, in degrees.',
+    'urdf_offset_deg':
+        'Extra offset applied in URDF space, in degrees. Use this when the '
+        'model tracks the same direction but sits at a fixed wrong angle.',
+    'home_joints_deg':
+        'Named pose in move_j space (degrees). 7 pose.',
+    'reset_joints_deg':
+        'Named pose in move_j space (degrees). Retracted pose.',
+}
+
 
 def generate_launch_description():
     driver_share = get_package_share_directory('dummy_controller')
@@ -46,12 +88,25 @@ def generate_launch_description():
     delay_configure = 3.0
     delay_activate = 2.0
 
-    declare_activate = DeclareLaunchArgument(
-        'activate', default_value='true',
-        description='Emit configure then activate automatically')
-    declare_rsp = DeclareLaunchArgument(
-        'robot_state_publisher', default_value='true',
-        description='Start robot_state_publisher (needed for TF in RViz)')
+    actions = [
+        DeclareLaunchArgument(
+            'activate', default_value='true',
+            description='Emit configure then activate automatically'),
+        DeclareLaunchArgument(
+            'robot_state_publisher', default_value='true',
+            description='Start robot_state_publisher (needed for TF in RViz)'),
+    ]
+
+    # One launch argument per calibration value, so any of them can be tried
+    # without editing files or rebuilding.
+    for key, default in DEFAULTS.items():
+        actions.append(DeclareLaunchArgument(
+            key, default_value=default, description=DESCRIPTIONS[key]))
+
+    controller_params = [params_file]
+    controller_params.append({
+        key: LaunchConfiguration(key) for key in DEFAULTS
+    })
 
     controller = LifecycleNode(
         package='dummy_controller',
@@ -59,7 +114,7 @@ def generate_launch_description():
         name='dummy_controller',
         namespace='',
         output='screen',
-        parameters=[params_file],
+        parameters=controller_params,
     )
 
     rsp = Node(
@@ -85,9 +140,7 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('activate')),
     )
 
-    actions = [
-        declare_activate,
-        declare_rsp,
+    actions += [
         LogInfo(msg='[bringup] starting dummy_controller (lifecycle node) ...'),
         controller,
         rsp,
@@ -103,8 +156,9 @@ def generate_launch_description():
             actions=[
                 LogInfo(msg='[bringup] emitting lifecycle activate ...'),
                 activate,
-                LogInfo(msg='[bringup] if you see /joint_states below, '
-                            'the driver is live.'),
+                LogInfo(msg='[bringup] if /joint_states appears below, '
+                            'the driver is live. To inspect the pose chain '
+                            'run: python3 tools/debug_pose_chain.py'),
             ],
         ),
     ]

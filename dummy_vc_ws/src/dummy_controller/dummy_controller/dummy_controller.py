@@ -66,8 +66,8 @@ class dummy_controller(LifecycleNode):
         #
         # 这两个数组会被 ROS 参数覆盖，见 _declare_params。
         # ------------------------------------------------------------------
-        self.joint_sign = [1.0, 1.0, 1.0, 1.0, -1.0, -1.0]
-        self.joint_offset_deg = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
+        self.joint_sign = [1.0, 1.0, -1.0, 1.0, 1.0, 1.0]
+        self.joint_offset_deg = [0.215, 74.572, -90.125, -0.910, -0.035, -0.040]
 
         # 位置参数：单位是**度**，且这里的角度是 **move_j 空间**（设备侧），
         # **不是** URDF 角度。下发时直接原样交给 move_j，不做任何变换。
@@ -90,9 +90,9 @@ class dummy_controller(LifecycleNode):
 
     def _declare_params(self):
         """声明并读取参数。on_configure 之后调用。"""
-        default_sign = [1.0, 1.0, 1.0, 1.0, -1.0, -1.0]
+        default_sign = [1.0, 1.0, -1.0, 1.0, 1.0, 1.0]
         # (1) 7 姿态的 angle 回读就是该姿态的偏置（此时 URDF 应为全零）
-        default_offset_deg = [0.03, 2.03, 2.30, -0.03, 0.18, -0.03]
+        default_offset_deg = [0.215, 74.572, -90.125, -0.910, -0.035, -0.040]
         # (2) move_j 与 angle 在 j3 上差 87.70
         default_movej_offset_deg = [0.0, 0.0, 87.7, 0.0, 0.0, 0.0]
         # (3) URDF 空间里的附加偏置，默认全零。
@@ -132,8 +132,8 @@ class dummy_controller(LifecycleNode):
                 self.get_logger().error(
                     f'{name} must have exactly 6 elements, got {len(val)}; '
                     'falling back to defaults')
-                self.joint_sign = [1.0, 1.0, 1.0, 1.0, -1.0, -1.0]
-                self.joint_offset_deg = [0.03, 2.03, 2.30, -0.03, 0.18, -0.03]
+                self.joint_sign = [1.0, 1.0, -1.0, 1.0, 1.0, 1.0]
+                self.joint_offset_deg = [0.215, 74.572, -90.125, -0.910, -0.035, -0.040]
                 self.move_j_offset_deg = [0.0, 0.0, 87.7, 0.0, 0.0, 0.0]
                 self.urdf_offset_deg = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
                 break

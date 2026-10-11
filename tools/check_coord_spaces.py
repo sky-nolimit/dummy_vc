@@ -34,6 +34,8 @@ CONFIG = os.path.join(REPO, 'dummy_vc_ws', 'src', 'dummy_controller',
                       'config', 'dummy_controller.yaml')
 DRIVER = os.path.join(REPO, 'dummy_vc_ws', 'src', 'dummy_controller',
                       'dummy_controller', 'dummy_controller.py')
+LAUNCH = os.path.join(REPO, 'dummy_vc_ws', 'src', 'dummy_controller',
+                      'launch', 'dummy_controller.launch.py')
 
 # The empirical anchor that pins the whole chain down.
 # Measured with the arm in the 7 pose (calibration node, dry_run read-only).
@@ -142,6 +144,26 @@ def main():
             fail(f'{name} differs: driver={dv} config={cv}')
         else:
             ok(f'{name} matches')
+    print()
+
+    # ---- 1b. launch file defaults ---------------------------------------
+    print('1b. launch file DEFAULTS vs config')
+    if not os.path.isfile(LAUNCH):
+        fail(f'launch file not found: {LAUNCH}')
+    else:
+        ltext = open(LAUNCH, encoding='utf-8').read()
+        for key, cv in (('joint_sign', sign),
+                        ('joint_offset_deg', off),
+                        ('move_j_offset_deg', mjoff),
+                        ('urdf_offset_deg', uoff),
+                        ('home_joints_deg', home),
+                        ('reset_joints_deg', reset)):
+            m = re.search(rf"'{key}':\s*'\[([^\]]*)\]'", ltext)
+            lv = [float(v) for v in m.group(1).split(',')] if m else None
+            if not close(lv, cv):
+                fail(f'{key} differs: launch={lv} config={cv}')
+            else:
+                ok(f'{key} matches')
     print()
 
     # ---- 2. empirical anchor --------------------------------------------
