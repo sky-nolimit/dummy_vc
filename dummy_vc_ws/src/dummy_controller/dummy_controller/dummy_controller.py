@@ -66,7 +66,7 @@ class dummy_controller(LifecycleNode):
         #
         # 这两个数组会被 ROS 参数覆盖，见 _declare_params。
         # ------------------------------------------------------------------
-        self.joint_sign = [1.0] * 6
+        self.joint_sign = [1.0, 1.0, 1.0, 1.0, -1.0, -1.0]
         self.joint_offset_deg = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
 
         # 位置参数：单位是**度**，且这里的角度是 **move_j 空间**（设备侧），
@@ -95,12 +95,12 @@ class dummy_controller(LifecycleNode):
         default_offset_deg = [0.03, 2.03, 2.30, -0.03, 0.18, -0.03]
         # (2) move_j 与 angle 在 j3 上差 87.70
         default_movej_offset_deg = [0.0, 0.0, 87.7, 0.0, 0.0, 0.0]
-        # (3) URDF 空间里的附加偏置。
-        #     j3 = 180：实物在 7 姿态（URDF j3 应为 0）时，模型显示的是
-        #     "向后收起"，而模型里 j3=180 正是收起的几何，故补 180 抵消。
-        #     当模型与实物**转向相同但整体差一个固定角度**时改这里。
+        # (3) URDF 空间里的附加偏置，默认全零。
+        #     曾经把 j3 设成 180 想抵消姿态反差，方向加反了，反而把本该为 0
+        #     的值推成 180——那正是问题本身。详见 config 里的推导记录。
+        #     当模型与实物**转向相同但整体差一个固定角度**时才改这里。
         #     若模型与实物**转向相反**，应改 joint_sign 而不是这里。
-        default_urdf_offset_deg = [0.0, 0.0, 180.0, 0.0, 0.0, 0.0]
+        default_urdf_offset_deg = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         self.declare_parameter('joint_sign', default_sign)
         self.declare_parameter('joint_offset_deg', default_offset_deg)
         self.declare_parameter('move_j_offset_deg', default_movej_offset_deg)
@@ -135,7 +135,7 @@ class dummy_controller(LifecycleNode):
                 self.joint_sign = [1.0, 1.0, 1.0, 1.0, -1.0, -1.0]
                 self.joint_offset_deg = [0.03, 2.03, 2.30, -0.03, 0.18, -0.03]
                 self.move_j_offset_deg = [0.0, 0.0, 87.7, 0.0, 0.0, 0.0]
-                self.urdf_offset_deg = [0.0, 0.0, 180.0, 0.0, 0.0, 0.0]
+                self.urdf_offset_deg = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
                 break
 
         self.get_logger().info(f'joint_sign            = {self.joint_sign}')
