@@ -95,9 +95,16 @@ class dummy_controller(LifecycleNode):
         default_offset_deg = [0.03, 2.03, 2.30, -0.03, 0.18, -0.03]
         # (2) move_j 与 angle 在 j3 上差 87.70
         default_movej_offset_deg = [0.0, 0.0, 87.7, 0.0, 0.0, 0.0]
+        # (3) URDF 空间里的附加偏置。
+        #     j3 = 180：实物在 7 姿态（URDF j3 应为 0）时，模型显示的是
+        #     "向后收起"，而模型里 j3=180 正是收起的几何，故补 180 抵消。
+        #     当模型与实物**转向相同但整体差一个固定角度**时改这里。
+        #     若模型与实物**转向相反**，应改 joint_sign 而不是这里。
+        default_urdf_offset_deg = [0.0, 0.0, 180.0, 0.0, 0.0, 0.0]
         self.declare_parameter('joint_sign', default_sign)
         self.declare_parameter('joint_offset_deg', default_offset_deg)
         self.declare_parameter('move_j_offset_deg', default_movej_offset_deg)
+        self.declare_parameter('urdf_offset_deg', default_urdf_offset_deg)
         self.declare_parameter('home_joints_deg', [0.0, 0.0, 90.0, 0.0, 0.0, 0.0])
         self.declare_parameter('reset_joints_deg', [0.0, -75.0, 180.0, 0.0, 0.0, 0.0])
         # 手指行程上限（米）与夹爪全开角度，用于把 hand.angle 折算成手指位移，
@@ -110,6 +117,8 @@ class dummy_controller(LifecycleNode):
             self.get_parameter('joint_offset_deg').value)
         self.move_j_offset_deg = list(
             self.get_parameter('move_j_offset_deg').value)
+        self.urdf_offset_deg = list(
+            self.get_parameter('urdf_offset_deg').value)
         self.home_joints = np.array(self.get_parameter('home_joints_deg').value)
         self.reset_joints = np.array(self.get_parameter('reset_joints_deg').value)
         self.finger_travel_m = float(self.get_parameter('finger_travel_m').value)
@@ -117,7 +126,8 @@ class dummy_controller(LifecycleNode):
 
         for name, val in (('joint_sign', self.joint_sign),
                           ('joint_offset_deg', self.joint_offset_deg),
-                          ('move_j_offset_deg', self.move_j_offset_deg)):
+                          ('move_j_offset_deg', self.move_j_offset_deg),
+                          ('urdf_offset_deg', self.urdf_offset_deg)):
             if len(val) != 6:
                 self.get_logger().error(
                     f'{name} must have exactly 6 elements, got {len(val)}; '
@@ -125,11 +135,13 @@ class dummy_controller(LifecycleNode):
                 self.joint_sign = [1.0, 1.0, 1.0, 1.0, -1.0, -1.0]
                 self.joint_offset_deg = [0.03, 2.03, 2.30, -0.03, 0.18, -0.03]
                 self.move_j_offset_deg = [0.0, 0.0, 87.7, 0.0, 0.0, 0.0]
+                self.urdf_offset_deg = [0.0, 0.0, 180.0, 0.0, 0.0, 0.0]
                 break
 
         self.get_logger().info(f'joint_sign            = {self.joint_sign}')
         self.get_logger().info(f'joint_offset_deg     = {self.joint_offset_deg}')
         self.get_logger().info(f'move_j_offset_deg    = {self.move_j_offset_deg}')
+        self.get_logger().info(f'urdf_offset_deg      = {self.urdf_offset_deg}')
 
     # ----------------------------------------------------------------------
     # 三个坐标系的换算（改这里之前务必先读 config/dummy_controller.yaml 的说明）
@@ -144,6 +156,14 @@ class dummy_controller(LifecycleNode):
     #
     # 因此 move_j 到 URDF 是：
     #   URDF   = sign * (move_j - move_j_offset_deg - joint_offset_deg)
+    #            + urdf_offset_deg
+    #
+    # urdf_offset_deg 是**在 URDF 空间里试参数用的**，可通过 ROS 参数覆盖，
+    # 不必重新编译。用途是区分两种偏差：
+    #   sign 错    -> 实物与模型**转向相反**
+    #   offset 错  -> 实物与模型转向相同，但整体差一个固定角度
+    # 例如整体差 180 度时可临时加：
+    #   -p urdf_offset_deg:="[0,0,180,0,0,0]"
     #
     # 7 姿态实测校验：move_j j3=90 -> angle 2.30 -> URDF 0.00
     #   90 - 87.7 = 2.30      （move_j -> angle，注意是**减**）
@@ -163,7 +183,9 @@ class dummy_controller(LifecycleNode):
         """angle 空间（度）-> URDF 关节角（**度**）。"""
         shifted = [float(angle_deg[i]) - self.joint_offset_deg[i]
                    for i in range(6)]
-        return self._apply_sign(self.joint_sign, shifted)
+        signed = self._apply_sign(self.joint_sign, shifted)
+        return np.array([signed[i] + self.urdf_offset_deg[i]
+                         for i in range(6)])
 
     def angle_to_urdf(self, angle_deg):
         """angle 空间（度）-> URDF 关节角（**弧度**）。
@@ -197,8 +219,8 @@ class dummy_controller(LifecycleNode):
             s = self.joint_sign[i]
             if abs(s) < 1e-12:
                 s = 1.0
-            signed = float(urdf_deg[i]) / s
-            angle_i = signed + self.joint_offset_deg[i]
+            signed = float(urdf_deg[i]) - self.urdf_offset_deg[i]
+            angle_i = signed / s + self.joint_offset_deg[i]
             out.append(angle_i + self.move_j_offset_deg[i])
         return np.array(out)
 
