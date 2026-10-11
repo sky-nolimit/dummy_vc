@@ -27,10 +27,15 @@ def generate_launch_description():
     # ---- launch 参数 ----
     declare_dry = DeclareLaunchArgument(
         'dry_run', default_value='false',
-        description='true 则完全不下发硬件，仅用于验证节点与 RViz 配置')
+        description='true 则只读：拦截运动指令，但仍连接设备并回读。'
+                    '注意 dry_run 不会跳过设备连接。')
     declare_path = DeclareLaunchArgument(
         'device_path', default_value='usb',
         description='设备发现路径，如 usb / serial:/dev/ttyUSB0')
+    declare_timeout = DeclareLaunchArgument(
+        'device_timeout', default_value='15.0',
+        description='find_any 的超时秒数。设备被 dummy_controller 占用时会'
+                    '一直等不到，可调小以便更快看到失败。')
     declare_handmax = DeclareLaunchArgument(
         'hand_max_angle', default_value='1.0',
         description='夹爪全开对应的设备角度，阶段 0.4 实测后修正')
@@ -43,12 +48,13 @@ def generate_launch_description():
     return LaunchDescription([
         declare_dry,
         declare_path,
+        declare_timeout,
         declare_handmax,
         declare_rviz,
         declare_cur,
 
-        LogInfo(msg='阶段 0 标定：任何动作都会先在 RViz 预览，'
-                    '需调用 /calib/confirm 才会下发硬件。'),
+        LogInfo(msg='阶段 0 标定：dry_run 只拦截运动指令，不影响连接与回读。'
+                    '标定节点与 dummy_controller 不能同时持有 fibre 设备。'),
 
         Node(
             package='robot_state_publisher',
@@ -65,6 +71,7 @@ def generate_launch_description():
             output='screen',
             parameters=[{
                 'device_path': LaunchConfiguration('device_path'),
+                'device_timeout': LaunchConfiguration('device_timeout'),
                 'dry_run': LaunchConfiguration('dry_run'),
                 'hand_max_angle': LaunchConfiguration('hand_max_angle'),
                 'safe_current_limit': LaunchConfiguration('safe_current_limit'),

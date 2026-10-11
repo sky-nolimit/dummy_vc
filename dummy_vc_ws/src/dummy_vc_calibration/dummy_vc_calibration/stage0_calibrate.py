@@ -178,16 +178,28 @@ class Stage0Calibrate(Node):
         else:
             self.connect_device()
 
+        # A loud, unmissable summary. The earlier version logged the
+        # connection result inside connect_device only, so a failed connection
+        # produced no obvious signal and the all-zero readback looked like a
+        # real measurement.
+        self.get_logger().info('=' * 70)
+        if self.robot is None:
+            self._warn_no_device_once()
+            self.get_logger().error(
+                'DEVICE: NOT CONNECTED -- readback will be all zeros')
+        else:
+            self.get_logger().info(
+                f'DEVICE: CONNECTED (serial '
+                f'{getattr(self.dev, "serial_number", "?")}) '
+                f'-- readback is live')
         if self.dry_run:
-            if self.robot is not None:
-                self.get_logger().warn(
-                    'dry_run=True: connected READ-ONLY. Commands are blocked, '
-                    'readback and /calib/compare_driver still work.')
-            else:
-                self.get_logger().warn(
-                    'dry_run=True: device not connected, readback unavailable. '
-                    'If dummy_controller is running it holds the fibre device; '
-                    'stop it, or use /calib/compare_driver data from the driver.')
+            self.get_logger().warn(
+                'MODE: dry_run=True -- motion commands blocked, '
+                'readback and /calib/compare_driver work normally')
+        else:
+            self.get_logger().warn(
+                'MODE: dry_run=False -- this node CAN move the hardware')
+        self.get_logger().info('=' * 70)
 
         self.print_help()
         self.get_logger().info('=' * 70)
@@ -296,7 +308,13 @@ class Stage0Calibrate(Node):
         m.header.frame_id = 'base_link'
         m.ns = 'calib_status'
         m.id = 0
-        m.type = Marker.TEXT_VIEW_FAR_END
+        # ROS 2 does NOT have Marker.TEXT_VIEW_FAR_END (that is a ROS 1 name).
+        # The valid constants are: ARROW, CUBE, SPHERE, CYLINDER, LINE_STRIP,
+        # LINE_LIST, CUBE_LIST, SPHERE_LIST, POINTS, TEXT_VIEW_FACING, MESH,
+        # TRIANGLE_LIST, INSTANCED_LINE_LIST.
+        # TEXT_VIEW_FACING always faces the camera, which is what we want for
+        # a status readout.
+        m.type = Marker.TEXT_VIEW_FACING
         m.action = Marker.ADD
         m.pose.position.z = 0.65
         m.pose.orientation.w = 1.0
@@ -652,15 +670,45 @@ class Stage0Calibrate(Node):
 
     # =======================================================================
     def on_timer(self):
-        try:
-            if self.robot is not None:
+        """Two independent jobs: read the device, then publish display data.
+
+        They are separated on purpose. A mistake in the display code (for
+        example an invalid Marker constant) must never stop the device
+        readback, otherwise a cosmetic bug silently destroys all calibration
+        data. That is exactly what happened once: a bad marker type made the
+        timer throw every 50 ms and no device data was ever captured.
+        """
+        # --- job 1: device readback. Errors here are real problems. ---
+        if self.robot is None:
+            self._warn_no_device_once()
+        else:
+            try:
                 self.read_device()
                 half = FINGER_MAX * self.gripper_open_frac
                 self.finger_pos = [half, half]
+            except Exception as exc:  # noqa: BLE001
+                self.get_logger().error(
+                    f'device readback error: {exc}', throttle_duration_sec=5.0)
+
+        # --- job 2: display. Errors here are cosmetic, warn but continue. ---
+        try:
             self.publish_states()
         except Exception as exc:  # noqa: BLE001
-            self.get_logger().error(
-                f'timer error: {exc}', throttle_duration_sec=5.0)
+            self.get_logger().warn(
+                f'display publish error (device readback unaffected): {exc}',
+                throttle_duration_sec=10.0)
+
+    def _warn_no_device_once(self):
+        if getattr(self, '_warned_no_device', False):
+            return
+        self._warned_no_device = True
+        self.get_logger().error(
+            'No device connection: all device readback is ZERO and means '
+            'nothing. /calib/compare_driver will report device=+0.000000 for '
+            'every joint. Look for "connected, serial = ..." earlier in this '
+            'log; if it is absent the device was never opened. The usual cause '
+            'is that dummy_controller is already running and holds the fibre '
+            'link. Stop it, then restart this node.')
 
     def print_help(self):
         self.get_logger().info(
