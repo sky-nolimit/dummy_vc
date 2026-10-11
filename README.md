@@ -140,7 +140,7 @@ ls reference/dummy_moveit_ws/
 - 机械臂：6 旋转关节 + 1 固定手爪 + 2 平移手指（行程各 23 mm），关节名 `dummy2_joint1..6`
 - 硬件接口：ODrive / fibre，USB 连接，`ref_tool.find_any()` 自动发现
 - 夹爪：`robot.hand.set_angle()` / `set_enable()` / `set_current_limit()`，与关节共用同一 fibre 设备
-- 相机：深度相机（待到位），**装在末端（eye-in-hand）**
+- 相机：深度相机（待到位），**外置支架固定安装（eye-to-hand）**
 - 运行环境：Ubuntu 22.04 + ROS 2 Humble
 - 首期目标：可复现的桌面抓取 Demo（识别 → 规划 → 抓取 → 放置）
 
@@ -164,7 +164,7 @@ ls reference/dummy_moveit_ws/
 | `reference-uncommitted-2025.patch` | `dummy_moveit_ws` 的 9 文件改动（基于 `cfcee7d`） |
 | `probe_device.py.snapshot` | 该未跟踪文件的副本 |
 
-这些存档值得保留，因为其中包含**上游从未提交、也从未公开**的修复。例如 `aruco_tracker_node.py` 里把原作者自己的机器路径 `/home/hata_ros/apps/dummy_ws/...` 改成了自动查找 + 环境变量覆盖；`aruco_detector_node.py` 把 `transform_pose` 移进了 `try` 块（原代码在 TF 不可用时仍会执行并抛异常）。参考项目里的 `dummy_vision` 用的正是 `camera_color_optical_frame` + `base_link` 这条链，与本项目的 eye-in-hand 方案同路，有直接借鉴价值。
+这些存档值得保留，因为其中包含**上游从未提交、也从未公开**的修复。例如 `aruco_tracker_node.py` 里把原作者自己的机器路径 `/home/hata_ros/apps/dummy_ws/...` 改成了自动查找 + 环境变量覆盖；`aruco_detector_node.py` 把 `transform_pose` 移进了 `try` 块（原代码在 TF 不可用时仍会执行并抛异常）。参考项目里的 `dummy_vision` 用的正是 `camera_color_optical_frame` + `base_link` 这条链，与本项目的外置相机方案同路，有直接借鉴价值。
 
 **不对上游做 pull**：硬件已验证的就是当前这两个 commit，拉取更新会引入未经验证的变更。若将来确需重新获取上游，clone 地址见下方「原始来源」。
 

@@ -4,6 +4,40 @@
 <xacro:include filename="$(find dummy2_urdf_description)/urdf/materials.xacro" />
 <xacro:include filename="$(find dummy2_urdf_description)/urdf/dummy2_urdf.trans" />
 <xacro:include filename="$(find dummy2_urdf_description)/urdf/dummy2_urdf.gazebo" />
+
+<!-- ==========================================================================
+     可调参数
+     ==========================================================================
+     下面这几个值决定夹持点和相机在模型里的位置。凡是标了「实测」的，
+     都要按 docs/02-阶段0标定操作手册.md 量出来再改。
+
+     数值偏 5 mm，IK 就会把末端整体偏移 5 mm，抓取时表现为
+     「对准了但没夹住」——而且你会先怀疑视觉，浪费大量时间在后处理上。
+     ========================================================================== -->
+
+<!-- 手指伸出的方向：URDF 里手爪挂在 link7 的 +y 方向 -->
+<xacro:property name="hand_axis" value="y"/>
+
+<!-- link7 -> 两指夹持中心(指尖前端中点)，沿 hand_axis 的距离。实测 -->
+<xacro:property name="tcp_offset_y" value="0.06"/>
+
+<!-- 相机的安装参数（外置支架，eye-to-hand）定义在文件末尾的相机段落里，
+     因为那里有较长的说明。用 grep 搜 camera_offset 可以找到。 -->
+
+<!-- ==========================================================================
+     基座虚拟关节
+     ==========================================================================
+     MoveIt 需要一个能把机械臂固定到某个世界坐标系的虚拟关节。
+     固定式（而非浮动式）意味着机械臂底座在规划中不可移动。
+     ========================================================================== -->
+<link name="world"/>
+
+<joint name="world_to_base" type="fixed">
+  <origin xyz="0 0 0" rpy="0 0 0"/>
+  <parent link="world"/>
+  <child link="base_link"/>
+</joint>
+
 <link name="base_link">
   <inertial>
     <origin xyz="-2.0924404922447642e-07 0.0002265177622702009 0.038857658386839265" rpy="0 0 0"/>
@@ -282,6 +316,91 @@
   <child link="dummy_rightfiger_v1_1"/>
   <axis xyz="-1.0 0.0 -0.000761"/>
   <limit upper="0.023" lower="0.0" effort="100" velocity="100"/>
+</joint>
+
+<!-- ==========================================================================
+     末端坐标系（阶段 1 新增）
+     ==========================================================================
+     原来的 URDF 到 dummy_hand_v1_1 就结束了，没有 TCP、没有相机坐标系，
+     所以无法定义 MoveIt 的规划链，也无法把图像投到基座坐标系。
+
+     坐标链（注意：XML 注释里不能出现连续两个连字符，所以这里用箭头文字替代）
+       link7_v1_1  ->  tool0  ->  gripper_tcp
+                           ->  camera_link  ->  camera_color_optical_frame
+     ========================================================================== -->
+
+<!-- tool0：末端法兰坐标，与手爪根部重合，便于标定和参考项目对齐 -->
+<link name="tool0"/>
+
+<joint name="tool0_joint" type="fixed">
+  <origin xyz="0 0.052312 0" rpy="0 0 0"/>
+  <parent link="link7_v1_1"/>
+  <child link="tool0"/>
+</joint>
+
+<!-- gripper_tcp：抓取参考点。MoveIt 的规划链终点用这个，不用 link7。
+     偏移量必须实测：从手爪根部到两指指尖前端的中点。 -->
+<link name="gripper_tcp"/>
+
+<joint name="gripper_tcp_joint" type="fixed">
+  <origin xyz="0 ${tcp_offset_y - 0.052312} 0" rpy="0 0 0"/>
+  <parent link="tool0"/>
+  <child link="gripper_tcp"/>
+</joint>
+
+<!-- camera_link：相机本体坐标系（x 前、y 左、z 上，符合 REP-103）
+
+     相机是**外置支架固定安装**（eye-to-hand），所以这个坐标系挂在 base_link
+     下，而不是末端。这样标定只需要做一次，且不会被碰撞或更换夹爪破坏，
+     抓取过程中相机也不会被手指遮挡。
+
+     MASTER 与 FALLBACK 的关系：
+       标定完成后，base_link 到 camera_link 的变换由外部静态 TF 发布
+       （见下方说明），本文件里这个固定关节只作为**没有标定时的兜底**，
+       让你在 RViz 里至少能看到相机坐标系。
+
+       两个变换同时存在会让 TF 树出现两个 base_link 到 camera_link 的发布者，
+       tf2 会报 "TF_MULTIPLE_AUTHORITIES"。所以标定完成后必须二选一：
+         方案 A（推荐）：把标定结果填进下面这个固定关节，删掉外部静态发布
+         方案 B：给下面这个关节加条件，标定后不再展开
+       首期用方案 A，简单直接。 -->
+<xacro:property name="camera_offset_x" value="0.30"/>
+<xacro:property name="camera_offset_y" value="0.0"/>
+<xacro:property name="camera_offset_z" value="0.60"/>
+
+<!-- 相机安装姿态（度）。外置俯视支架通常是「朝下看」，
+     对应绕 x 轴 -90°；然后再绕 z 轴转一个安装偏航角。
+     这些都是标定前的估计值，手眼标定会给出准确结果。 -->
+<xacro:property name="camera_mount_roll_deg" value="180"/>
+<xacro:property name="camera_mount_pitch_deg" value="0"/>
+<xacro:property name="camera_mount_yaw_deg" value="0"/>
+
+<link name="camera_link"/>
+
+<joint name="camera_link_joint" type="fixed">
+  <origin xyz="${camera_offset_x} ${camera_offset_y} ${camera_offset_z}"
+          rpy="${camera_mount_roll_deg * pi / 180} ${camera_mount_pitch_deg * pi / 180} ${camera_mount_yaw_deg * pi / 180}"/>
+  <parent link="base_link"/>
+  <child link="camera_link"/>
+</joint>
+
+<!-- camera_color_optical_frame：光学坐标系（z 前、x 右、y 下）。
+     注意 optical frame 的轴向约定与 REP-103 不同，这是写视觉变换时最容易
+     翻车的地方：图像的 x 对应光学系的 x（右），图像的 y 对应光学系的 y（下），
+     深度对应光学系的 z（前，正值朝景物）。
+
+     RealSense 的 realsense2_camera 节点会自己发布 camera_link 到
+     camera_color_optical_frame，所以接了真实驱动后这里会被覆盖；
+     保留它是为了没有相机时 RViz 里也能看到坐标系。
+
+     rpy="-1.5707963 0 -1.5707963" 是 REP-103 -> 光学系的标准变换：
+     绕 x 转 -90° 把 z 从朝上掰到朝前，再绕 z 转 -90° 对齐 x/y。 -->
+<link name="camera_color_optical_frame"/>
+
+<joint name="camera_optical_joint" type="fixed">
+  <origin xyz="0 0 0" rpy="-1.5707963 0 -1.5707963"/>
+  <parent link="camera_link"/>
+  <child link="camera_color_optical_frame"/>
 </joint>
 
 </robot>
