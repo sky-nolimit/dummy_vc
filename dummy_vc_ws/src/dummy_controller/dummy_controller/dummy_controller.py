@@ -69,15 +69,13 @@ class dummy_controller(LifecycleNode):
         self.joint_sign = [1.0] * 6
         self.joint_offset_deg = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
 
-        # 位置参数：单位是**度**，且这里的角度是 **URDF 关节角**（不是设备角）。
-        # 下发时由 urdf_to_device() 做逆变换。
-        # 注意这与 URDF/MoveIt 的弧度不同，转换只在本节点边界做。
+        # 位置参数：单位是**度**，且这里的角度是 **move_j 空间**（设备侧），
+        # **不是** URDF 角度。下发时直接原样交给 move_j，不做任何变换。
         #
-        # home = 7 字位（上举）：URDF j3 = +75 度，j2 = 0。
-        # reset 尚未确定，暂与 home 相同：上游的 [0,-75,180,...] 里 j3=180 度
-        # 超出 URDF 限位 (-90..75)，换算到设备侧是 j3=105 度，位姿不可达。
-        self.home_joints = np.array([0.0, 0.0, 75.0, 0.0, 0.0, 0.0])
-        self.reset_joints = np.array([0.0, 0.0, 75.0, 0.0, 0.0, 0.0])
+        # 这是上游驱动里被实体机械臂验证过的值，直接复用。
+        # home = 7 姿态（手臂自肩部水平前伸），对应 URDF 空间 [0,0,0,0,0,0]。
+        self.home_joints = np.array([0.0, 0.0, 90.0, 0.0, 0.0, 0.0])
+        self.reset_joints = np.array([0.0, -75.0, 180.0, 0.0, 0.0, 0.0])
 
         # 内部状态统一用**弧度**（ROS 惯例）
         self.current_joints = np.zeros(6)
@@ -92,14 +90,16 @@ class dummy_controller(LifecycleNode):
 
     def _declare_params(self):
         """声明并读取参数。on_configure 之后调用。"""
-        default_sign = [1.0] * 6
-        # j2=-2.0 / j3=+72.7 由两次实测交叉求解，且必须同时满足限位约束。
-        # 推导过程见 config/dummy_controller.yaml 的注释。
-        default_offset_deg = [0.0, -2.0, 72.7, 0.0, 0.0, 0.0]
+        default_sign = [1.0, 1.0, 1.0, 1.0, -1.0, -1.0]
+        # (1) 7 姿态的 angle 回读就是该姿态的偏置（此时 URDF 应为全零）
+        default_offset_deg = [0.03, 2.03, 2.30, -0.03, 0.18, -0.03]
+        # (2) move_j 与 angle 在 j3 上差 87.70
+        default_movej_offset_deg = [0.0, 0.0, 87.7, 0.0, 0.0, 0.0]
         self.declare_parameter('joint_sign', default_sign)
         self.declare_parameter('joint_offset_deg', default_offset_deg)
-        self.declare_parameter('home_joints_deg', [0.0, 0.0, 75.0, 0.0, 0.0, 0.0])
-        self.declare_parameter('reset_joints_deg', [0.0, 0.0, 75.0, 0.0, 0.0, 0.0])
+        self.declare_parameter('move_j_offset_deg', default_movej_offset_deg)
+        self.declare_parameter('home_joints_deg', [0.0, 0.0, 90.0, 0.0, 0.0, 0.0])
+        self.declare_parameter('reset_joints_deg', [0.0, -75.0, 180.0, 0.0, 0.0, 0.0])
         # 手指行程上限（米）与夹爪全开角度，用于把 hand.angle 折算成手指位移，
         # 让 robot_state_publisher 能发布手指关节的 TF
         self.declare_parameter('finger_travel_m', 0.023)
@@ -108,58 +108,99 @@ class dummy_controller(LifecycleNode):
         self.joint_sign = list(self.get_parameter('joint_sign').value)
         self.joint_offset_deg = list(
             self.get_parameter('joint_offset_deg').value)
+        self.move_j_offset_deg = list(
+            self.get_parameter('move_j_offset_deg').value)
         self.home_joints = np.array(self.get_parameter('home_joints_deg').value)
         self.reset_joints = np.array(self.get_parameter('reset_joints_deg').value)
         self.finger_travel_m = float(self.get_parameter('finger_travel_m').value)
         self.hand_max_angle = float(self.get_parameter('hand_max_angle').value)
 
-        if len(self.joint_sign) != 6 or len(self.joint_offset_deg) != 6:
-            self.get_logger().error(
-                'joint_sign / joint_offset_deg must have exactly 6 elements; '
-                'falling back to defaults')
-            self.joint_sign = [1.0] * 6
-            self.joint_offset_deg = [0.0, -2.0, 72.7, 0.0, 0.0, 0.0]
+        for name, val in (('joint_sign', self.joint_sign),
+                          ('joint_offset_deg', self.joint_offset_deg),
+                          ('move_j_offset_deg', self.move_j_offset_deg)):
+            if len(val) != 6:
+                self.get_logger().error(
+                    f'{name} must have exactly 6 elements, got {len(val)}; '
+                    'falling back to defaults')
+                self.joint_sign = [1.0, 1.0, 1.0, 1.0, -1.0, -1.0]
+                self.joint_offset_deg = [0.03, 2.03, 2.30, -0.03, 0.18, -0.03]
+                self.move_j_offset_deg = [0.0, 0.0, 87.7, 0.0, 0.0, 0.0]
+                break
 
-        self.get_logger().info(f'joint_sign (deg-space) = {self.joint_sign}')
-        self.get_logger().info(
-            f'joint_offset_deg       = {self.joint_offset_deg}')
+        self.get_logger().info(f'joint_sign            = {self.joint_sign}')
+        self.get_logger().info(f'joint_offset_deg     = {self.joint_offset_deg}')
+        self.get_logger().info(f'move_j_offset_deg    = {self.move_j_offset_deg}')
 
     # ----------------------------------------------------------------------
-    # 设备角度 <-> URDF 关节角
+    # 三个坐标系的换算（改这里之前务必先读 config/dummy_controller.yaml 的说明）
     #
-    # 设备侧一律用**度**，URDF 侧一律用**弧度**。
-    # 换算只在下面的函数里发生，别在其它地方再乘一次 pi/180。
+    #   move_j 空间   robot.move_j 的角度（度）。home/reset 属于这个空间。
+    #   angle 空间    robot.joint_N.angle 的原始回读（度）。
+    #   URDF 空间     URDF / MoveIt / /joint_states（弧度）。
+    #
+    # 关系：
+    #   URDF   = sign * (angle - joint_offset_deg)
+    #   angle  = move_j - move_j_offset_deg
+    #
+    # 因此 move_j 到 URDF 是：
+    #   URDF   = sign * (move_j - move_j_offset_deg - joint_offset_deg)
+    #
+    # 7 姿态实测校验：move_j j3=90 -> angle 2.30 -> URDF 0.00
+    #   90 - 87.7 = 2.30      （move_j -> angle，注意是**减**）
+    #   2.30 - 2.30 = 0.00    （angle  -> URDF）
     # ----------------------------------------------------------------------
-    def device_to_urdf_deg(self, device_angles):
-        """设备角度（度）-> URDF 关节角（**度**）。"""
+    @staticmethod
+    def _apply_sign(sign, vals):
         out = []
         for i in range(6):
-            out.append(self.joint_sign[i] * float(device_angles[i])
-                       + self.joint_offset_deg[i])
+            s = sign[i]
+            if abs(s) < 1e-12:
+                s = 1.0
+            out.append(s * float(vals[i]))
         return np.array(out)
 
-    def device_to_urdf(self, device_angles):
-        """设备角度（度）-> URDF 关节角（**弧度**）。
+    def angle_to_urdf_deg(self, angle_deg):
+        """angle 空间（度）-> URDF 关节角（**度**）。"""
+        shifted = [float(angle_deg[i]) - self.joint_offset_deg[i]
+                   for i in range(6)]
+        return self._apply_sign(self.joint_sign, shifted)
 
-        这是 ROS 侧唯一应该使用的入口（/joint_states 需要弧度）。
+    def angle_to_urdf(self, angle_deg):
+        """angle 空间（度）-> URDF 关节角（**弧度**）。
+
+        这是 ROS 侧唯一应该使用的回读入口（/joint_states 需要弧度）。
         """
-        return np.radians(self.device_to_urdf_deg(device_angles))
+        return np.radians(self.angle_to_urdf_deg(angle_deg))
 
-    def urdf_deg_to_device_deg(self, urdf_deg):
-        """URDF 关节角（度）-> 设备角度（度）。"""
+    def movej_to_angle(self, movej_deg):
+        """move_j 空间（度）-> angle 空间（度）。"""
+        return np.array([float(movej_deg[i]) - self.move_j_offset_deg[i]
+                         for i in range(6)])
+
+    def angle_to_movej(self, angle_deg):
+        """angle 空间（度）-> move_j 空间（度）。"""
+        return np.array([float(angle_deg[i]) + self.move_j_offset_deg[i]
+                         for i in range(6)])
+
+    def movej_to_urdf(self, movej_deg):
+        """move_j 空间（度）-> URDF 关节角（**弧度**）。"""
+        return self.angle_to_urdf(self.movej_to_angle(movej_deg))
+
+    def urdf_to_movej(self, urdf_rad):
+        """URDF 关节角（弧度）-> move_j 空间（度）。
+
+        这是把 MoveIt 轨迹点转成设备指令的唯一入口。
+        """
+        urdf_deg = np.degrees(np.asarray(urdf_rad, dtype=float))
         out = []
         for i in range(6):
             s = self.joint_sign[i]
             if abs(s) < 1e-12:
-                self.get_logger().error(f'joint_sign[{i}] is zero, using 1.0')
                 s = 1.0
-            out.append((float(urdf_deg[i]) - self.joint_offset_deg[i]) / s)
+            signed = float(urdf_deg[i]) / s
+            angle_i = signed + self.joint_offset_deg[i]
+            out.append(angle_i + self.move_j_offset_deg[i])
         return np.array(out)
-
-    def urdf_to_device(self, urdf_rad):
-        """URDF 关节角（弧度）-> 设备角度（**度**）。"""
-        return self.urdf_deg_to_device_deg(
-            np.degrees(np.asarray(urdf_rad, dtype=float)))
 
     # ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓ Lifecycle node callback ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓
     def on_configure(self, state: State) -> TransitionCallbackReturn:
@@ -292,7 +333,7 @@ class dummy_controller(LifecycleNode):
             robot.joint_5.angle,
             robot.joint_6.angle,
         ]
-        return self.device_to_urdf(raw)
+        return self.angle_to_urdf(raw)
 
     def current_end_callback(self):
         # 设备不支持末端位姿读取，返回零值
@@ -395,19 +436,30 @@ class dummy_controller(LifecycleNode):
             self.destroy_timer(self.poll_timer)
             self.get_logger().info("Destroyed poll_timer")
     
-    def _send_named_pose(self, urdf_deg, label):
-        """把「URDF 弧度下的目标姿态」下发到硬件。
+    def _send_named_pose(self, movej_deg, label):
+        """把命名位姿下发到硬件。
 
-        输入是按**度**表示的 URDF 关节角（home_joints / reset_joints 的格式）。
-        先转成弧度，再经 urdf_to_device 逆变换，最后由 move_j 按度下发。
+        输入是 **move_j 空间**的角度（度），也就是 home_joints /
+        reset_joints 的格式。**直接原样交给 move_j，不做任何变换。**
+
+        为什么不做逆变换：home/reset 这些值是从上游驱动继承的，而上游
+        是把它们直接发给 move_j 的，中间没有任何换算（上游根本没有换算
+        函数）。实体机械臂已验证这些值能到达预期姿态，所以它们必然就是
+        move_j 空间的。再套一层换算反而会把姿态改错。
+
+        日志同时打印回读侧换算出的 URDF 角度，方便与 RViz 对照。
         """
-        urdf_rad = np.radians(np.asarray(urdf_deg, dtype=float))
-        device_deg = self.urdf_to_device(urdf_rad)
+        movej_deg = np.asarray(movej_deg, dtype=float)
         try:
-            self.move_joints(device_deg)
+            self.move_joints(movej_deg)
+
+            # 回读换算成 URDF 角度，仅用于日志对照
+            self.read_device()
+            urdf_deg = self.angle_to_urdf_deg(self.current_joints)
             self.get_logger().info(
-                f'{label}: urdf_deg={np.round(np.asarray(urdf_deg, dtype=float), 2).tolist()} '
-                f'-> device_deg={np.round(device_deg, 2).tolist()}')
+                f'{label}: move_j_deg={np.round(movej_deg, 2).tolist()} | '
+                f'readback angle_deg={np.round(self.current_joints, 2).tolist()} '
+                f'-> urdf_deg={np.round(urdf_deg, 2).tolist()}')
         except Exception as exc:
             self.get_logger().error(f'{label} failed: {exc}')
 
@@ -415,8 +467,13 @@ class dummy_controller(LifecycleNode):
         self._send_named_pose(self.home_joints, 'home')
 
     def stop_dummy(self):
-        # current_joints 已经是 URDF 弧度，先转回度再走同一条下发路径
-        self._send_named_pose(np.degrees(self.current_joints), 'emergency stop')
+        """急停：把当前姿态再下发一次，用于立即停止运动。
+
+        current_joints 存的是 angle 空间的回读值，直接换算到 move_j 空间即可，
+        不需要绕 URDF 一圈（绕一圈再绕回来是恒等变换，徒增出错机会）。
+        """
+        movej_deg = self.angle_to_movej(self.current_joints)
+        self._send_named_pose(movej_deg, 'emergency stop')
 
     def reset_dummy(self, wait=True):
         self._send_named_pose(self.reset_joints, 'reset')
@@ -536,9 +593,9 @@ class dummy_controller(LifecycleNode):
                 time.sleep(wait)
 
             # URDF 弧度 -> 设备角度（含 sign/offset 逆变换），单位是度
-            device_deg = self.urdf_to_device(urdf_rad)
+            movej_deg = self.urdf_to_movej(urdf_rad)
             try:
-                self.move_joints(device_deg)
+                self.move_joints(movej_deg)
             except Exception as exc:
                 self.get_logger().error(
                     f'Waypoint {idx} command failed: {exc}; aborting trajectory')
@@ -547,7 +604,7 @@ class dummy_controller(LifecycleNode):
             if idx % 10 == 0 or idx == total - 1:
                 self.get_logger().info(
                     f'  waypoint {idx + 1}/{total} '
-                    f't={target_t:.2f}s deg={np.round(device_deg, 2).tolist()}')
+                    f't={target_t:.2f}s deg={np.round(movej_deg, 2).tolist()}')
 
         self.get_logger().info('Trajectory execution complete')
 
