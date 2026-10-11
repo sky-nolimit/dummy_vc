@@ -69,10 +69,15 @@ class dummy_controller(LifecycleNode):
         self.joint_sign = [1.0] * 6
         self.joint_offset_deg = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
 
-        # 位置参数：单位是**度**（与硬件 move_j 的约定一致）。
+        # 位置参数：单位是**度**，且这里的角度是 **URDF 关节角**（不是设备角）。
+        # 下发时由 urdf_to_device() 做逆变换。
         # 注意这与 URDF/MoveIt 的弧度不同，转换只在本节点边界做。
-        self.home_joints = np.array([0.0, 0.0, 90.0, 0.0, 0.0, 0.0])
-        self.reset_joints = np.array([0.0, -75.0, 180.0, 0.0, 0.0, 0.0])
+        #
+        # home = 7 字位（上举）：URDF j3 = +75 度，j2 = 0。
+        # reset 尚未确定，暂与 home 相同：上游的 [0,-75,180,...] 里 j3=180 度
+        # 超出 URDF 限位 (-90..75)，换算到设备侧是 j3=105 度，位姿不可达。
+        self.home_joints = np.array([0.0, 0.0, 75.0, 0.0, 0.0, 0.0])
+        self.reset_joints = np.array([0.0, 0.0, 75.0, 0.0, 0.0, 0.0])
 
         # 内部状态统一用**弧度**（ROS 惯例）
         self.current_joints = np.zeros(6)
@@ -88,11 +93,13 @@ class dummy_controller(LifecycleNode):
     def _declare_params(self):
         """声明并读取参数。on_configure 之后调用。"""
         default_sign = [1.0] * 6
-        default_offset_deg = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
+        # j2=-2.0 / j3=+72.7 由两次实测交叉求解，且必须同时满足限位约束。
+        # 推导过程见 config/dummy_controller.yaml 的注释。
+        default_offset_deg = [0.0, -2.0, 72.7, 0.0, 0.0, 0.0]
         self.declare_parameter('joint_sign', default_sign)
         self.declare_parameter('joint_offset_deg', default_offset_deg)
-        self.declare_parameter('home_joints_deg', [0.0, 0.0, 90.0, 0.0, 0.0, 0.0])
-        self.declare_parameter('reset_joints_deg', [0.0, -75.0, 180.0, 0.0, 0.0, 0.0])
+        self.declare_parameter('home_joints_deg', [0.0, 0.0, 75.0, 0.0, 0.0, 0.0])
+        self.declare_parameter('reset_joints_deg', [0.0, 0.0, 75.0, 0.0, 0.0, 0.0])
         # 手指行程上限（米）与夹爪全开角度，用于把 hand.angle 折算成手指位移，
         # 让 robot_state_publisher 能发布手指关节的 TF
         self.declare_parameter('finger_travel_m', 0.023)
@@ -111,7 +118,7 @@ class dummy_controller(LifecycleNode):
                 'joint_sign / joint_offset_deg must have exactly 6 elements; '
                 'falling back to defaults')
             self.joint_sign = [1.0] * 6
-            self.joint_offset_deg = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
+            self.joint_offset_deg = [0.0, -2.0, 72.7, 0.0, 0.0, 0.0]
 
         self.get_logger().info(f'joint_sign (deg-space) = {self.joint_sign}')
         self.get_logger().info(
