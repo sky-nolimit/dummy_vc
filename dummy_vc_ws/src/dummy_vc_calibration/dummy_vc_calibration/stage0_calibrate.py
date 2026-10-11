@@ -104,7 +104,9 @@ class Stage0Calibrate(Node):
         self.declare_parameter('safe_current_limit', 1.0)   # conservative
         self.declare_parameter('dry_run', False)
         # Full-open gripper angle in device units. Replace after step 0.4.
-        self.declare_parameter('hand_max_angle', 1.0)
+        # Gripper full-open angle in device units, which are DEGREES.
+        # Confirmed by measurement: the arm's joint readback is in degrees.
+        self.declare_parameter('hand_max_angle', 90.0)
 
         self.device_path = self.get_parameter('device_path').value
         self.device_timeout = self.get_parameter('device_timeout').value

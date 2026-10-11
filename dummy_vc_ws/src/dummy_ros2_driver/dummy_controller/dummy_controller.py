@@ -35,22 +35,39 @@ class dummy_controller(LifecycleNode):
         # 两指各自的行程上限（米），来自 URDF 的 limit upper
         self.finger_travel_m = 0.023
 
-        # 夹爪全开对应的设备角度。标定前用占位值，只影响 RViz 里手指张开幅度
-        self.hand_max_angle = 1.0
+        # 夹爪全开对应的设备角度（**度**）。标定前用占位值，
+        # 只影响 RViz 里手指张开的幅度，不影响 TF 连通性。
+        self.hand_max_angle = 90.0
 
         # ------------------------------------------------------------------
         # 设备角度 -> URDF 关节角 的换算
         #
-        #   urdf_angle = sign * device_angle + offset
+        # 单位约定（已实测确认）：
+        #   robot.joint_N.angle        单位是**度**
+        #   robot.move_j(...)          单位是**度**
+        #   robot.joint_N.set_position 单位是**度**
+        #   URDF / MoveIt / robot_state_publisher  单位是**弧度**
         #
-        # sign 与 offset 必须由阶段 0.3 实测确定，默认值 +1 / 0 只是起点。
-        # 参考项目 dummy_moveit_ws 的经验值是 j3 有 +90 度偏置、j5/j6 方向
-        # 相反，但那是另一台机器，不可直接沿用。
+        # 实测依据：手动把机械臂摆到接近 7 字位时回读为
+        #   [-0.14, 2.03, 2.30, -2.93, -2.32, 5.18]
+        # 这些值作为「度」完全合理，作为「弧度」则远超关节行程。
+        # 上游驱动把设备角度直接当弧度发布，于是 RViz 里的模型放大了
+        # 180/pi ≈ 57 倍——这正是「模型转得比实物大得多」的原因。
         #
-        # 这两个数组会用 ROS 参数覆盖，见 declare_parameters 处。
+        # 换算式（统一在**度**下计算，最后再转弧度）：
+        #   urdf_deg = sign * device_deg + offset_deg
+        #
+        # offset_deg 是结构性零位偏置。已知 j3 需要约 +90 度：设备的 j3
+        # 零位对应 URDF 的 0 度（大臂竖直向下），而 7 字位在 URDF 里是
+        # +90 度，设备回读却只有 2.3 度。
+        #
+        # sign 用来处理电机装配方向。参考项目 dummy_moveit_ws 用
+        # [1,1,1,1,-1,-1]，即 j5/j6 反向。
+        #
+        # 这两个数组会被 ROS 参数覆盖，见 _declare_params。
         # ------------------------------------------------------------------
         self.joint_sign = [1.0] * 6
-        self.joint_offset = [0.0] * 6
+        self.joint_offset_deg = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
 
         # 位置参数：单位是**度**（与硬件 move_j 的约定一致）。
         # 注意这与 URDF/MoveIt 的弧度不同，转换只在本节点边界做。
@@ -65,65 +82,77 @@ class dummy_controller(LifecycleNode):
         self._traj_executing = False
 
         self.get_logger().info("dummy_controller_node Lifecycle node constructor called")
-        self.get_logger().warn(
-            "joint_sign / joint_offset are defaults (+1 / 0). "
-            "Run stage 0.3 and set them, or the arm will mirror.")
+        self.get_logger().info(
+            f'joint_sign={self.joint_sign} joint_offset_deg={self.joint_offset_deg}')
 
     def _declare_params(self):
         """声明并读取参数。on_configure 之后调用。"""
         default_sign = [1.0] * 6
-        default_offset = [0.0] * 6
+        default_offset_deg = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
         self.declare_parameter('joint_sign', default_sign)
-        self.declare_parameter('joint_offset', default_offset)
+        self.declare_parameter('joint_offset_deg', default_offset_deg)
         self.declare_parameter('home_joints_deg', [0.0, 0.0, 90.0, 0.0, 0.0, 0.0])
         self.declare_parameter('reset_joints_deg', [0.0, -75.0, 180.0, 0.0, 0.0, 0.0])
         # 手指行程上限（米）与夹爪全开角度，用于把 hand.angle 折算成手指位移，
         # 让 robot_state_publisher 能发布手指关节的 TF
         self.declare_parameter('finger_travel_m', 0.023)
-        self.declare_parameter('hand_max_angle', 1.0)
+        self.declare_parameter('hand_max_angle', 90.0)
 
         self.joint_sign = list(self.get_parameter('joint_sign').value)
-        self.joint_offset = list(self.get_parameter('joint_offset').value)
+        self.joint_offset_deg = list(
+            self.get_parameter('joint_offset_deg').value)
         self.home_joints = np.array(self.get_parameter('home_joints_deg').value)
         self.reset_joints = np.array(self.get_parameter('reset_joints_deg').value)
         self.finger_travel_m = float(self.get_parameter('finger_travel_m').value)
         self.hand_max_angle = float(self.get_parameter('hand_max_angle').value)
 
-        if len(self.joint_sign) != 6 or len(self.joint_offset) != 6:
+        if len(self.joint_sign) != 6 or len(self.joint_offset_deg) != 6:
             self.get_logger().error(
-                'joint_sign / joint_offset must have exactly 6 elements; '
-                'falling back to identity')
+                'joint_sign / joint_offset_deg must have exactly 6 elements; '
+                'falling back to defaults')
             self.joint_sign = [1.0] * 6
-            self.joint_offset = [0.0] * 6
+            self.joint_offset_deg = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
 
-        self.get_logger().info(f'joint_sign   = {self.joint_sign}')
-        self.get_logger().info(f'joint_offset = {self.joint_offset}')
+        self.get_logger().info(f'joint_sign (deg-space) = {self.joint_sign}')
+        self.get_logger().info(
+            f'joint_offset_deg       = {self.joint_offset_deg}')
 
     # ----------------------------------------------------------------------
     # 设备角度 <-> URDF 关节角
+    #
+    # 设备侧一律用**度**，URDF 侧一律用**弧度**。
+    # 换算只在下面的函数里发生，别在其它地方再乘一次 pi/180。
     # ----------------------------------------------------------------------
-    def device_to_urdf(self, device_angles):
-        """设备原始角度 -> URDF 关节角（弧度）。"""
+    def device_to_urdf_deg(self, device_angles):
+        """设备角度（度）-> URDF 关节角（**度**）。"""
         out = []
         for i in range(6):
             out.append(self.joint_sign[i] * float(device_angles[i])
-                       + self.joint_offset[i])
+                       + self.joint_offset_deg[i])
         return np.array(out)
 
-    def urdf_to_device(self, urdf_angles):
-        """URDF 关节角（弧度）-> 设备原始角度。"""
+    def device_to_urdf(self, device_angles):
+        """设备角度（度）-> URDF 关节角（**弧度**）。
+
+        这是 ROS 侧唯一应该使用的入口（/joint_states 需要弧度）。
+        """
+        return np.radians(self.device_to_urdf_deg(device_angles))
+
+    def urdf_deg_to_device_deg(self, urdf_deg):
+        """URDF 关节角（度）-> 设备角度（度）。"""
         out = []
         for i in range(6):
             s = self.joint_sign[i]
             if abs(s) < 1e-12:
                 self.get_logger().error(f'joint_sign[{i}] is zero, using 1.0')
                 s = 1.0
-            out.append((float(urdf_angles[i]) - self.joint_offset[i]) / s)
+            out.append((float(urdf_deg[i]) - self.joint_offset_deg[i]) / s)
         return np.array(out)
 
-    def urdf_rad_to_device_deg(self, urdf_angles):
-        """URDF 关节角（弧度）-> 交给硬件 move_j 的角度（度）。"""
-        return np.degrees(self.urdf_to_device(urdf_angles))
+    def urdf_to_device(self, urdf_rad):
+        """URDF 关节角（弧度）-> 设备角度（**度**）。"""
+        return self.urdf_deg_to_device_deg(
+            np.degrees(np.asarray(urdf_rad, dtype=float)))
 
     # ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓ Lifecycle node callback ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓
     def on_configure(self, state: State) -> TransitionCallbackReturn:
@@ -366,7 +395,7 @@ class dummy_controller(LifecycleNode):
         先转成弧度，再经 urdf_to_device 逆变换，最后由 move_j 按度下发。
         """
         urdf_rad = np.radians(np.asarray(urdf_deg, dtype=float))
-        device_deg = self.urdf_rad_to_device_deg(urdf_rad)
+        device_deg = self.urdf_to_device(urdf_rad)
         try:
             self.move_joints(device_deg)
             self.get_logger().info(
@@ -499,8 +528,8 @@ class dummy_controller(LifecycleNode):
             if wait > 0:
                 time.sleep(wait)
 
-            # URDF 弧度 -> 设备角度（含 sign/offset 逆变换）-> 度
-            device_deg = self.urdf_rad_to_device_deg(urdf_rad)
+            # URDF 弧度 -> 设备角度（含 sign/offset 逆变换），单位是度
+            device_deg = self.urdf_to_device(urdf_rad)
             try:
                 self.move_joints(device_deg)
             except Exception as exc:

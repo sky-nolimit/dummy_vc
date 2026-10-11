@@ -1,26 +1,46 @@
-# Stage 0 measured values are loaded from here.
+# 阶段 0 实测参数。数值由 docs/02-阶段0标定操作手册.md 的流程确定。
 #
-# Every value below starts at a NEUTRAL default. Until you fill in the real
-# measured values from docs/02-阶段0标定操作手册.md, the arm will still move,
-# but the joint angles published as /joint_states will NOT match the URDF.
-# The visible symptom is: the real arm moves, but the model in RViz moves
-# differently (typically j3 off by 90 degrees, j5/j6 mirrored).
+# ---------------------------------------------------------------------------
+# 单位约定（已实测确认，不要再猜）
+# ---------------------------------------------------------------------------
+#   设备侧（robot.joint_N.angle / move_j / set_position）  一律是**度**
+#   ROS 侧（URDF / MoveIt / robot_state_publisher）        一律是**弧度**
 #
-#   urdf_angle = sign * device_angle + offset
+#   实测依据：手动把机械臂摆到接近 7 字位时，设备回读为
+#     [-0.14, 2.03, 2.30, -2.93, -2.32, 5.18]
+#   作为「度」完全合理，作为「弧度」远超关节行程。
+#   上游驱动把设备角度直接当弧度发给 robot_state_publisher，
+#   于是 RViz 里的模型放大了 180/pi ≈ 57 倍。
 #
-# See docs/stage0_params.yaml for the full parameter table.
+# ---------------------------------------------------------------------------
+# 换算式
+# ---------------------------------------------------------------------------
+#   urdf_deg = sign * device_deg + offset_deg
+#   urdf_rad = radians(urdf_deg)          <- 发布给 /joint_states 的形态
+#
+#   offset_deg 是**度**，不是弧度。
+# ---------------------------------------------------------------------------
 dummy_controller:
   ros__parameters:
-    # Per-joint sign. +1.0 means "URDF positive direction == device positive".
-    # The reference project dummy_moveit_ws needed [1,1,1,1,-1,-1],
-    # but that is a different machine. Measure yours.
+    # 每个关节的符号。+1.0 表示「URDF 正方向 == 设备正方向」。
+    #
+    # 参考项目 dummy_moveit_ws 用的是 [1,1,1,1,-1,-1]，即 j5/j6 反向，
+    # 但那是另一台机器，不能直接照搬。验证方法：启动 driver + RViz，
+    # 用手慢速掰动某一个关节，看 RViz 里模型是否朝同一方向转。
+    # 若反向，把对应位置改成 -1.0。
     joint_sign: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 
-    # Per-joint zero offset in radians.
-    # The reference project had a +90 degree (1.5707963 rad) offset on j3.
-    joint_offset: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # 每个关节的零位偏置，**单位是度**。
+    #
+    # j3 的 90 度是有依据的：设备的 j3 零位对应 URDF 的 0 度
+    # （大臂竖直向下），而 7 字位在 URDF 里是 +90 度，设备回读却只有
+    # 2.3 度左右。其余关节在 7 字位下回读都在 ±3 度以内，属于手摆误差，
+    # 因此先置 0。
+    #
+    # 若模型整体有固定角度偏差，改这里对应的数字即可。
+    joint_offset_deg: [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
 
-    # Named poses, in URDF degrees.
+    # 命名位姿，单位是 URDF **度**。
     home_joints_deg:  [0.0,  0.0,  90.0, 0.0, 0.0, 0.0]
     reset_joints_deg: [0.0, -75.0, 180.0, 0.0, 0.0, 0.0]
 
@@ -36,6 +56,6 @@ dummy_controller:
     # 单指行程上限（米），与 URDF 的 limit upper 一致
     finger_travel_m: 0.023
 
-    # 夹爪全开对应的设备角度。阶段 0.4 实测后替换。
+    # 夹爪全开对应的设备角度（度）。阶段 0.4 实测后替换。
     # 填错只是让 RViz 里的手指开合幅度不对，不会导致 TF 断裂。
-    hand_max_angle: 1.0
+    hand_max_angle: 90.0
