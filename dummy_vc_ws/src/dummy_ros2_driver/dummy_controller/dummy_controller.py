@@ -29,6 +29,15 @@ class dummy_controller(LifecycleNode):
         # ------------------------------------------------------------------
         self.joint_names = [f'dummy2_joint{i}' for i in range(1, 7)]
 
+        # 手指关节必须和主关节一起发布，否则这两段 TF 永远缺失
+        self.finger_joint_names = ['dummy2_finger_joint1', 'dummy2_finger_joint2']
+
+        # 两指各自的行程上限（米），来自 URDF 的 limit upper
+        self.finger_travel_m = 0.023
+
+        # 夹爪全开对应的设备角度。标定前用占位值，只影响 RViz 里手指张开幅度
+        self.hand_max_angle = 1.0
+
         # ------------------------------------------------------------------
         # 设备角度 -> URDF 关节角 的换算
         #
@@ -68,11 +77,17 @@ class dummy_controller(LifecycleNode):
         self.declare_parameter('joint_offset', default_offset)
         self.declare_parameter('home_joints_deg', [0.0, 0.0, 90.0, 0.0, 0.0, 0.0])
         self.declare_parameter('reset_joints_deg', [0.0, -75.0, 180.0, 0.0, 0.0, 0.0])
+        # 手指行程上限（米）与夹爪全开角度，用于把 hand.angle 折算成手指位移，
+        # 让 robot_state_publisher 能发布手指关节的 TF
+        self.declare_parameter('finger_travel_m', 0.023)
+        self.declare_parameter('hand_max_angle', 1.0)
 
         self.joint_sign = list(self.get_parameter('joint_sign').value)
         self.joint_offset = list(self.get_parameter('joint_offset').value)
         self.home_joints = np.array(self.get_parameter('home_joints_deg').value)
         self.reset_joints = np.array(self.get_parameter('reset_joints_deg').value)
+        self.finger_travel_m = float(self.get_parameter('finger_travel_m').value)
+        self.hand_max_angle = float(self.get_parameter('hand_max_angle').value)
 
         if len(self.joint_sign) != 6 or len(self.joint_offset) != 6:
             self.get_logger().error(
@@ -248,23 +263,62 @@ class dummy_controller(LifecycleNode):
         # 如需末端位姿，需在此处添加正运动学计算
         return np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 
+    def current_finger_positions(self):
+        """两个手指的 prismatic 位置（米）。
+
+        robot_state_publisher 只对**在 /joint_states 里收到位置**的关节发布 TF。
+        手指关节如果一直不发布，dummy_hand_v1_1 -> dummy_leftfinger_v1_1 和
+        -> dummy_rightfiger_v1_1 这两段变换就永远缺失，RViz 会报
+        "No transform from [dummy_leftfinger_v1_1] to [base_link]"。
+
+        当前还没有夹爪控制接口（阶段 3 做），所以这里只**回读** hand.angle
+        并按下面的映射折算成手指位移，先让 TF 树完整。
+
+        finger_travel_m = 0.023 m 是两个手指各自的行程上限（来自 URDF）。
+        hand_max_angle 是夹爪全开对应的设备角度，标定前用占位值，
+        只影响 RViz 里手指张开的幅度，不影响 TF 树的连通性。
+        """
+        # TODO(阶段 3)：接上 hand.set_angle 的控制闭环后，这里改为发布
+        # 实际指令值而不是回读值。
+        try:
+            angle = float(getattr(self.dummy_driver.robot.hand, 'angle', 0.0))
+        except Exception as exc:
+            self.get_logger().warn(
+                f'cannot read hand angle: {exc}', throttle_duration_sec=5.0)
+            angle = 0.0
+
+        max_angle = self.hand_max_angle
+        if abs(max_angle) < 1e-9:
+            frac = 0.0
+        else:
+            frac = max(0.0, min(1.0, angle / max_angle))
+
+        travel = self.finger_travel_m * frac
+        return travel, travel
+
     def pub_current_joints(self):
         try:
+            left, right = self.current_finger_positions()
+
             joint_state = JointState()
             joint_state.header.stamp = self.get_clock().now().to_msg()
-            joint_state.name = self.joint_names
-            joint_state.position = self.current_joints.tolist()
+            # 手指关节必须一起发布，否则这两段 TF 缺失（见方法上方说明）
+            joint_state.name = list(self.joint_names) + list(self.finger_joint_names)
+            joint_state.position = list(self.current_joints) + [left, right]
+            joint_state.velocity = [0.0] * len(joint_state.name)
 
             self.joint_pub.publish(joint_state)
 
             self.get_logger().info(
                 f'Publish JPOS: j1: {self.current_joints[0]:.2f}, j2: {self.current_joints[1]:.2f}, '
                 f'j3: {self.current_joints[2]:.2f}, j4: {self.current_joints[3]:.2f}, '
-                f'j5: {self.current_joints[4]:.2f}, j6: {self.current_joints[5]:.2f}'
+                f'j5: {self.current_joints[4]:.2f}, j6: {self.current_joints[5]:.2f}, '
+                f'fingers: {left:.4f}/{right:.4f}',
+                throttle_duration_sec=1.0
             )
         except Exception as e:
             self.get_logger().error(f'Parse joint error: {str(e)}')
-    
+
     def pub_current_end_pose(self):
         """不发布手写 TF。
 

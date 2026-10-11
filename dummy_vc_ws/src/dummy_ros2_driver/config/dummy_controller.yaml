@@ -23,3 +23,19 @@ dummy_controller:
     # Named poses, in URDF degrees.
     home_joints_deg:  [0.0,  0.0,  90.0, 0.0, 0.0, 0.0]
     reset_joints_deg: [0.0, -75.0, 180.0, 0.0, 0.0, 0.0]
+
+    # ---- 手指 / 夹爪 ----------------------------------------------------
+    # 这两个值只影响 RViz 里两根手指张开的幅度，不影响 TF 树的连通性。
+    #
+    # 手指关节必须和主关节一起发布到 /joint_states，否则
+    # dummy_hand_v1_1 -> dummy_leftfinger_v1_1 / -> dummy_rightfiger_v1_1
+    # 这两段 TF 永远缺失，RViz 会报
+    #   No transform from [dummy_leftfinger_v1_1] to [base_link]
+    # 驱动已强制发布，这里只调折算比例。
+
+    # 单指行程上限（米），与 URDF 的 limit upper 一致
+    finger_travel_m: 0.023
+
+    # 夹爪全开对应的设备角度。阶段 0.4 实测后替换。
+    # 填错只是让 RViz 里的手指开合幅度不对，不会导致 TF 断裂。
+    hand_max_angle: 1.0
