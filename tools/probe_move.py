@@ -136,7 +136,8 @@ def main():
 
     print('=' * 62)
     if moved[idx] < 0.5:
-        print('RESULT: the device ACCEPTED the command and did NOT move.')
+        print('RESULT: FAIL -- the device ACCEPTED the command and did NOT')
+        print('        move. This is NOT a pass: motion is not happening.')
         print()
         print('  The command path is fine, so the fault is in the device or')
         print('  its power stage, not in this project\'s code. Things to check:')
