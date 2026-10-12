@@ -20,6 +20,8 @@ Usage:
     python tools/selftest_conversion.py --sign -1,1,1,1,1,1
 """
 import argparse
+import contextlib
+import io
 import math
 import os
 import re
@@ -27,6 +29,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
+sys.path.insert(0, HERE)
 CONFIG = os.path.join(REPO, 'dummy_vc_ws', 'src', 'dummy_controller',
                       'config', 'dummy_controller.yaml')
 DRIVER = os.path.join(REPO, 'dummy_vc_ws', 'src', 'dummy_controller',
@@ -41,6 +44,13 @@ JOINTS = [f'dummy2_joint{i}' for i in range(1, 7)]
 ANGLE_7POSE = [0.215, 74.572, -91.474, -0.910, -0.035, -0.040]
 MOVEJ_7POSE = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
 URDF_7POSE = [0.0] * 6
+
+# Retracted (power-off) pose: the device reports approximately zero on every
+# channel, so the URDF angles there are sign * (0 - offset).
+ANGLE_RETRACT = [0.0] * 6
+
+XACRO = os.path.join(REPO, 'dummy_vc_ws', 'src', 'dummy2_urdf', 'urdf',
+                     'dummy2_urdf.xacro')
 
 
 def get_list(text, key, default=None):
@@ -136,6 +146,54 @@ def main():
           tol=1e-6)
     check('angle_7pose -> move_j == [0,0,90,...]', u2m(a2u(ANGLE_7POSE)),
           MOVEJ_7POSE, tol=1e-6)
+    print()
+
+    # ---- 1b. retracted pose geometry ------------------------------------
+    #
+    # The retracted (power-off) pose must FOLD: the forearm comes back along
+    # the upper arm rather than the arm sticking straight out. This is the
+    # only independent check on the SIGNS, because the retracted device
+    # readback is approximately all zeros, so
+    #     urdf_retract[i] = sign[i] * (0 - offset[i])
+    # and a wrong sign flips a joint about the anchor without breaking
+    # section 1 above. Distances alone do not settle it -- a mirrored fold is
+    # equally "compact" -- so the segment directions are reported too.
+    print('1b. retracted pose folds back on itself')
+    urdf_r = a2u(ANGLE_RETRACT)
+    print(f'  computed URDF = {[round(v, 3) for v in urdf_r]}')
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            import fk_dummy
+            links, joints = fk_dummy.parse_model(XACRO)
+        rev = sorted([j for j in joints
+                      if j['type'] in ('revolute', 'continuous')],
+                     key=lambda j: j['name'])
+        names = [j['name'] for j in rev]
+        angles = {names[i]: math.radians(urdf_r[i]) for i in range(6)}
+        pts, T = fk_dummy.fk(joints, 'gripper_tcp', angles)
+        sh, el, wr = pts['link2_3_v4_1'], pts['link4_v3_1'], pts['link7_v1_1']
+
+        def sang(p, q):
+            return math.degrees(math.atan2(q[2] - p[2], q[1] - p[1]))
+
+        upper, fore = sang(sh, el), sang(el, wr)
+        between = (fore - upper + 180.0) % 360.0 - 180.0
+        reach = math.hypot(T[0][3], T[1][3])
+        print(f'  upper arm {upper:+7.1f} deg, forearm {fore:+7.1f} deg')
+        print(f'  angle between segments = {between:+7.1f} deg')
+        print(f'  tip {reach:.4f} m from the base axis, '
+              f'height {T[2][3]:+.4f} m')
+        # A fold means the segments are close to antiparallel.
+        folded = abs(between) > 140.0
+        print(f'  [{"ok  " if folded else "FAIL"}] segments are near '
+              'antiparallel (folded)')
+        if not folded:
+            failures.append(
+                f'retracted pose is not folded: segments differ by only '
+                f'{between:+.1f} deg, so a joint_sign is probably wrong')
+    except Exception as exc:  # noqa: BLE001
+        print(f'  [skip] forward kinematics unavailable: {exc}')
+        print('         install pitch on the Linux side to enable this check')
     print()
 
     # ---- 2. round trips -------------------------------------------------

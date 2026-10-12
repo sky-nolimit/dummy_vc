@@ -16,17 +16,17 @@ Dummy_vc/
 ├── dummy_vc_ws/           ★ 唯一的 ROS 2 工作区，所有构建在这里发生
 │   └── src/
 │       ├── dummy2_urdf/           机械臂模型（URDF/Xacro + STL）—— 唯一模型来源
-│       ├── dummy_ros2_driver/     ROS 2 控制器（lifecycle 节点 + fibre 驱动）—— 唯一硬件通道
+│       ├── dummy_controller/      ROS 2 控制器（lifecycle 节点 + fibre 驱动）—— 唯一硬件通道
 │       └── dummy_vc_calibration/  阶段 0 硬件标定节点（预览-确认-执行）
 │
-├── docs/                  方案、参数表、操作手册
+├── docs/                  方案与操作手册
 │   ├── 01-视觉抓取方案.md          完整技术方案（分阶段计划与风险清单）
-│   ├── 02-阶段0标定操作手册.md      阶段 0 的逐步操作指引
-│   └── stage0_params.yaml          实测参数表模板（待填写，是后续代码的输入）
+│   └── 02-阶段0标定操作手册.md      阶段 0 的逐步操作指引
 │
-├── tools/                 不依赖 ROS 的独立工具脚本
+├── tools/                 不依赖 ROS 的独立工具脚本（索引见 tools/README.md）
 │   ├── check_syntax.py            全仓库 Python 语法检查
-│   └── check_encoding.py          编码 / BOM / mojibake 检查
+│   ├── check_encoding.py          编码 / BOM / mojibake 检查
+│   └── selftest_conversion.py     坐标换算 + 标定自测（改了换算必跑）
 │
 └── reference/             只读参考资料，永不参与构建
     ├── dummy_moveit_ws/           参考项目（他人的 MoveIt 工作空间）
@@ -49,7 +49,7 @@ Dummy_vc/
 | 项目 | 定位 | 处置 |
 |---|---|---|
 | `dummy2_urdf` | 机械臂描述文件 | **采用** → `dummy_vc_ws/src/dummy2_urdf/` |
-| `dummy_ros2_driver` | ROS 2 控制器 | **采用** → `dummy_vc_ws/src/dummy_ros2_driver/` |
+| `dummy_ros2_driver` | ROS 2 控制器 | **采用** → `dummy_vc_ws/src/dummy_controller/`（仓库名沿用上游，本地目录已改名） |
 | `dummy_moveit_ws` | 他人的 MoveIt2 工作空间 | **仅参考** → `reference/dummy_moveit_ws/` |
 
 ### 为什么参考项目必须移出工作区
@@ -138,14 +138,18 @@ ls reference/dummy_moveit_ws/
 
 ## 工具
 
-`tools/` 下有 20 多个检查与分析脚本，索引见 [tools/README.md](tools/README.md)。
+`tools/` 下有 17 个检查与分析脚本，全部索引见 [tools/README.md](tools/README.md)。
 最常用的三个：
 
 ```bash
 python tools/check_syntax.py            # 改完代码必跑
-python tools/selftest_conversion.py     # 改坐标换算必跑
+python tools/selftest_conversion.py     # 改坐标换算/标定必跑
 python tools/debug_pose_chain.py        # 需要 ROS；看模型此刻是什么姿态
 ```
+
+`selftest_conversion.py` 会校验锚点、收缩姿态折叠几何、往返恒等，以及
+**配置文件 / 驱动代码 / launch 三处默认值是否一致**。最后一项尤其重要——
+这三处曾经各自漂移，导致下发角度错了几十度而实物完全不动。
 
 ## 编码注意事项
 
