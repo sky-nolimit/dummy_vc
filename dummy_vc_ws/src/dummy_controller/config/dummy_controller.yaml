@@ -91,15 +91,31 @@ dummy_controller:
     reset_joints_deg: [0.0, -75.0, 180.0, 0.0, 0.0, 0.0]
 
     # ---- 手指 / 夹爪 ----------------------------------------------------
-    # 这两个值只影响 RViz 里两根手指张开的幅度，不影响 TF 树的连通性。
-    #
     # 手指关节必须和主关节一起发布到 /joint_states，否则
     # dummy_hand_v1_1 -> dummy_leftfinger_v1_1 / -> dummy_rightfiger_v1_1
     # 这两段 TF 永远缺失，RViz 会报
     #   No transform from [dummy_leftfinger_v1_1] to [base_link]
+    #
+    # 夹爪指令接口（std_msgs/Float64）：
+    #   /dummy_gripper/command   0.0 = 全闭，1.0 = 全开
+    #   /dummy_gripper/state     回读的归一化开合度
+    #
+    # 夹爪**不参与关节轨迹**：上面的 6 关节用 move_j 下发，夹爪单独用
+    # hand.set_angle。两者是设备上不同的通道。
 
     # 单指行程上限（米），与 URDF 的 limit upper 一致
     finger_travel_m: 0.023
 
-    # 夹爪全开对应的设备角度（度）。阶段 0.4 实测后替换。
-    hand_max_angle: 90.0
+    # 夹爪全闭 / 全开对应的设备角度（度）。**阶段 0.4 实测后替换**。
+    # 这两个值的差决定手指位移的折算比例；填错只影响 RViz 里手指张开的
+    # 幅度，不影响夹持力，也不会导致 TF 断裂。
+    #
+    # 测量方法：用 tools/test_gripper.py --sweep 扫一遍，记下每档的原始
+    # 角度与实际指间开口，反推这两个端点。
+    grip_angle_closed: 0.0
+    grip_angle_open: 90.0
+
+    # 夹持力上限，对应 hand.set_current_limit()。
+    # **这是唯一能防"夹碎"的手段**，务必从小值开始试（0.3 左右），
+    # 先用纸巾/纸杯这类不心疼的东西确定安全区间。
+    grip_current_limit: 1.0

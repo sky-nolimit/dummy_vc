@@ -29,6 +29,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 CONFIG = os.path.join(REPO, 'dummy_vc_ws', 'src', 'dummy_controller',
                       'config', 'dummy_controller.yaml')
+DRIVER = os.path.join(REPO, 'dummy_vc_ws', 'src', 'dummy_controller',
+                      'dummy_controller', 'dummy_controller.py')
+LAUNCH = os.path.join(REPO, 'dummy_vc_ws', 'src', 'dummy_controller',
+                      'launch', 'dummy_controller.launch.py')
 
 JOINTS = [f'dummy2_joint{i}' for i in range(1, 7)]
 
@@ -160,6 +164,45 @@ def main():
     print('  = [0, 0, 90, 0, 0, 0]; a match is supporting evidence, not proof.')
     print()
 
+    # ---- 4. the same values must appear in the driver and the launch file --
+    #
+    # Three places carry these defaults: this config, the driver's code
+    # defaults, and the launch file's DEFAULTS dict. They drifted apart
+    # repeatedly in this project, and a stale one silently overrides the
+    # config, so they are compared here.
+    print('4. driver code defaults and launch defaults agree with the config')
+    checks = [('joint_sign', sign), ('joint_offset_deg', joff),
+              ('move_j_offset_deg', mjoff)]
+
+    dtext = open(DRIVER, encoding='utf-8').read()
+    ltext = open(LAUNCH, encoding='utf-8').read()
+    for key, want in checks:
+        m = re.search(rf'{key}\s*=\s*\[([^\]]*)\]', dtext)
+        if key == 'joint_sign':
+            m = re.search(r'default_sign\s*=\s*\[([^\]]*)\]', dtext)
+        got = [float(v) for v in m.group(1).split(',')] if m else None
+        check(f'driver default {key}', got, want, tol=1e-6)
+
+        m = re.search(rf"'{key}':\s*'\[([^\]]*)\]'", ltext)
+        got = [float(v) for v in m.group(1).split(',')] if m else None
+        check(f'launch default {key}', got, want, tol=1e-6)
+
+    # scalars: home/reset poses and the gripper block
+    for key in ('home_joints_deg', 'reset_joints_deg'):
+        m = re.search(rf'^\s*{key}\s*:\s*\[([^\]]*)\]', text, re.M)
+        want = [float(v) for v in m.group(1).split(',')] if m else None
+        m = re.search(rf"'{key}':\s*'\[([^\]]*)\]'", ltext)
+        got = [float(v) for v in m.group(1).split(',')] if m else None
+        check(f'launch default {key}', got, want, tol=1e-6)
+
+    for key in ('grip_angle_closed', 'grip_angle_open', 'grip_current_limit'):
+        m = re.search(rf'^\s*{key}\s*:\s*([-\d.]+)', text, re.M)
+        want = [float(m.group(1))] if m else None
+        m = re.search(rf"'{key}':\s*'([-\d.]+)'", ltext)
+        got = [float(m.group(1))] if m else None
+        check(f'launch default {key}', got, want, tol=1e-9)
+    print()
+
     print('=' * 62)
     if failures:
         print(f'RESULT: {len(failures)} FAILURE(S)')
@@ -168,7 +211,6 @@ def main():
         return 1
     print('RESULT: all conversion properties hold')
     return 0
-
 
 if __name__ == '__main__':
     sys.exit(main())

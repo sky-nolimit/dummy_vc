@@ -11,6 +11,7 @@ from geometry_msgs.msg import PoseStamped
 from trajectory_msgs.msg import JointTrajectory
 from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import JointState
+from std_msgs.msg import Float64
 
 import numpy as np
 import dummy_cli_tool.ref_tool
@@ -35,39 +36,27 @@ class dummy_controller(LifecycleNode):
         # 两指各自的行程上限（米），来自 URDF 的 limit upper
         self.finger_travel_m = 0.023
 
-        # 夹爪全开对应的设备角度（**度**）。标定前用占位值，
-        # 只影响 RViz 里手指张开的幅度，不影响 TF 连通性。
+        # 夹爪全开对应的设备角度（**度**）。标定前用占位值。
         self.hand_max_angle = 90.0
 
+        # 夹爪控制量（归一化 0.0 = 全闭，1.0 = 全开）。
+        # 目标与回读分开存：目标是我们要它去的，回读是它实际在哪。
+        self.gripper_target = 0.0
+        self.gripper_frac = 0.0
+
         # ------------------------------------------------------------------
-        # 设备角度 -> URDF 关节角 的换算
+        # 关节角度换算。基准定义与完整推导见
+        # config/dummy_controller.yaml，以及下方 angle_to_urdf 等方法。
         #
         # 单位约定（已实测确认）：
-        #   robot.joint_N.angle        单位是**度**
-        #   robot.move_j(...)          单位是**度**
-        #   robot.joint_N.set_position 单位是**度**
-        #   URDF / MoveIt / robot_state_publisher  单位是**弧度**
-        #
-        # 实测依据：手动把机械臂摆到接近 7 字位时回读为
-        #   [-0.14, 2.03, 2.30, -2.93, -2.32, 5.18]
-        # 这些值作为「度」完全合理，作为「弧度」则远超关节行程。
-        # 上游驱动把设备角度直接当弧度发布，于是 RViz 里的模型放大了
-        # 180/pi ≈ 57 倍——这正是「模型转得比实物大得多」的原因。
-        #
-        # 换算式（统一在**度**下计算，最后再转弧度）：
-        #   urdf_deg = sign * device_deg + offset_deg
-        #
-        # offset_deg 是结构性零位偏置。已知 j3 需要约 +90 度：设备的 j3
-        # 零位对应 URDF 的 0 度（大臂竖直向下），而 7 字位在 URDF 里是
-        # +90 度，设备回读却只有 2.3 度。
-        #
-        # sign 用来处理电机装配方向。参考项目 dummy_moveit_ws 用
-        # [1,1,1,1,-1,-1]，即 j5/j6 反向。
-        #
-        # 这两个数组会被 ROS 参数覆盖，见 _declare_params。
+        #   robot.joint_N.angle        度
+        #   robot.move_j(...)          度
+        #   robot.joint_N.set_position 度
+        #   URDF / MoveIt / /joint_states  弧度
         # ------------------------------------------------------------------
         self.joint_sign = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
         self.joint_offset_deg = [0.215, 74.572, -91.474, -0.910, -0.035, -0.040]
+        self.move_j_offset_deg = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
 
         # 位置参数：单位是**度**，且这里的角度是 **move_j 空间**（设备侧），
         # **不是** URDF 角度。下发时直接原样交给 move_j，不做任何变换。
@@ -107,9 +96,16 @@ class dummy_controller(LifecycleNode):
         self.declare_parameter('urdf_offset_deg', default_urdf_offset_deg)
         self.declare_parameter('home_joints_deg', [0.0, 0.0, 90.0, 0.0, 0.0, 0.0])
         self.declare_parameter('reset_joints_deg', [0.0, -75.0, 180.0, 0.0, 0.0, 0.0])
-        # 手指行程上限（米）与夹爪全开角度，用于把 hand.angle 折算成手指位移，
-        # 让 robot_state_publisher 能发布手指关节的 TF
+        # ---- 夹爪 ----------------------------------------------------------
+        # 手指行程上限（米），来自 URDF 的 limit upper
         self.declare_parameter('finger_travel_m', 0.023)
+        # 夹爪全闭 / 全开对应的设备角度（**度**）。阶段 0.4 实测后替换。
+        # 这两个值的差决定手指位移的折算比例，填错只影响 RViz 显示。
+        self.declare_parameter('grip_angle_closed', 0.0)
+        self.declare_parameter('grip_angle_open', 90.0)
+        # 夹持力上限。这是唯一能防"夹碎"的手段，从小值开始试。
+        self.declare_parameter('grip_current_limit', 1.0)
+        # 兼容旧参数名，避免已有配置直接报"未声明参数"
         self.declare_parameter('hand_max_angle', 90.0)
         # move_j 下发前的整圈归一化区间，见 normalize_movej()
         self.declare_parameter('wrap_min_deg', 0.0)
@@ -126,6 +122,18 @@ class dummy_controller(LifecycleNode):
         self.reset_joints = np.array(self.get_parameter('reset_joints_deg').value)
         self.finger_travel_m = float(self.get_parameter('finger_travel_m').value)
         self.hand_max_angle = float(self.get_parameter('hand_max_angle').value)
+        self.grip_angle_closed = float(
+            self.get_parameter('grip_angle_closed').value)
+        self.grip_angle_open = float(
+            self.get_parameter('grip_angle_open').value)
+        self.grip_current_limit = float(
+            self.get_parameter('grip_current_limit').value)
+        if abs(self.grip_angle_open - self.grip_angle_closed) < 1e-6:
+            self.get_logger().error(
+                'grip_angle_open and grip_angle_closed are equal; the finger '
+                'mapping would divide by zero. Falling back to 0..90 deg.')
+            self.grip_angle_closed = 0.0
+            self.grip_angle_open = 90.0
 
         for name, val in (('joint_sign', self.joint_sign),
                           ('joint_offset_deg', self.joint_offset_deg),
@@ -337,7 +345,19 @@ class dummy_controller(LifecycleNode):
             self.dummy_driver = dummy_cli_tool.ref_tool.find_any()
         # 电机设为上电
         self.dummy_driver.robot.set_enable(True)
-        
+
+        # 夹爪需要单独使能：robot.set_enable() 不覆盖它。
+        # 而且要在使能**之前**把电流上限压到保守值，否则夹爪可能一上来就用
+        # 默认的大电流去夹，第一次装夹就压坏东西。
+        hand = self.dummy_driver.robot.hand
+        try:
+            hand.set_current_limit(self.grip_current_limit)
+            hand.set_enable(True)
+            self.get_logger().info(
+                f'gripper enabled, current limit = {self.grip_current_limit}')
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().error(f'gripper init failed: {exc}')
+
     def init_pub_sub(self):
         # Subscribers
         self.pose_sub = self.create_subscription(
@@ -354,7 +374,19 @@ class dummy_controller(LifecycleNode):
             10
         )
 
+        # 夹爪指令：std_msgs/Float64，0.0 = 全闭，1.0 = 全开。
+        # 用 Float64 而不是 GripperCommand 动作，是为了不引入 control_msgs
+        # 依赖；等接 MoveIt 时再在外面包一层动作即可。
+        self.gripper_sub = self.create_subscription(
+            Float64,
+            '/dummy_gripper/command',
+            self.on_gripper_command,
+            10
+        )
+
         # Publishers
+        self.gripper_state_pub = self.create_publisher(
+            Float64, '/dummy_gripper/state', 10)
         self.j6_pose_pub = self.create_publisher(PoseStamped, '/dummy_arm/current/pose/j6', 10)
         self.tool0_pose_pub = self.create_publisher(PoseStamped, '/dummy_arm/current/pose/tool0', 10)
         # MoveIt2 / robot_state_publisher 默认订阅 /joint_states
@@ -383,11 +415,12 @@ class dummy_controller(LifecycleNode):
         self.pub_current_end_pose()
 
     def current_joints_callback(self):
-        """读取设备原始关节角，换算成 URDF 关节角。
+        """读取设备原始关节角，换算成 URDF 关节角（弧度）。
 
-        注意：设备返回的是**原始角度**（弧度），必须经过 sign/offset 换算才
-        能作为 URDF 的关节角。上游原版直接把原始值当 URDF 角度发布，所以
-        j3 会差 90 度、j5/j6 会反向。
+        设备的 robot.joint_N.angle 是**原始编码器读数**（度），既不等于
+        URDF 角度，也不等于 move_j 指令值，必须经过 angle_to_urdf 换算。
+        上游原版直接把原始值当 URDF 弧度发布，所以 j3 差 90 度、模型放大约
+        57 倍。换算的推导见 config/dummy_controller.yaml。
         """
         robot = self.dummy_driver.robot
         raw = [
@@ -413,15 +446,12 @@ class dummy_controller(LifecycleNode):
         -> dummy_rightfiger_v1_1 这两段变换就永远缺失，RViz 会报
         "No transform from [dummy_leftfinger_v1_1] to [base_link]"。
 
-        当前还没有夹爪控制接口（阶段 3 做），所以这里只**回读** hand.angle
-        并按下面的映射折算成手指位移，先让 TF 树完整。
-
-        finger_travel_m = 0.023 m 是两个手指各自的行程上限（来自 URDF）。
-        hand_max_angle 是夹爪全开对应的设备角度，标定前用占位值，
-        只影响 RViz 里手指张开的幅度，不影响 TF 树的连通性。
+        映射：设备的 hand.angle 线性映射到归一化开合度，再乘以单指行程。
+            frac   = (angle - grip_angle_closed) / (grip_angle_open - grip_angle_closed)
+            travel = finger_travel_m * frac
+        grip_angle_closed / grip_angle_open 必须实测（阶段 0.4），当前是占位值，
+        填错只影响 RViz 里手指张开的幅度，不影响 TF 连通性，也不影响夹持力。
         """
-        # TODO(阶段 3)：接上 hand.set_angle 的控制闭环后，这里改为发布
-        # 实际指令值而不是回读值。
         try:
             angle = float(getattr(self.dummy_driver.robot.hand, 'angle', 0.0))
         except Exception as exc:
@@ -429,14 +459,42 @@ class dummy_controller(LifecycleNode):
                 f'cannot read hand angle: {exc}', throttle_duration_sec=5.0)
             angle = 0.0
 
-        max_angle = self.hand_max_angle
-        if abs(max_angle) < 1e-9:
-            frac = 0.0
-        else:
-            frac = max(0.0, min(1.0, angle / max_angle))
+        frac = self.angle_to_gripper_frac(angle)
+        self.gripper_frac = frac
 
         travel = self.finger_travel_m * frac
         return travel, travel
+
+    def angle_to_gripper_frac(self, angle):
+        """设备夹爪角度（度）-> 归一化开合度 0.0(全闭) .. 1.0(全开)。"""
+        lo = float(self.get_parameter('grip_angle_closed').value)
+        hi = float(self.get_parameter('grip_angle_open').value)
+        if abs(hi - lo) < 1e-9:
+            return 0.0
+        frac = (float(angle) - lo) / (hi - lo)
+        return max(0.0, min(1.0, frac))
+
+    def gripper_frac_to_angle(self, frac):
+        """归一化开合度 -> 设备夹爪角度（度），gripper_frac_to_angle 的逆。"""
+        lo = float(self.get_parameter('grip_angle_closed').value)
+        hi = float(self.get_parameter('grip_angle_open').value)
+        return lo + (hi - lo) * max(0.0, min(1.0, float(frac)))
+
+    def on_gripper_command(self, msg):
+        """接收归一化夹爪指令。
+
+        0.0 = 全闭，1.0 = 全开。超范围会被夹到 [0,1]。
+        夹持力由 grip_current_limit 控制，在 on_activate 时已设好。
+        """
+        frac = max(0.0, min(1.0, float(msg.data)))
+        angle = self.gripper_frac_to_angle(frac)
+        try:
+            self.dummy_driver.robot.hand.set_angle(angle)
+            self.gripper_target = frac
+            self.get_logger().info(
+                f'gripper command: frac={frac:.3f} -> angle={angle:.2f} deg')
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().error(f'gripper command failed: {exc}')
 
     def pub_current_joints(self):
         try:
@@ -451,11 +509,16 @@ class dummy_controller(LifecycleNode):
 
             self.joint_pub.publish(joint_state)
 
+            # 夹爪状态：归一化开合度，供上层任务逻辑判断"夹住了没有"
+            grip = Float64()
+            grip.data = float(self.gripper_frac)
+            self.gripper_state_pub.publish(grip)
+
             self.get_logger().info(
                 f'Publish JPOS: j1: {self.current_joints[0]:.2f}, j2: {self.current_joints[1]:.2f}, '
                 f'j3: {self.current_joints[2]:.2f}, j4: {self.current_joints[3]:.2f}, '
                 f'j5: {self.current_joints[4]:.2f}, j6: {self.current_joints[5]:.2f}, '
-                f'fingers: {left:.4f}/{right:.4f}',
+                f'fingers: {left:.4f}/{right:.4f} grip={self.gripper_frac:.2f}',
                 throttle_duration_sec=1.0
             )
         except Exception as e:
@@ -486,7 +549,10 @@ class dummy_controller(LifecycleNode):
         if hasattr(self, 'joint_sub') and self.joint_sub is not None:
             self.destroy_subscription(self.joint_sub)
             self.get_logger().info("Destroyed joint_sub")
-        
+        if hasattr(self, 'gripper_sub') and self.gripper_sub is not None:
+            self.destroy_subscription(self.gripper_sub)
+            self.get_logger().info("Destroyed gripper_sub")
+
         if hasattr(self, 'j6_pose_pub') and self.j6_pose_pub is not None:
             self.destroy_publisher(self.j6_pose_pub)
             self.get_logger().info("Destroyed j6_pose_pub")
@@ -496,6 +562,10 @@ class dummy_controller(LifecycleNode):
         if hasattr(self, 'joint_pub') and self.joint_pub is not None:
             self.destroy_publisher(self.joint_pub)
             self.get_logger().info("Destroyed joint_pub")
+        if hasattr(self, 'gripper_state_pub') and \
+                self.gripper_state_pub is not None:
+            self.destroy_publisher(self.gripper_state_pub)
+            self.get_logger().info("Destroyed gripper_state_pub")
 
         if hasattr(self, 'poll_timer') and self.poll_timer is not None:
             self.destroy_timer(self.poll_timer)

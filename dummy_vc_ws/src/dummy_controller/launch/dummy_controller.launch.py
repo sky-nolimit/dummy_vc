@@ -52,6 +52,10 @@ DEFAULTS = {
     'urdf_offset_deg': '[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]',
     'home_joints_deg': '[0.0, 0.0, 90.0, 0.0, 0.0, 0.0]',
     'reset_joints_deg': '[0.0, -75.0, 180.0, 0.0, 0.0, 0.0]',
+    # Gripper. Scalar values, not lists, so they are passed as plain strings.
+    'grip_angle_closed': '0.0',
+    'grip_angle_open': '90.0',
+    'grip_current_limit': '1.0',
 }
 
 DESCRIPTIONS = {

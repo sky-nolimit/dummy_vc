@@ -106,13 +106,46 @@ ls reference/dummy_moveit_ws/
 |---|---|---|
 | — | 工作区整合 | ✅ 完成 |
 | — | 硬件接口探测（夹爪接口确认） | ✅ 完成 |
-| **0** | **硬件实测标定** | ⬅ **当前，见 [操作手册](docs/02-阶段0标定操作手册.md)** |
-| 1 | 修驱动 + 补 xacro（关节名、TF、单位） | 待开始 |
-| 2 | MoveIt 配置 | 待开始 |
-| 3 | 驱动补强（轨迹执行、夹爪接口、限速） | 待开始 |
+| 0 | 关节角度标定（锚点 7 姿态，两个偏置） | ✅ 基本完成，j1 方向待修 |
+| **1** | **修驱动**：关节名、单位、TF、轨迹、坐标换算 | ✅ 完成 |
+| 1b | **逐个关节验证方向**（joint_sign） | ⬅ **当前** |
+| 1c | **夹爪实测**（角度范围 + 夹持力，阶段 0.4/0.5/0.6） | ⬅ **当前** |
+| 2 | MoveIt 配置（需先放宽 URDF 限位） | 待开始 |
+| 3 | 驱动补强（限速、急停、GripperCommand 动作） | 部分完成 |
 | 4 | 视觉感知 | 待开始（相机未到货，可先用 USB 相机搭框架） |
 | 5 | 抓取规划 + 任务状态机 | 待开始 |
 | 6 | 深度相机接入 + 手眼标定 | 待开始（等相机） |
+
+### 当前可用的接口
+
+| 接口 | 类型 | 说明 |
+|---|---|---|
+| `/joint_trajectory_controller/joint_trajectory` | 订阅 `JointTrajectory` | 6 关节轨迹，绝对目标，弧度 |
+| `/joint_states` | 发布 `JointState` | 6 关节 + 2 手指，弧度 |
+| `/dummy_gripper/command` | 订阅 `Float64` | 归一化开合，0.0 全闭、1.0 全开 |
+| `/dummy_gripper/state` | 发布 `Float64` | 回读的归一化开合度 |
+| `/dummy_arm/controller/pose_command` | 订阅 `PoseStamped` | 走 `move_l`，**不推荐**（无末端回读，无法闭环） |
+
+### 已知待办
+
+- **j1 方向相反**，需要把 `joint_sign[0]` 置 `-1`（实测确认，见配置注释）
+- **j5/j6 的符号完全没有数据**，之前所有测量里它们只变了 0.03°
+- **夹爪角度范围与夹持力未实测**，`grip_angle_closed/open` 和
+  `grip_current_limit` 都是占位值
+- **URDF 限位比实机窄**（7 姿态就需要 j3 = −91.5，而限位是 −90），
+  配 MoveIt 前必须按实测放宽，否则规划会被拒绝
+- 驱动在轨迹执行时**不做限位检查**，越界目标照样下发
+
+## 工具
+
+`tools/` 下有 20 多个检查与分析脚本，索引见 [tools/README.md](tools/README.md)。
+最常用的三个：
+
+```bash
+python tools/check_syntax.py            # 改完代码必跑
+python tools/selftest_conversion.py     # 改坐标换算必跑
+python tools/debug_pose_chain.py        # 需要 ROS；看模型此刻是什么姿态
+```
 
 ## 编码注意事项
 
