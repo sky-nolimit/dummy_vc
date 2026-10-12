@@ -120,7 +120,16 @@ class dummy_controller(LifecycleNode):
         # 夹爪初始化超时（秒）。夹爪的 fibre 调用曾经阻塞过，而它若在
         # on_configure 里同步等待就会冻死整个节点，连 /joint_states 都不发。
         self.declare_parameter('gripper_init_timeout_sec', 5.0)
-        # 夹爪是否初始化成功。失败或超时后为 False，机械臂本体仍可正常使用。
+        # 是否在启动时初始化夹爪。**默认 false。**
+        #
+        # 实测：夹爪的 fibre 调用会永久阻塞且不返回。那个线程留在那里会一直
+        # 持有 fibre 链路，于是后续每个设备调用都排在它后面 —— 不只是夹爪
+        # 不可用，**move_j 也会一起卡住，机械臂根本动不了**。
+        #
+        # 所以默认不碰夹爪：先让机械臂能正常跑起来，夹爪单独作为一项议题去查
+        # （很可能是固件或接线问题）。要用夹爪时显式打开 gripper_enable:=true。
+        self.declare_parameter('gripper_enable', False)
+        # 夹爪是否初始化成功。失败、超时或被禁用后为 False。
         self.gripper_ready = False
 
         self.joint_sign = list(self.get_parameter('joint_sign').value)
@@ -140,6 +149,13 @@ class dummy_controller(LifecycleNode):
             self.get_parameter('grip_angle_open').value)
         self.grip_current_limit = float(
             self.get_parameter('grip_current_limit').value)
+        # 参数值可能是 bool，也可能被 launch 以字符串 'true'/'false' 传进来。
+        raw_enable = self.get_parameter('gripper_enable').value
+        if isinstance(raw_enable, str):
+            self.gripper_enable = raw_enable.strip().lower() in (
+                '1', 'true', 'yes', 'on')
+        else:
+            self.gripper_enable = bool(raw_enable)
         self.connect_timeout_sec = float(
             self.get_parameter('connect_timeout_sec').value)
         if self.connect_timeout_sec <= 0.0:
@@ -443,7 +459,24 @@ class dummy_controller(LifecycleNode):
         self._init_gripper_with_timeout()
 
     def _init_gripper_with_timeout(self):
-        """在线程里初始化夹爪，超时就放弃，不阻塞 configure。"""
+        """在线程里初始化夹爪，超时就放弃，不阻塞 configure。
+
+        **默认跳过整个夹爪初始化。** 见 gripper_enable 参数的说明：夹爪的
+        fibre 调用实测会阻塞且永不返回，而那个线程会一直持有 fibre 链路，
+        把后续所有设备调用（包括 move_j）全部排队堵死。所以默认根本不碰它，
+        要先在 `ros2 param set` 或启动参数里显式打开。
+        """
+        if not self.gripper_enable:
+            self.get_logger().info(
+                'gripper ENABLE is off (gripper_enable=false); skipping '
+                'gripper init entirely. This is the default because the '
+                'gripper fibre calls have been observed to block forever and '
+                'starve every other device call. Start with '
+                'gripper_enable:=true only when you are ready to debug the '
+                'gripper itself.')
+            self.gripper_ready = False
+            return
+
         timeout = float(self.get_parameter('gripper_init_timeout_sec').value)
         result = {}
 
@@ -473,12 +506,20 @@ class dummy_controller(LifecycleNode):
         th.join(timeout)
 
         if th.is_alive():
-            # 线程还活着说明 fibre 调用没返回。不能 kill 线程，只能放着
-            # （daemon=True 保证进程退出时不会卡住），并继续往下走。
+            # 线程还活着说明 fibre 调用没返回。
+            #
+            # **这是个严重状态，不只是"夹爪不可用"。** 那个线程还在持有
+            # fibre 链路，后续每一个设备调用都会排在它后面，于是 move_j
+            # 也会卡住 —— 实测就是这样：夹爪超时之后，homing 也一起挂死。
+            # 所以这条日志要说清楚：不是"夹爪没了、别的还能用"，而是
+            # "这条链路被占住了，机械臂也动不了，请重启进程"。
             self.get_logger().error(
-                f'gripper init did NOT return within {timeout}s; the fibre call '
-                'is blocked. Continuing WITHOUT the gripper so the arm can '
-                'still be used. The blocked thread is left as a daemon.')
+                f'gripper init did NOT return within {timeout}s: the fibre call '
+                'is blocked and this thread still holds the link. Every later '
+                'device call, INCLUDING move_j, will queue behind it, so the '
+                'arm will NOT move. Stop this process (Ctrl+C), power-cycle the '
+                'arm, and restart with gripper_enable:=false to use the arm '
+                'without the gripper.')
             self.gripper_ready = False
             return
 
@@ -760,15 +801,22 @@ class dummy_controller(LifecycleNode):
         日志同时打印回读侧换算出的 URDF 角度，方便与 RViz 对照。
         """
         movej_deg = np.asarray(movej_deg, dtype=float)
+
+        # 每一步都记日志。此前这段是"发指令 -> 回读 -> 打印"一口气走完，
+        # 一旦 move_j 或回读阻塞，日志就停在上一行不动，无法判断卡在哪一个。
+        # 实测正是如此：卡在 CONFIGURE 3/4 之后完全看不出是 move_j 还是回读。
+        self.get_logger().info(f'{label}: step 1/2 sending move_j ...')
         try:
             self.move_joints(movej_deg)
         except Exception as exc:
             self.get_logger().error(f'{label} command failed: {exc}')
             return
+        self.get_logger().info(f'{label}: step 1/2 sent')
 
         # 回读仅用于日志对照，与上一步的 try 分开。回读失败时如果也报
         # "{label} failed"，就又会制造"日志说失败、实物其实已经动了"这种
         # 最难查的假故障——那正是这里当初少一个 read_device() 时的症状。
+        self.get_logger().info(f'{label}: step 2/2 reading back ...')
         try:
             # read_device() 返回的是 angle 空间的**度**，正好是
             # angle_to_urdf_deg 的输入；不要拿 current_urdf_rad 去喂它。

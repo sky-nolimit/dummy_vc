@@ -96,6 +96,10 @@ DESCRIPTIONS = {
     'grip_current_limit':
         'Gripper current limit. The only guard against crushing an object; '
         'start low.',
+    'gripper_enable':
+        'Initialise the gripper at startup. Default false: the gripper fibre '
+        'calls have been observed to block forever, and the stuck thread '
+        'holds the link so move_j starves and the arm cannot move.',
     'gripper_init_timeout_sec':
         'Seconds to wait for gripper init before giving up on it. The '
         'gripper fibre channel has blocked before, and a hang there must not '
