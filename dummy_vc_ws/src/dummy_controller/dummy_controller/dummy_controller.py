@@ -110,6 +110,9 @@ class dummy_controller(LifecycleNode):
         # move_j 下发前的整圈归一化区间，见 normalize_movej()
         self.declare_parameter('wrap_min_deg', 0.0)
         self.declare_parameter('wrap_max_deg', 360.0)
+        # 设备连接超时（秒）。**不要设为 0 或负数**：fibre 的 find_any 在
+        # timeout=None 时会永久阻塞，没有设备时会让启动静默卡死。
+        self.declare_parameter('connect_timeout_sec', 15.0)
 
         self.joint_sign = list(self.get_parameter('joint_sign').value)
         self.joint_offset_deg = list(
@@ -128,6 +131,13 @@ class dummy_controller(LifecycleNode):
             self.get_parameter('grip_angle_open').value)
         self.grip_current_limit = float(
             self.get_parameter('grip_current_limit').value)
+        self.connect_timeout_sec = float(
+            self.get_parameter('connect_timeout_sec').value)
+        if self.connect_timeout_sec <= 0.0:
+            self.get_logger().warn(
+                f'connect_timeout_sec={self.connect_timeout_sec} would block '
+                'forever on a missing device; using 15.0 instead')
+            self.connect_timeout_sec = 15.0
         if abs(self.grip_angle_open - self.grip_angle_closed) < 1e-6:
             self.get_logger().error(
                 'grip_angle_open and grip_angle_closed are equal; the finger '
@@ -277,26 +287,54 @@ class dummy_controller(LifecycleNode):
 
     # ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓ Lifecycle node callback ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓
     def on_configure(self, state: State) -> TransitionCallbackReturn:
-        self._declare_params()
-        self.init_dummy()
-        self.home_dummy()
-        # t1 = time.time()
-        
-        # while True:
-        #     if time.time() - t1 > 10:
-        #         break
-        
-        # self.reset_dummy()
-        #0 RGB跑马灯  1白光快闪  2白光慢闪  3红光常亮   4绿光常亮   5蓝光常亮
-        self.dummy_driver.robot.set_rgb_mode(1)
+        """连接设备并把手臂送到 home 姿态。
+
+        每个阶段都要留日志，并且整体包一层异常捕获。原因：此前这里失败时
+        日志会戛然而止（停在参数打印之后），从外面完全看不出卡在哪一步，
+        表现为"启动脚本只有几行输出、机械臂不动"。
+        """
+        try:
+            self.get_logger().info('CONFIGURE 1/4: declaring parameters')
+            self._declare_params()
+            self.get_logger().info('CONFIGURE 1/4: done')
+
+            self.get_logger().info('CONFIGURE 2/4: connecting device')
+            self.init_dummy()
+            self.get_logger().info('CONFIGURE 2/4: done')
+
+            self.get_logger().info(
+                'CONFIGURE 3/4: homing to the 7 pose (the arm should move now)')
+            self.home_dummy()
+            self.get_logger().info('CONFIGURE 3/4: done')
+
+            #0 RGB跑马灯  1白光快闪  2白光慢闪  3红光常亮   4绿光常亮   5蓝光常亮
+            self.get_logger().info('CONFIGURE 4/4: setting LED')
+            self.dummy_driver.robot.set_rgb_mode(1)
+            self.get_logger().info('CONFIGURE 4/4: done')
+        except Exception as exc:  # noqa: BLE001
+            import traceback
+            self.get_logger().error(
+                f'on_configure FAILED: {type(exc).__name__}: {exc}')
+            self.get_logger().error(traceback.format_exc())
+            return TransitionCallbackReturn.FAILURE
+
         self.get_logger().info("on_configure() called")
         return TransitionCallbackReturn.SUCCESS
 
     def on_activate(self, state: State) -> TransitionCallbackReturn:
         # self.home_dummy()
-        self.init_pub_sub()
-        #0 RGB跑马灯  1白光快闪  2白光慢闪  3红光常亮  4绿光常亮  5蓝光常亮
-        self.dummy_driver.robot.set_rgb_mode(4)
+        try:
+            self.get_logger().info('ACTIVATE 1/2: creating pubs/subs')
+            self.init_pub_sub()
+            self.get_logger().info('ACTIVATE 1/2: done')
+            #0 RGB跑马灯  1白光快闪  2白光慢闪  3红光常亮  4绿光常亮  5蓝光常亮
+            self.dummy_driver.robot.set_rgb_mode(4)
+        except Exception as exc:  # noqa: BLE001
+            import traceback
+            self.get_logger().error(
+                f'on_activate FAILED: {type(exc).__name__}: {exc}')
+            self.get_logger().error(traceback.format_exc())
+            return TransitionCallbackReturn.FAILURE
         self.get_logger().info("on_activate() called")
         return TransitionCallbackReturn.SUCCESS
 
@@ -339,24 +377,51 @@ class dummy_controller(LifecycleNode):
         self.off_dummy()
         
     def init_dummy(self):
+        """连接设备并使能电机。
+
+        这里每一步都要留日志。此前 connect 与 set_enable 都是静默的,一旦
+        卡住或抛异常,日志会停在 _declare_params() 之后、on_configure() 之前,
+        从外面看就是"什么都没发生",无法判断卡在哪一步。
+        """
+        self.get_logger().info(
+            f'connecting to the device (timeout {self.connect_timeout_sec}s) ...')
         if self.dummy_driver is not None:
             self.get_logger().warn("Dummy driver already initialized")
         else:
-            self.dummy_driver = dummy_cli_tool.ref_tool.find_any()
-        # 电机设为上电
-        self.dummy_driver.robot.set_enable(True)
+            # **必须传 timeout。** fibre 的 find_any 默认 timeout=None，
+            # 那是"阻塞到有设备连上为止"——没有设备时会永久挂住，不超时、
+            # 不报错、不返回，表现为启动日志戛然而止而机械臂不动。
+            # 参考项目自己的 probe_device.py 用的是 timeout=15.0。
+            self.dummy_driver = dummy_cli_tool.ref_tool.find_any(
+                path="usb", timeout=self.connect_timeout_sec)
+        if self.dummy_driver is None:
+            raise RuntimeError(
+                f'no device found within {self.connect_timeout_sec}s. '
+                'Check that the arm is powered on, the USB cable is seated, '
+                'and that no other process holds the fibre link '
+                '(only one process can own it at a time).')
+        self.get_logger().info('device connected')
 
-        # 夹爪需要单独使能：robot.set_enable() 不覆盖它。
-        # 而且要在使能**之前**把电流上限压到保守值，否则夹爪可能一上来就用
-        # 默认的大电流去夹，第一次装夹就压坏东西。
+        # 电机设为上电
+        self.get_logger().info('enabling motors ...')
+        self.dummy_driver.robot.set_enable(True)
+        self.get_logger().info('motors enabled')
+
+        # 夹爪初始化失败**不能**阻断整条 bringup。
+        # 过去这里会把失败往上抛，导致 on_configure 整体失败、机械臂完全不动，
+        # 而用户只看到日志戛然而止。夹爪单独使能，失败就只报错继续。
         hand = self.dummy_driver.robot.hand
         try:
+            # 要在使能**之前**压低电流上限，否则夹爪可能一上来就用默认大电流，
+            # 第一次装夹就压坏东西。
             hand.set_current_limit(self.grip_current_limit)
             hand.set_enable(True)
             self.get_logger().info(
                 f'gripper enabled, current limit = {self.grip_current_limit}')
         except Exception as exc:  # noqa: BLE001
-            self.get_logger().error(f'gripper init failed: {exc}')
+            self.get_logger().error(
+                f'gripper init failed ({type(exc).__name__}: {exc}); '
+                'continuing without gripper')
 
     def init_pub_sub(self):
         # Subscribers

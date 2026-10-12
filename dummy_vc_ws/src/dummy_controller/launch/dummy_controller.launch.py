@@ -56,6 +56,7 @@ DEFAULTS = {
     'grip_angle_closed': '0.0',
     'grip_angle_open': '90.0',
     'grip_current_limit': '1.0',
+    'connect_timeout_sec': '15.0',
 }
 
 DESCRIPTIONS = {
@@ -75,6 +76,12 @@ DESCRIPTIONS = {
         'Named pose in move_j space (degrees). 7 pose.',
     'reset_joints_deg':
         'Named pose in move_j space (degrees). Retracted pose.',
+    'grip_angle_closed':
+        'Gripper closed angle in device units (degrees).',
+    'grip_angle_open':
+        'Gripper open angle in device units (degrees).',
+    'grip_current_limit':
+        'Gripper current limit (A) used when driving the gripper.',
 }
 
 

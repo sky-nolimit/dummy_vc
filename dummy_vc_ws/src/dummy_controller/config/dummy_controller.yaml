@@ -153,3 +153,7 @@ dummy_controller:
     # **这是唯一能防"夹碎"的手段**，务必从小值开始试（0.3 左右），
     # 先用纸巾/纸杯这类不心疼的东西确定安全区间。
     grip_current_limit: 1.0
+
+    # 设备连接超时（秒）。fibre 的 find_any 在 timeout=None 时**永久阻塞**，
+    # 没有设备时会让启动静默卡死（日志停在参数打印之后、机械臂不动）。
+    connect_timeout_sec: 15.0
