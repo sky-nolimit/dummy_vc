@@ -15,7 +15,7 @@ Why this launch file exists:
    different value without editing the YAML and without rebuilding:
 
        ros2 launch dummy_controller dummy_controller.launch.py \\
-         joint_offset_deg:="[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]"
+         joint_sign:="[-1.0, 1.0, -1.0, 1.0, -1.0, -1.0]"
 
    This matters because ROS 2 launch does not reliably forward
    `--ros-args -p name:=value` to a node declared with parameters=[file].
@@ -25,7 +25,19 @@ Usage:
     ros2 launch dummy_controller dummy_controller.launch.py
     ros2 launch dummy_controller dummy_controller.launch.py activate:=false
     ros2 launch dummy_controller dummy_controller.launch.py \\
-        joint_offset_deg:="[0.03, 2.03, 0.0, -0.03, 0.18, -0.03]"
+        joint_sign:="[-1.0, 1.0, -1.0, 1.0, -1.0, -1.0]"
+
+About the lifecycle commands below
+----------------------------------
+They are issued by the `ros2` CLI, which needs the node to have registered
+with DDS first. A single attempt can therefore fail with "Node not found" if it
+runs too early, and it is NOT retried by anything. Two attempts per transition
+are scheduled a few seconds apart; the first may fail harmlessly, the second
+normally lands. The node itself also keeps working while unconfigured, so even
+a missed command does not corrupt anything.
+
+Do not be alarmed by a stray "Node not found" on a boot that nevertheless ends
+with /joint_states publishing.
 """
 import os
 
@@ -36,15 +48,15 @@ from launch.actions import (
     DeclareLaunchArgument,
     ExecuteProcess,
     LogInfo,
-    RegisterEventHandler,
+    TimerAction,
 )
 from launch.conditions import IfCondition
-from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import LifecycleNode, Node
 
+
 # Defaults mirror config/dummy_controller.yaml. Keep the two in sync; the
-# checker tools/check_coord_spaces.py verifies that the YAML, the driver code
+# checker tools/selftest_conversion.py verifies that the YAML, the driver code
 # defaults and these values all agree.
 DEFAULTS = {
     'joint_sign': '[-1.0, 1.0, -1.0, 1.0, -1.0, -1.0]',
@@ -65,26 +77,28 @@ DESCRIPTIONS = {
         'Per-joint direction. Flip a joint to -1.0 if the model turns the '
         'opposite way from the real arm. Order: j1..j6.',
     'joint_offset_deg':
-        'Per-joint offset between the device ANGLE readback and the URDF '
-        'angle, in degrees. Derived from the 7-pose readback.',
+        'Raw device angle (deg) at which the model reads zero. Must equal the '
+        'angle readback at the 7 pose.',
     'move_j_offset_deg':
-        'Per-joint offset between the device move_j space (what home/reset '
-        'use) and the ANGLE readback, in degrees.',
+        'Added to the URDF angle (deg) to get the move_j command value. '
+        'Equal to the move_j value at the 7 pose.',
     'urdf_offset_deg':
-        'Extra offset applied in URDF space, in degrees. Use this when the '
-        'model tracks the same direction but sits at a fixed wrong angle.',
+        'Extra offset applied inside URDF space. Use only when the model '
+        'turns the SAME way but is shifted by a constant angle.',
     'home_joints_deg':
-        'Named pose in move_j space (degrees). 7 pose.',
+        'The 7 pose, in move_j space (device degrees).',
     'reset_joints_deg':
-        'Named pose in move_j space (degrees). Retracted pose.',
+        'The retracted pose, in move_j space (device degrees).',
     'grip_angle_closed':
-        'Gripper closed angle in device units (degrees).',
+        'Device angle (deg) at which the gripper is fully closed.',
     'grip_angle_open':
-        'Gripper open angle in device units (degrees).',
+        'Device angle (deg) at which the gripper is fully open.',
     'grip_current_limit':
-        'Gripper current limit (A) used when driving the gripper.',
+        'Gripper current limit. The only guard against crushing an object; '
+        'start low.',
     'connect_timeout_sec':
-        'Timeout in seconds for the driver to connect to the arm.',
+        'Seconds to wait for the device. Must be > 0: a non-positive value '
+        'makes fibre block forever instead of failing.',
 }
 
 
@@ -96,6 +110,11 @@ def generate_launch_description():
 
     xacro_file = os.path.join(desc_share, 'urdf', 'dummy2_urdf.xacro')
     robot_description = xacro.process_file(xacro_file).toxml()
+
+    # Two attempts per transition, spaced out. `ros2 lifecycle set` needs the
+    # node registered with DDS, which takes a moment; the first attempt can
+    # legitimately lose that race. The second normally lands.
+    attempts = [(3.0, 8.0), (9.0, 14.0)]
 
     actions = [
         DeclareLaunchArgument(
@@ -135,69 +154,48 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('robot_state_publisher')),
     )
 
-    # Transition the lifecycle node via the ros2 CLI. Using ExecuteProcess
-    # avoids depending on lifecycle_msgs event APIs in launch.
-    #
-    # IMPORTANT: these are chained by process exit, NOT by fixed timers.
-    # `ros2 lifecycle set` returns only after the transition completes, so
-    # OnProcessExit(configure) is a real completion signal. Timers are not:
-    # an earlier version used delay_configure=3s and delay_activate=2s, but
-    # device discovery alone takes 10-13 s, so activate fired while the node
-    # was still configuring. The transition was refused AND never retried,
-    # leaving the node inactive -- no publishers, no /joint_states, no motion.
-    configure = ExecuteProcess(
-        cmd=['ros2', 'lifecycle', 'set', '/dummy_controller', 'configure'],
-        output='screen',
-        condition=IfCondition(LaunchConfiguration('activate')),
-    )
-
-    # Deliberately NOT conditioned: this process only ever runs from inside
-    # _after_configure, which already checks the flag. Giving it a condition
-    # as well would be harmless but misleading.
-    activate = ExecuteProcess(
-        cmd=['ros2', 'lifecycle', 'set', '/dummy_controller', 'activate'],
-        output='screen',
-    )
-
-    def _after_configure(event, context):
-        """Chain activate, or explain why we stop.
-
-        The event from ExecuteProcess carries its return code. A non-zero code
-        means the transition itself failed (commonly because on_configure
-        returned FAILURE), and running activate afterwards would only add a
-        confusing second error on top of the real one.
-        """
-        if not context.launch_configurations.get('activate', 'true') == 'true':
-            return []          # user asked for manual lifecycle control
-        rc = event[1] if isinstance(event, (list, tuple)) else 0
-        if rc != 0:
-            return [LogInfo(msg=(
-                f'[bringup] configure FAILED (exit code {rc}). Not activating. '
-                'Scroll up for the "on_configure FAILED" line and the '
-                'traceback under it -- that names the step that broke.'))]
-        return [
-            LogInfo(msg='[bringup] configure succeeded; emitting activate ...'),
-            activate,
-            LogInfo(msg='[bringup] if /joint_states appears below, the driver '
-                        'is live. To inspect the pose chain run: '
-                        'python3 tools/debug_pose_chain.py'),
-        ]
-
     actions += [
         LogInfo(msg='[bringup] starting dummy_controller (lifecycle node) ...'),
         controller,
         rsp,
-        LogInfo(msg='[bringup] waiting for the driver to advertise its '
-                    'lifecycle service, then configuring ...'),
-        # No artificial delay: `ros2 lifecycle set` already waits for the
-        # service to appear. A timer here only made startup slower and could
-        # fire before the service existed.
-        configure,
-        RegisterEventHandler(
-            OnProcessExit(
-                target_action=configure,
-                on_exit=_after_configure,
-            )
-        ),
     ]
+
+    for n, (t_configure, t_activate) in enumerate(attempts, start=1):
+        configure = ExecuteProcess(
+            cmd=['ros2', 'lifecycle', 'set', '/dummy_controller', 'configure'],
+            output='screen',
+            condition=IfCondition(LaunchConfiguration('activate')),
+        )
+        activate = ExecuteProcess(
+            cmd=['ros2', 'lifecycle', 'set', '/dummy_controller', 'activate'],
+            output='screen',
+            condition=IfCondition(LaunchConfiguration('activate')),
+        )
+        # Configure and activate each get their own timer slot so a slow
+        # device connection (10-13 s) does not make activate overtake
+        # configure. A rejected attempt is harmless: the node simply is not
+        # ready yet, and the next attempt comes a few seconds later.
+        actions.append(TimerAction(
+            period=t_configure,
+            actions=[
+                LogInfo(msg=f'[bringup] attempt {n}: lifecycle configure ...'),
+                configure,
+            ],
+        ))
+        actions.append(TimerAction(
+            period=t_activate,
+            actions=[
+                LogInfo(msg=f'[bringup] attempt {n}: lifecycle activate ...'),
+                activate,
+            ],
+        ))
+
+    actions.append(TimerAction(
+        period=attempts[-1][1] + 1.0,
+        actions=[LogInfo(msg=(
+            '[bringup] lifecycle attempts finished. If /joint_states is '
+            'publishing the driver is live; inspect the pose chain with: '
+            'python3 tools/debug_pose_chain.py'))],
+    ))
+
     return LaunchDescription(actions)
