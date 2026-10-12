@@ -34,9 +34,12 @@ def main(argv):
 
         print(f'    bytes: {len(raw)}')
 
-        # BOM 检查
+        # BOM 检查。UTF-8 BOM 同样算问题：它会让脚本的 shebang 在 Linux 上
+        # 失效（bad interpreter: No such file or directory），所以和 UTF-16
+        # 一样计为失败，而不是只提示一句。
         if raw.startswith(b'\xef\xbb\xbf'):
-            print('    BOM: UTF-8 BOM present (may cause issues in some tools)')
+            print('    BOM: UTF-8 BOM present (breaks shebangs on Linux)')
+            bad += 1
         elif raw.startswith((b'\xff\xfe', b'\xfe\xff')):
             print('    BOM: UTF-16 BOM present (WRONG for source files)')
             bad += 1

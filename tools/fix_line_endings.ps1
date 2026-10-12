@@ -32,9 +32,16 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 
 # Extensions that must be LF. Binary types are deliberately absent.
+#
+# Keep this list in step with .gitattributes. It previously stopped at
+# .ps1, which meant .gazebo/.trans/.gv/.csv/.cpp/.bat/.conf were never
+# scanned -- and those were exactly the files that turned out to be sitting
+# in the working tree with CRLF while their blobs were LF, invisible to this
+# script and to check_line_endings.py alike.
 $textExtensions = @(
     '.py', '.pyi', '.xml', '.xacro', '.urdf', '.srdf', '.yaml', '.yml',
-    '.rviz', '.json', '.md', '.txt', '.cfg', '.sh', '.bash', '.cmake', '.ps1'
+    '.rviz', '.json', '.md', '.txt', '.cfg', '.sh', '.bash', '.cmake', '.ps1',
+    '.gazebo', '.trans', '.gv', '.csv', '.cpp', '.hpp', '.h', '.bat', '.conf'
 )
 $textNames = @('.gitignore', '.gitattributes', 'CMakeLists.txt', 'Dockerfile')
 

@@ -12,7 +12,7 @@ Why this launch file exists:
    a single step.
 
 3. Every calibration value is exposed as a launch argument, so you can try a
-   different value without editing the YAML and without rebuilding:
+   different value for one run without editing any file:
 
        ros2 launch dummy_controller dummy_controller.launch.py \\
          joint_sign:="[-1.0, 1.0, -1.0, 1.0, -1.0, -1.0]"
@@ -20,6 +20,13 @@ Why this launch file exists:
    This matters because ROS 2 launch does not reliably forward
    `--ros-args -p name:=value` to a node declared with parameters=[file].
    Explicit launch arguments are the dependable path.
+
+   The DEFAULT of every one of these arguments is read from the YAML when the
+   launch description is built. Nothing is repeated here. That is deliberate:
+   a second hardcoded copy of the calibration values is exactly what used to
+   drift and then silently override the config, so editing the YAML appeared
+   to do nothing. config/dummy_controller.yaml is the single source of truth;
+   tools/selftest_conversion.py enforces that this file holds no second copy.
 
 Usage:
     ros2 launch dummy_controller dummy_controller.launch.py
@@ -42,6 +49,7 @@ with /joint_states publishing.
 import os
 
 import xacro
+import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
@@ -55,23 +63,8 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import LifecycleNode, Node
 
 
-# Defaults mirror config/dummy_controller.yaml. Keep the two in sync; the
-# checker tools/selftest_conversion.py verifies that the YAML, the driver code
-# defaults and these values all agree.
-DEFAULTS = {
-    'joint_sign': '[-1.0, 1.0, -1.0, 1.0, -1.0, -1.0]',
-    'joint_offset_deg': '[0.215, 74.572, -91.474, -0.910, -0.035, -0.040]',
-    'move_j_offset_deg': '[0.0, 0.0, 90.0, 0.0, 0.0, 0.0]',
-    'urdf_offset_deg': '[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]',
-    'home_joints_deg': '[0.0, 0.0, 90.0, 0.0, 0.0, 0.0]',
-    'reset_joints_deg': '[0.0, -75.0, 180.0, 0.0, 0.0, 0.0]',
-    # Gripper. Scalar values, not lists, so they are passed as plain strings.
-    'grip_angle_closed': '0.0',
-    'grip_angle_open': '90.0',
-    'grip_current_limit': '1.0',
-    'connect_timeout_sec': '30.0',
-}
-
+# Descriptions for the launch arguments. The VALUES are not here on purpose:
+# they are read from config/dummy_controller.yaml by load_config_defaults().
 DESCRIPTIONS = {
     'joint_sign':
         'Per-joint direction. Flip a joint to -1.0 if the model turns the '
@@ -85,10 +78,17 @@ DESCRIPTIONS = {
     'urdf_offset_deg':
         'Extra offset applied inside URDF space. Use only when the model '
         'turns the SAME way but is shifted by a constant angle.',
+    'wrap_min_deg':
+        'Lower bound the move_j command is normalised into.',
+    'wrap_max_deg':
+        'Upper bound the move_j command is normalised into. A span narrower '
+        'than 360 deg makes the normaliser clamp instead of wrapping.',
     'home_joints_deg':
         'The 7 pose, in move_j space (device degrees).',
     'reset_joints_deg':
         'The retracted pose, in move_j space (device degrees).',
+    'finger_travel_m':
+        'Travel of one finger (m), matching the URDF limit upper.',
     'grip_angle_closed':
         'Device angle (deg) at which the gripper is fully closed.',
     'grip_angle_open':
@@ -102,6 +102,41 @@ DESCRIPTIONS = {
 }
 
 
+def _as_launch_arg(value):
+    """Render a YAML parameter value as the string a launch argument needs."""
+    if isinstance(value, (list, tuple)):
+        return '[' + ', '.join(repr(float(v)) for v in value) + ']'
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    return repr(value)
+
+
+def load_config_defaults(params_file):
+    """Read every parameter default out of the YAML config.
+
+    Returns {name: value-as-string}. Strings are what DeclareLaunchArgument
+    wants, and rclpy parses '[...]' back into a double array for a parameter
+    declared as one.
+
+    Raising on a malformed config is intentional: a silent fallback to
+    hardcoded defaults is what hid the drift this function exists to prevent.
+    """
+    with open(params_file, encoding='utf-8') as fh:
+        doc = yaml.safe_load(fh)
+
+    try:
+        params = doc['dummy_controller']['ros__parameters']
+    except (TypeError, KeyError) as exc:
+        raise RuntimeError(
+            f'{params_file}: expected a dummy_controller/ros__parameters '
+            f'block, but parsing it failed ({exc})')
+
+    if not params:
+        raise RuntimeError(f'{params_file}: ros__parameters is empty')
+
+    return {name: _as_launch_arg(value) for name, value in params.items()}
+
+
 def generate_launch_description():
     driver_share = get_package_share_directory('dummy_controller')
     desc_share = get_package_share_directory('dummy2_urdf_description')
@@ -110,6 +145,15 @@ def generate_launch_description():
 
     xacro_file = os.path.join(desc_share, 'urdf', 'dummy2_urdf.xacro')
     robot_description = xacro.process_file(xacro_file).toxml()
+
+    # Single source of truth for the calibration values.
+    defaults = load_config_defaults(params_file)
+    missing = sorted(set(defaults) - set(DESCRIPTIONS))
+    if missing:
+        raise RuntimeError(
+            f'{params_file} declares parameters with no launch description: '
+            f'{missing}. Add them to DESCRIPTIONS so they are documented and '
+            'overridable.')
 
     # Two attempts per transition, spaced out. `ros2 lifecycle set` needs the
     # node registered with DDS, which takes a moment; the first attempt can
@@ -125,15 +169,15 @@ def generate_launch_description():
             description='Start robot_state_publisher (needed for TF in RViz)'),
     ]
 
-    # One launch argument per calibration value, so any of them can be tried
-    # without editing files or rebuilding.
-    for key, default in DEFAULTS.items():
+    # One launch argument per YAML parameter, defaulting to the YAML value.
+    # These exist purely so a value can be overridden for a single run.
+    for key in sorted(defaults):
         actions.append(DeclareLaunchArgument(
-            key, default_value=default, description=DESCRIPTIONS[key]))
+            key, default_value=defaults[key], description=DESCRIPTIONS[key]))
 
     controller_params = [params_file]
     controller_params.append({
-        key: LaunchConfiguration(key) for key in DEFAULTS
+        key: LaunchConfiguration(key) for key in defaults
     })
 
     controller = LifecycleNode(

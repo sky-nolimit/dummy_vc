@@ -2,7 +2,8 @@
 
 用 Dummy 机械臂（稚晖君 / 木子开源方案）实现桌面视觉抓取。
 
-**当前状态**：方案已定稿，工作区已整合，尚未开始改代码。下一步是阶段 0 的硬件实测。
+**当前状态**：工作区已整合；阶段 0（标定）与阶段 1（修驱动）已完成。当前在
+1b（逐个关节实测方向）与 1c（夹爪实测）。详见下方「当前进度」表。
 
 ---
 
@@ -82,6 +83,20 @@ source install/setup.bash
 ```
 
 ```bash
+# 启动驱动 + robot_state_publisher（TF / RViz 都靠它）
+ros2 launch dummy_controller dummy_controller.launch.py
+
+# 临时改一个标定值试一次，不编辑任何文件
+ros2 launch dummy_controller dummy_controller.launch.py \
+  joint_sign:="[-1.0, 1.0, -1.0, 1.0, -1.0, -1.0]"
+```
+
+> **标定参数只有一份，在 `dummy_controller/config/dummy_controller.yaml`。**
+> launch 不再自带一份默认值副本——它是**在启动时从那个 YAML 读出来的**，
+> 命令行参数只用于单次覆盖。以前 launch 里的副本会覆盖 YAML，导致"改了
+> 配置文件却毫无效果"；`tools/selftest_conversion.py` 现在会强制这一点。
+
+```bash
 # 阶段 0 标定（真机）
 ros2 launch dummy_vc_calibration stage0.launch.py
 
@@ -128,10 +143,14 @@ ls reference/dummy_moveit_ws/
 
 ### 已知待办
 
-- **j1 方向相反**，需要把 `joint_sign[0]` 置 `-1`（实测确认，见配置注释）
-- **j5/j6 的符号完全没有数据**，之前所有测量里它们只变了 0.03°
+- **j5/j6 的符号没有实测数据**，之前所有测量里它们只变了 0.03°。当前值由
+  收缩几何（C2）推出，但腕关节不影响末端位置，**C2 判定不了它们的方向**，
+  只能靠 `tools/test_motion.sh` 逐个实测。
+- **急停尚未接线**：`stop_dummy()` 的换算错误已修，但它没有任何调用者，
+  且轨迹执行用 `time.sleep` 阻塞在回调里、没有抢占点。真要接急停按钮，
+  这两件事都得先解决。
 - **夹爪角度范围与夹持力未实测**，`grip_angle_closed/open` 和
-  `grip_current_limit` 都是占位值
+  `grip_current_limit` 都是占位值（阶段 0.4/0.5/0.6）
 - **URDF 限位比实机窄**（7 姿态就需要 j3 = −91.5，而限位是 −90），
   配 MoveIt 前必须按实测放宽，否则规划会被拒绝
 - 驱动在轨迹执行时**不做限位检查**，越界目标照样下发
@@ -155,10 +174,19 @@ python tools/debug_pose_chain.py        # 需要 ROS；看模型此刻是什么�
 
 本仓库在 **Windows 上编辑、Ubuntu 上构建**。整合过程中已经发生过一次真实事故：用 PowerShell 写文件时的编码往返，把源文件里的中文全部损坏成乱码（中文被当 GBK 解读后重新按 UTF-8 写出，并附带了 UTF-8 BOM）。
 
-因此有两条硬约定：
+因此约定如下。注意**不是「禁止中文」**——`dummy_vc_ws/src/` 里本来就有大量
+继承自上游的中文注释，它们目前完好；真正要守住的是下面这些**字节级性质**：
 
-1. **`dummy_vc_ws/src/` 下的 Python 源文件一律只用 ASCII（英文）。** 需要中文说明就写进 `docs/` 的 Markdown。
-2. 改动源文件后用 `tools/check_syntax.py` 和 `tools/check_encoding.py` 验证。
+1. **一律 UTF-8，且不带 BOM。** UTF-16 BOM 会让源码在某些工具下直接不可读，
+   而 UTF-8 BOM 会让脚本的 shebang 失效（Linux 上变成
+   `bad interpreter`）。
+2. **换行符一律 LF**，由 `.gitattributes` 在入库和检出两侧保证。
+3. **不要用 PowerShell 的 `Get-Content` / `Set-Content` 改文件**——那一趟
+   编码往返正是上次事故的成因。用编辑器，或用
+   `[System.IO.File]::ReadAllText` / `WriteAllText` 配 `UTF8Encoding($false)`
+   做字节级操作。
+4. 改动后用 `tools/check_syntax.py` 和 `tools/check_encoding.py <文件>` 验证；
+   后者检查 UTF-8 合法性、BOM 和 mojibake 特征。
 
 ## 完整方案
 
@@ -200,6 +228,11 @@ python tools/debug_pose_chain.py        # 需要 ROS；看模型此刻是什么�
 | `driver-uncommitted-2025.patch` | `dummy_ros2_driver` 的 52 增 99 删改动（基于 `03a5b1a`） |
 | `reference-uncommitted-2025.patch` | `dummy_moveit_ws` 的 9 文件改动（基于 `cfcee7d`） |
 | `probe_device.py.snapshot` | 该未跟踪文件的副本 |
+
+> 两个 `.patch` 原先被 PowerShell 的 `>` 重定向写成了 **UTF-16**（带 BOM），
+> `git apply` 直接拒绝（`error: No valid patches in input`），存档等于不可用。
+> 现已转为 UTF-8（无 BOM）+ LF，`git apply --stat` 能正确读出 52/99 与 9 个文件，
+> 与下表描述一致。这些改动**上游从未提交也从未公开**，务必别再让它被重新编码。
 
 这些存档值得保留，因为其中包含**上游从未提交、也从未公开**的修复。例如 `aruco_tracker_node.py` 里把原作者自己的机器路径 `/home/hata_ros/apps/dummy_ws/...` 改成了自动查找 + 环境变量覆盖；`aruco_detector_node.py` 把 `transform_pose` 移进了 `try` 块（原代码在 TF 不可用时仍会执行并抛异常）。参考项目里的 `dummy_vision` 用的正是 `camera_color_optical_frame` + `base_link` 这条链，与本项目的外置相机方案同路，有直接借鉴价值。
 

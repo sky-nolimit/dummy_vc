@@ -491,7 +491,7 @@ class Stage0Calibrate(Node):
                 self.get_logger().error(f'commanding {jname} failed: {exc}')
 
     def on_snapshot(self, request, response):
-        """Log one line that can be pasted into docs/stage0_params.yaml."""
+        """Log one line that can be pasted into config/dummy_controller.yaml."""
         rec = (
             'joints=[' + ', '.join(f'{self.joint_actual[j]:.6f}'
                                    for j in URDF_JOINTS) + '] '

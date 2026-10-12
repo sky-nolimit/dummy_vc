@@ -7,19 +7,27 @@ re-implements the same formulas and asserts the properties that must hold:
 
   1. The calibration anchor maps correctly both ways.
        7 pose: angle -> URDF = all zeros, URDF -> move_j = [0,0,90,0,0,0]
-  2. Round trip URDF -> move_j -> URDF is the identity, for every joint,
-     with every combination of joint_sign.
-  3. angle -> URDF -> angle is the identity.
+  1b. The retracted (power-off) pose folds back on itself. This is the only
+     check that is independent of the joint_sign choice, so it is what
+     actually pins the signs down.
+  2. Round trip URDF -> move_j -> URDF, and URDF -> angle -> URDF, are the
+     identity.
+  3. Reports the derived down-link constant for comparison with the reference
+     project. Supporting evidence, not proof.
+  4. The driver's code defaults still agree with the config, and the launch
+     file has not reintroduced a second, hardcoded copy of the calibration
+     values.
 
-It reads the offsets from the driver config, so it cannot drift from the real
-parameters. It does NOT import the driver: it is an independent check, so a
-bug in the driver cannot hide by being mirrored here.
+config/dummy_controller.yaml is the single source of truth for every number.
+This script reads them from there and does NOT import the driver: it is an
+independent check, so a bug in the driver cannot hide by being mirrored here.
 
 Usage:
     python tools/selftest_conversion.py
     python tools/selftest_conversion.py --sign -1,1,1,1,1,1
 """
 import argparse
+import ast
 import contextlib
 import io
 import math
@@ -139,6 +147,13 @@ def main():
             print(f'          want {[round(v, 4) for v in want]}')
             failures.append(label)
 
+    def check_true(label, okc, detail=''):
+        print(f'  [{"ok  " if okc else "FAIL"}] {label}')
+        if detail:
+            print(f'          {detail}')
+        if not okc:
+            failures.append(label)
+
     # ---- 1. anchor ------------------------------------------------------
     print('1. calibration anchor (7 pose)')
     check('angle_7pose -> URDF == 0', a2u(ANGLE_7POSE), URDF_7POSE, tol=1e-6)
@@ -222,18 +237,25 @@ def main():
     print('  = [0, 0, 90, 0, 0, 0]; a match is supporting evidence, not proof.')
     print()
 
-    # ---- 4. the same values must appear in the driver and the launch file --
+    # ---- 4. driver defaults, and no second copy in the launch file -------
     #
-    # Three places carry these defaults: this config, the driver's code
-    # defaults, and the launch file's DEFAULTS dict. They drifted apart
-    # repeatedly in this project, and a stale one silently overrides the
-    # config, so they are compared here.
-    print('4. driver code defaults and launch defaults agree with the config')
+    # These numbers used to be written down in three places: this config, the
+    # driver's code defaults, and a DEFAULTS dict in the launch file. They
+    # drifted apart repeatedly -- and because that dict was applied AFTER the
+    # YAML parameter file, it silently WON, so editing the config appeared to
+    # do nothing at all.
+    #
+    # The launch file no longer holds any of them: it reads them out of this
+    # config when the launch description is built. So two things are left to
+    # verify here -- that the driver's code defaults still agree, and that
+    # nobody has reintroduced a hardcoded copy into the launch file.
+    print('4. driver defaults agree; launch file holds no second copy')
     checks = [('joint_sign', sign), ('joint_offset_deg', joff),
               ('move_j_offset_deg', mjoff)]
 
     dtext = open(DRIVER, encoding='utf-8').read()
     ltext = open(LAUNCH, encoding='utf-8').read()
+    ltree = ast.parse(ltext)
     for key, want in checks:
         m = re.search(rf'{key}\s*=\s*\[([^\]]*)\]', dtext)
         if key == 'joint_sign':
@@ -241,24 +263,65 @@ def main():
         got = [float(v) for v in m.group(1).split(',')] if m else None
         check(f'driver default {key}', got, want, tol=1e-6)
 
-        m = re.search(rf"'{key}':\s*'\[([^\]]*)\]'", ltext)
-        got = [float(v) for v in m.group(1).split(',')] if m else None
-        check(f'launch default {key}', got, want, tol=1e-6)
+    # Every parameter the config declares, taken from the file itself so a
+    # parameter added to the YAML is automatically covered.
+    param_names = set(re.findall(r'^\s{4}([a-z_][a-z0-9_]*)\s*:', text, re.M))
+    if not param_names:
+        print('FATAL: could not read any parameter names from the config')
+        return 1
 
-    # scalars: home/reset poses and the gripper block
-    for key in ('home_joints_deg', 'reset_joints_deg'):
-        m = re.search(rf'^\s*{key}\s*:\s*\[([^\]]*)\]', text, re.M)
-        want = [float(v) for v in m.group(1).split(',')] if m else None
-        m = re.search(rf"'{key}':\s*'\[([^\]]*)\]'", ltext)
-        got = [float(v) for v in m.group(1).split(',')] if m else None
-        check(f'launch default {key}', got, want, tol=1e-6)
+    # The launch file must obtain the values from the config...
+    check_true(
+        'launch reads the config instead of restating it',
+        'load_config_defaults' in ltext and 'ros__parameters' in ltext,
+        'expected a load_config_defaults() helper reading ros__parameters')
 
-    for key in ('grip_angle_closed', 'grip_angle_open', 'grip_current_limit'):
-        m = re.search(rf'^\s*{key}\s*:\s*([-\d.]+)', text, re.M)
-        want = [float(m.group(1))] if m else None
-        m = re.search(rf"'{key}':\s*'([-\d.]+)'", ltext)
-        got = [float(m.group(1))] if m else None
-        check(f'launch default {key}', got, want, tol=1e-9)
+    # ...and must not grow a literal dict of them again. Only literals that
+    # actually look like parameter values are flagged, so the prose in
+    # DESCRIPTIONS is not mistaken for one, and the usage example in the
+    # module docstring is ignored (it is not a dict entry).
+    def looks_like_value(s):
+        s = s.strip()
+        return bool(re.fullmatch(r'-?\d+(?:\.\d+)?', s)
+                    or re.fullmatch(r'\[[-\d.,\s]*\]', s))
+
+    offenders = []
+    for node in ast.walk(ltree):
+        if not isinstance(node, ast.Dict):
+            continue
+        for k, v in zip(node.keys, node.values):
+            if (isinstance(k, ast.Constant) and isinstance(k.value, str)
+                    and k.value in param_names
+                    and isinstance(v, ast.Constant)
+                    and isinstance(v.value, str)
+                    and looks_like_value(v.value)):
+                offenders.append(k.value)
+    check_true(
+        'launch file has no hardcoded copy of the calibration values',
+        not offenders,
+        (f'hardcoded in the launch file: {sorted(set(offenders))}'
+         if offenders else
+         'the YAML is the only place these numbers are written down'))
+
+    # The launch file raises if a config parameter has no description, so a
+    # missing one would break bringup outright. Catch it here instead.
+    desc_keys = set()
+    for node in ast.walk(ltree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == 'DESCRIPTIONS'
+                   for t in node.targets):
+            continue
+        if isinstance(node.value, ast.Dict):
+            desc_keys = {k.value for k in node.value.keys
+                         if isinstance(k, ast.Constant)
+                         and isinstance(k.value, str)}
+    missing_desc = sorted(param_names - desc_keys)
+    check_true(
+        'every config parameter is documented as a launch argument',
+        not missing_desc,
+        (f'missing from DESCRIPTIONS: {missing_desc}' if missing_desc
+         else f'{len(param_names)} parameters covered'))
     print()
 
     print('=' * 62)

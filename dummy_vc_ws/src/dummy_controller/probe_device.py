@@ -1,7 +1,24 @@
 #!/usr/bin/env python3
-"""临时脚本：连接设备并打印完整接口树"""
+"""Connect to the arm and dump its complete fibre interface tree.
+
+Useful on the bench: it is the authoritative answer to "what can this device
+actually do", independent of any code that consumes it. Run it from anywhere:
+
+    python3 probe_device.py
+
+It must NOT be imported by the node: it is a standalone diagnostic and is not
+installed by setup.py.
+"""
+import os
 import sys
-sys.path.insert(0, '/opt/ros_ws/dummy_ws/src/dummy_ros2_driver')
+
+# Resolve dummy_cli_tool relative to this file rather than a hardcoded path.
+# The previous version pointed at the original author's machine
+# (/opt/ros_ws/dummy_ws/src/dummy_ros2_driver), which silently does not exist
+# here: the import still worked only because the directory happened to be
+# sys.path[0] when the script was run from its own folder, so running it from
+# anywhere else failed for a confusing reason.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import dummy_cli_tool.ref_tool as ref_tool
 

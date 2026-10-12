@@ -66,8 +66,11 @@ class dummy_controller(LifecycleNode):
         self.home_joints = np.array([0.0, 0.0, 90.0, 0.0, 0.0, 0.0])
         self.reset_joints = np.array([0.0, -75.0, 180.0, 0.0, 0.0, 0.0])
 
-        # 内部状态统一用**弧度**（ROS 惯例）
-        self.current_joints = np.zeros(6)
+        # 内部状态统一用**弧度**（ROS 惯例）。
+        # 名字里带 urdf_rad 是刻意的：这里存的是 URDF 关节角（弧度），
+        # **不是**设备的 angle 回读值（度）。两者之间差一次 angle_to_urdf
+        # 换算；属性名含糊时曾经在急停路径上被混用（把弧度直接当度下发）。
+        self.current_urdf_rad = np.zeros(6)
         self.current_end_pose = np.zeros(6)
 
         # 轨迹执行
@@ -269,14 +272,29 @@ class dummy_controller(LifecycleNode):
         return self.normalize_movej(out)
 
     def movej_to_angle(self, movej_deg):
-        """move_j 空间（度）-> angle 空间（度）。"""
+        """move_j 空间（度）-> angle 空间（度）。angle_to_movej 的逆。
+
+        必须同时减掉 move_j_offset_deg **并加回** joint_offset_deg。完整的
+        换算是 move_j = angle - joint_offset_deg + move_j_offset_deg
+        （config/dummy_controller.yaml 里那两条链的复合），所以逆变换少任何
+        一项都得不到 angle 空间的值。早期版本漏了 joint_offset_deg，在 7 姿态
+        上偏差达 [0.2, 74.6, -91.5, ...] 度。
+        """
         return np.array([float(movej_deg[i]) - self.move_j_offset_deg[i]
-                         for i in range(6)])
+                         + self.joint_offset_deg[i] for i in range(6)])
 
     def angle_to_movej(self, angle_deg):
-        """angle 空间（度）-> move_j 空间（度）。"""
-        return np.array([float(angle_deg[i]) + self.move_j_offset_deg[i]
-                         for i in range(6)])
+        """angle 空间（度）-> move_j 空间（度）。movej_to_angle 的逆。
+
+        与 config 的两条链保持一致：
+            move_j = angle - joint_offset_deg + move_j_offset_deg
+        这正是 angle -> URDF -> move_j 的复合（sign 两次相消）。
+
+        **不做整圈归一化**，保持为纯换算。要下发给设备请走 urdf_to_movej
+        （它带归一化），或自行调用 normalize_movej。
+        """
+        return np.array([float(angle_deg[i]) - self.joint_offset_deg[i]
+                         + self.move_j_offset_deg[i] for i in range(6)])
 
     def movej_to_urdf(self, movej_deg):
         """move_j 空间（度）-> URDF 关节角（**弧度**）。与 urdf_to_movej 互逆。"""
@@ -466,7 +484,7 @@ class dummy_controller(LifecycleNode):
     def call_poll_position(self):
         try:
             # 读取当前关节角度
-            self.current_joints = self.current_joints_callback()
+            self.current_urdf_rad = self.current_joints_callback()
             # 读取当前末端位置
             self.current_end_pose = self.current_end_callback()
             self.pub_current_joints_and_end_pose()
@@ -479,6 +497,39 @@ class dummy_controller(LifecycleNode):
         # 发布当前末端位置
         self.pub_current_end_pose()
 
+    def read_raw_angles(self):
+        """读取设备六个关节的原始角度（angle 空间，**度**）。
+
+        这是本节点唯一直接触碰 robot.joint_N.angle 的地方。设备的这个读数
+        既不等于 URDF 角度，也不等于 move_j 指令值，必须经 angle_to_urdf
+        换算。上游原版直接把原始值当 URDF 弧度发布，所以 j3 差 90 度、模型
+        放大约 57 倍。换算的推导见 config/dummy_controller.yaml。
+        """
+        robot = self.dummy_driver.robot
+        return [
+            float(robot.joint_1.angle),
+            float(robot.joint_2.angle),
+            float(robot.joint_3.angle),
+            float(robot.joint_4.angle),
+            float(robot.joint_5.angle),
+            float(robot.joint_6.angle),
+        ]
+
+    def read_device(self):
+        """刷新缓存的当前姿态，并返回本次读到的原始角度（angle 空间，度）。
+
+        self.current_urdf_rad 会同步更新为由同一批读数算出的 URDF 弧度，
+        这样 /joint_states 发布的值与调用方拿到的回读值必然出自同一次读取，
+        不会出现"日志和 RViz 各说各话"。
+
+        返回值是**度**（angle 空间），不是弧度：调用方通常要拿去和
+        joint_offset_deg 对照、或喂给 angle_to_urdf_deg / angle_to_movej，
+        那两个入口收的都是度。
+        """
+        raw_deg = self.read_raw_angles()
+        self.current_urdf_rad = self.angle_to_urdf(raw_deg)
+        return raw_deg
+
     def current_joints_callback(self):
         """读取设备原始关节角，换算成 URDF 关节角（弧度）。
 
@@ -487,16 +538,7 @@ class dummy_controller(LifecycleNode):
         上游原版直接把原始值当 URDF 弧度发布，所以 j3 差 90 度、模型放大约
         57 倍。换算的推导见 config/dummy_controller.yaml。
         """
-        robot = self.dummy_driver.robot
-        raw = [
-            robot.joint_1.angle,
-            robot.joint_2.angle,
-            robot.joint_3.angle,
-            robot.joint_4.angle,
-            robot.joint_5.angle,
-            robot.joint_6.angle,
-        ]
-        return self.angle_to_urdf(raw)
+        return self.angle_to_urdf(self.read_raw_angles())
 
     def current_end_callback(self):
         # 设备不支持末端位姿读取，返回零值
@@ -569,7 +611,7 @@ class dummy_controller(LifecycleNode):
             joint_state.header.stamp = self.get_clock().now().to_msg()
             # 手指关节必须一起发布，否则这两段 TF 缺失（见方法上方说明）
             joint_state.name = list(self.joint_names) + list(self.finger_joint_names)
-            joint_state.position = list(self.current_joints) + [left, right]
+            joint_state.position = list(self.current_urdf_rad) + [left, right]
             joint_state.velocity = [0.0] * len(joint_state.name)
 
             self.joint_pub.publish(joint_state)
@@ -580,9 +622,9 @@ class dummy_controller(LifecycleNode):
             self.gripper_state_pub.publish(grip)
 
             self.get_logger().info(
-                f'Publish JPOS: j1: {self.current_joints[0]:.2f}, j2: {self.current_joints[1]:.2f}, '
-                f'j3: {self.current_joints[2]:.2f}, j4: {self.current_joints[3]:.2f}, '
-                f'j5: {self.current_joints[4]:.2f}, j6: {self.current_joints[5]:.2f}, '
+                f'Publish JPOS: j1: {self.current_urdf_rad[0]:.2f}, j2: {self.current_urdf_rad[1]:.2f}, '
+                f'j3: {self.current_urdf_rad[2]:.2f}, j4: {self.current_urdf_rad[3]:.2f}, '
+                f'j5: {self.current_urdf_rad[4]:.2f}, j6: {self.current_urdf_rad[5]:.2f}, '
                 f'fingers: {left:.4f}/{right:.4f} grip={self.gripper_frac:.2f}',
                 throttle_duration_sec=1.0
             )
@@ -652,38 +694,58 @@ class dummy_controller(LifecycleNode):
         movej_deg = np.asarray(movej_deg, dtype=float)
         try:
             self.move_joints(movej_deg)
+        except Exception as exc:
+            self.get_logger().error(f'{label} command failed: {exc}')
+            return
 
-            # 回读换算成 URDF 角度，仅用于日志对照
-            self.read_device()
-            urdf_deg = self.angle_to_urdf_deg(self.current_joints)
+        # 回读仅用于日志对照，与上一步的 try 分开。回读失败时如果也报
+        # "{label} failed"，就又会制造"日志说失败、实物其实已经动了"这种
+        # 最难查的假故障——那正是这里当初少一个 read_device() 时的症状。
+        try:
+            # read_device() 返回的是 angle 空间的**度**，正好是
+            # angle_to_urdf_deg 的输入；不要拿 current_urdf_rad 去喂它。
+            raw_deg = self.read_device()
+            urdf_deg = self.angle_to_urdf_deg(raw_deg)
             self.get_logger().info(
                 f'{label}: move_j_deg={np.round(movej_deg, 2).tolist()} | '
-                f'readback angle_deg={np.round(self.current_joints, 2).tolist()} '
+                f'readback angle_deg={np.round(raw_deg, 2).tolist()} '
                 f'-> urdf_deg={np.round(urdf_deg, 2).tolist()}')
         except Exception as exc:
-            self.get_logger().error(f'{label} failed: {exc}')
+            self.get_logger().warn(
+                f'{label}: command sent, but readback failed: {exc}')
 
     def home_dummy(self, wait=True):
         self._send_named_pose(self.home_joints, 'home')
 
     def stop_dummy(self):
-        """急停：把当前姿态再下发一次，用于立即停止运动。
+        """急停：把设备**此刻的实际姿态**换算回 move_j 空间再下发一次。
 
-        current_joints 存的是 angle 空间的回读值，直接换算到 move_j 空间即可，
-        不需要绕 URDF 一圈（绕一圈再绕回来是恒等变换，徒增出错机会）。
+        走 angle -> URDF -> move_j 这条被 tools/selftest_conversion.py 覆盖的
+        标准两步链，不另拼公式。
+
+        这里曾经有两个叠加的错误：把缓存 self.current_urdf_rad（URDF 弧度）
+        喂给按"度"入参的换算函数，而且所用的 angle_to_movej 还漏了
+        joint_offset_deg 项。两者合起来使下发的目标与当前姿态差了几十度，
+        一旦真的接上急停按钮，按下去就是一次大角度抽动而不是停住。
         """
-        movej_deg = self.angle_to_movej(self.current_joints)
+        self.read_device()                      # 刷新 current_urdf_rad（弧度）
+        movej_deg = self.urdf_to_movej(self.current_urdf_rad)
         self._send_named_pose(movej_deg, 'emergency stop')
 
     def reset_dummy(self, wait=True):
         self._send_named_pose(self.reset_joints, 'reset')
 
-    async def check_joints_place(self, target_joints_deg):
-        # target_joints_deg 是度，current_joints 是弧度，需要统一单位比较
-        target_rad = np.radians(target_joints_deg)
+    async def check_joints_place(self, target_urdf_deg):
+        """等待关节到位。
+
+        target_urdf_deg 是 **URDF 空间**的角度（度），与 self.current_urdf_rad
+        （弧度）同属一个空间，只差单位换算。两边必须同空间：拿设备角度去和
+        URDF 弧度比较，"到位"会永远判不成立。
+        """
+        target_rad = np.radians(target_urdf_deg)
         t1 = time.time()
         while True:
-            if np.allclose(self.current_joints, target_rad, atol=0.01):
+            if np.allclose(self.current_urdf_rad, target_rad, atol=0.01):
                 break
             if time.time() - t1 > 10:
                 self.get_logger().warn("Timeout waiting for joints to reach target")

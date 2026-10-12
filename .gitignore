@@ -15,8 +15,10 @@ __pycache__/
 *.swp
 *~
 
-# --- 阶段 0 实测的原始记录（体积大且机器相关，不入库；
-#     提取出的参数表 docs/stage0_params.yaml 要入库）---
+# --- 阶段 0 实测的原始记录（体积大且机器相关，不入库）---
+#     标定节点默认把快照追加到 ~/stage0_snapshots.log，本来就在仓库外；
+#     这里再挡一层，防止有人把原始记录拷进来。
+#     权威参数表是 dummy_controller/config/dummy_controller.yaml，它要入库。
 tools/stage0_raw/
 
 # --- 杂项运行产物 ---
