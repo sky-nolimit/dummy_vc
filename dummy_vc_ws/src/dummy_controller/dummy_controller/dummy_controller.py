@@ -112,7 +112,7 @@ class dummy_controller(LifecycleNode):
         self.declare_parameter('wrap_max_deg', 360.0)
         # 设备连接超时（秒）。**不要设为 0 或负数**：fibre 的 find_any 在
         # timeout=None 时会永久阻塞，没有设备时会让启动静默卡死。
-        self.declare_parameter('connect_timeout_sec', 15.0)
+        self.declare_parameter('connect_timeout_sec', 30.0)
 
         self.joint_sign = list(self.get_parameter('joint_sign').value)
         self.joint_offset_deg = list(
@@ -136,8 +136,8 @@ class dummy_controller(LifecycleNode):
         if self.connect_timeout_sec <= 0.0:
             self.get_logger().warn(
                 f'connect_timeout_sec={self.connect_timeout_sec} would block '
-                'forever on a missing device; using 15.0 instead')
-            self.connect_timeout_sec = 15.0
+                'forever on a missing device; using 30.0 instead')
+            self.connect_timeout_sec = 30.0
         if abs(self.grip_angle_open - self.grip_angle_closed) < 1e-6:
             self.get_logger().error(
                 'grip_angle_open and grip_angle_closed are equal; the finger '

@@ -36,9 +36,10 @@ from launch.actions import (
     DeclareLaunchArgument,
     ExecuteProcess,
     LogInfo,
-    TimerAction,
+    RegisterEventHandler,
 )
 from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import LifecycleNode, Node
 
@@ -56,7 +57,7 @@ DEFAULTS = {
     'grip_angle_closed': '0.0',
     'grip_angle_open': '90.0',
     'grip_current_limit': '1.0',
-    'connect_timeout_sec': '15.0',
+    'connect_timeout_sec': '30.0',
 }
 
 DESCRIPTIONS = {
@@ -82,6 +83,8 @@ DESCRIPTIONS = {
         'Gripper open angle in device units (degrees).',
     'grip_current_limit':
         'Gripper current limit (A) used when driving the gripper.',
+    'connect_timeout_sec':
+        'Timeout in seconds for the driver to connect to the arm.',
 }
 
 
@@ -93,11 +96,6 @@ def generate_launch_description():
 
     xacro_file = os.path.join(desc_share, 'urdf', 'dummy2_urdf.xacro')
     robot_description = xacro.process_file(xacro_file).toxml()
-
-    # The node creates its subscriptions in on_activate, so give it a moment
-    # to finish configuring. 3 s is generous but harmless.
-    delay_configure = 3.0
-    delay_activate = 2.0
 
     actions = [
         DeclareLaunchArgument(
@@ -139,38 +137,67 @@ def generate_launch_description():
 
     # Transition the lifecycle node via the ros2 CLI. Using ExecuteProcess
     # avoids depending on lifecycle_msgs event APIs in launch.
+    #
+    # IMPORTANT: these are chained by process exit, NOT by fixed timers.
+    # `ros2 lifecycle set` returns only after the transition completes, so
+    # OnProcessExit(configure) is a real completion signal. Timers are not:
+    # an earlier version used delay_configure=3s and delay_activate=2s, but
+    # device discovery alone takes 10-13 s, so activate fired while the node
+    # was still configuring. The transition was refused AND never retried,
+    # leaving the node inactive -- no publishers, no /joint_states, no motion.
     configure = ExecuteProcess(
         cmd=['ros2', 'lifecycle', 'set', '/dummy_controller', 'configure'],
         output='screen',
         condition=IfCondition(LaunchConfiguration('activate')),
     )
 
+    # Deliberately NOT conditioned: this process only ever runs from inside
+    # _after_configure, which already checks the flag. Giving it a condition
+    # as well would be harmless but misleading.
     activate = ExecuteProcess(
         cmd=['ros2', 'lifecycle', 'set', '/dummy_controller', 'activate'],
         output='screen',
-        condition=IfCondition(LaunchConfiguration('activate')),
     )
+
+    def _after_configure(event, context):
+        """Chain activate, or explain why we stop.
+
+        The event from ExecuteProcess carries its return code. A non-zero code
+        means the transition itself failed (commonly because on_configure
+        returned FAILURE), and running activate afterwards would only add a
+        confusing second error on top of the real one.
+        """
+        if not context.launch_configurations.get('activate', 'true') == 'true':
+            return []          # user asked for manual lifecycle control
+        rc = event[1] if isinstance(event, (list, tuple)) else 0
+        if rc != 0:
+            return [LogInfo(msg=(
+                f'[bringup] configure FAILED (exit code {rc}). Not activating. '
+                'Scroll up for the "on_configure FAILED" line and the '
+                'traceback under it -- that names the step that broke.'))]
+        return [
+            LogInfo(msg='[bringup] configure succeeded; emitting activate ...'),
+            activate,
+            LogInfo(msg='[bringup] if /joint_states appears below, the driver '
+                        'is live. To inspect the pose chain run: '
+                        'python3 tools/debug_pose_chain.py'),
+        ]
 
     actions += [
         LogInfo(msg='[bringup] starting dummy_controller (lifecycle node) ...'),
         controller,
         rsp,
-        TimerAction(
-            period=delay_configure,
-            actions=[
-                LogInfo(msg='[bringup] emitting lifecycle configure ...'),
-                configure,
-            ],
-        ),
-        TimerAction(
-            period=delay_configure + delay_activate,
-            actions=[
-                LogInfo(msg='[bringup] emitting lifecycle activate ...'),
-                activate,
-                LogInfo(msg='[bringup] if /joint_states appears below, '
-                            'the driver is live. To inspect the pose chain '
-                            'run: python3 tools/debug_pose_chain.py'),
-            ],
+        LogInfo(msg='[bringup] waiting for the driver to advertise its '
+                    'lifecycle service, then configuring ...'),
+        # No artificial delay: `ros2 lifecycle set` already waits for the
+        # service to appear. A timer here only made startup slower and could
+        # fire before the service existed.
+        configure,
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=configure,
+                on_exit=_after_configure,
+            )
         ),
     ]
     return LaunchDescription(actions)

@@ -156,4 +156,4 @@ dummy_controller:
 
     # 设备连接超时（秒）。fibre 的 find_any 在 timeout=None 时**永久阻塞**，
     # 没有设备时会让启动静默卡死（日志停在参数打印之后、机械臂不动）。
-    connect_timeout_sec: 15.0
+    connect_timeout_sec: 30.0
