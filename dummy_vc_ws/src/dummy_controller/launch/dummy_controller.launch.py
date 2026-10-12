@@ -96,6 +96,10 @@ DESCRIPTIONS = {
     'grip_current_limit':
         'Gripper current limit. The only guard against crushing an object; '
         'start low.',
+    'gripper_init_timeout_sec':
+        'Seconds to wait for gripper init before giving up on it. The '
+        'gripper fibre channel has blocked before, and a hang there must not '
+        'freeze the whole node.',
     'connect_timeout_sec':
         'Seconds to wait for the device. Must be > 0: a non-positive value '
         'makes fibre block forever instead of failing.',

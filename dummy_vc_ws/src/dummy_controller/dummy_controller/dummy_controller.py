@@ -1,4 +1,5 @@
 import time
+import threading
 import rclpy
 import asyncio
 
@@ -116,6 +117,11 @@ class dummy_controller(LifecycleNode):
         # 设备连接超时（秒）。**不要设为 0 或负数**：fibre 的 find_any 在
         # timeout=None 时会永久阻塞，没有设备时会让启动静默卡死。
         self.declare_parameter('connect_timeout_sec', 30.0)
+        # 夹爪初始化超时（秒）。夹爪的 fibre 调用曾经阻塞过，而它若在
+        # on_configure 里同步等待就会冻死整个节点，连 /joint_states 都不发。
+        self.declare_parameter('gripper_init_timeout_sec', 5.0)
+        # 夹爪是否初始化成功。失败或超时后为 False，机械臂本体仍可正常使用。
+        self.gripper_ready = False
 
         self.joint_sign = list(self.get_parameter('joint_sign').value)
         self.joint_offset_deg = list(
@@ -425,20 +431,65 @@ class dummy_controller(LifecycleNode):
         self.dummy_driver.robot.set_enable(True)
         self.get_logger().info('motors enabled')
 
-        # 夹爪初始化失败**不能**阻断整条 bringup。
-        # 过去这里会把失败往上抛，导致 on_configure 整体失败、机械臂完全不动，
-        # 而用户只看到日志戛然而止。夹爪单独使能，失败就只报错继续。
-        hand = self.dummy_driver.robot.hand
-        try:
-            # 要在使能**之前**压低电流上限，否则夹爪可能一上来就用默认大电流，
-            # 第一次装夹就压坏东西。
-            hand.set_current_limit(self.grip_current_limit)
-            hand.set_enable(True)
+        # 夹爪初始化。**必须在带超时的线程里做。**
+        #
+        # 实测过一次：日志停在 "motors enabled" 之后就不再前进，/joint_states
+        # 一条也不发。主电机明明使能成功了，所以问题只在夹爪通道——夹爪的
+        # fibre 调用阻塞住了，而它是在 on_configure 里同步执行的，于是整个
+        # 节点冻死，后面的 activate 永远到不了，也就没有发布者。
+        #
+        # 夹爪挂住绝不能拖死整条 bringup：超时就放弃它、继续 configure，
+        # 机械臂本体照样能动，夹爪以后可以单独再弄。
+        self._init_gripper_with_timeout()
+
+    def _init_gripper_with_timeout(self):
+        """在线程里初始化夹爪，超时就放弃，不阻塞 configure。"""
+        timeout = float(self.get_parameter('gripper_init_timeout_sec').value)
+        result = {}
+
+        def _work():
+            try:
+                # 分步记日志：夹爪通道一旦阻塞，日志停在哪个 "step" 上就
+                # 直接指出是取句柄、设电流还是使能出的问题。
+                self.get_logger().info('gripper step 1/3: reading hand handle')
+                hand = self.dummy_driver.robot.hand
+                self.get_logger().info(
+                    f'gripper step 2/3: set_current_limit('
+                    f'{self.grip_current_limit})')
+                # 要在使能**之前**压低电流上限，否则夹爪可能一上来就用默认大
+                # 电流，第一次装夹就压坏东西。
+                hand.set_current_limit(self.grip_current_limit)
+                self.get_logger().info('gripper step 3/3: set_enable(True)')
+                hand.set_enable(True)
+                result['ok'] = True
+            except Exception as exc:  # noqa: BLE001
+                result['err'] = f'{type(exc).__name__}: {exc}'
+
+        self.get_logger().info(
+            f'initialising gripper (timeout {timeout}s) ...')
+        th = threading.Thread(target=_work, daemon=True,
+                              name='gripper-init')
+        th.start()
+        th.join(timeout)
+
+        if th.is_alive():
+            # 线程还活着说明 fibre 调用没返回。不能 kill 线程，只能放着
+            # （daemon=True 保证进程退出时不会卡住），并继续往下走。
+            self.get_logger().error(
+                f'gripper init did NOT return within {timeout}s; the fibre call '
+                'is blocked. Continuing WITHOUT the gripper so the arm can '
+                'still be used. The blocked thread is left as a daemon.')
+            self.gripper_ready = False
+            return
+
+        if result.get('ok'):
+            self.gripper_ready = True
             self.get_logger().info(
                 f'gripper enabled, current limit = {self.grip_current_limit}')
-        except Exception as exc:  # noqa: BLE001
+        else:
+            self.gripper_ready = False
             self.get_logger().error(
-                f'gripper init failed ({type(exc).__name__}: {exc}); '
+                f'gripper init failed ({result.get("err", "unknown")}); '
                 'continuing without gripper')
 
     def init_pub_sub(self):
@@ -591,15 +642,32 @@ class dummy_controller(LifecycleNode):
         """接收归一化夹爪指令。
 
         0.0 = 全闭，1.0 = 全开。超范围会被夹到 [0,1]。
-        夹持力由 grip_current_limit 控制，在 on_activate 时已设好。
+        夹持力由 grip_current_limit 控制，在 configure 时已设好。
         """
+        if not self.gripper_ready:
+            # 夹爪初始化失败或超时过。这里的调用走同一条会阻塞的 fibre
+            # 通道，如果在执行器线程里再阻塞一次，整个节点就彻底不响应了
+            # ——包括 /joint_states。所以直接拒绝，而不是去试。
+            self.get_logger().error(
+                'gripper not ready (init failed or timed out); ignoring the '
+                'command. See the "gripper init" line in the startup log.',
+                throttle_duration_sec=5.0)
+            return
+
         frac = max(0.0, min(1.0, float(msg.data)))
         angle = self.gripper_frac_to_angle(frac)
+        self.gripper_target = frac
+        self.get_logger().info(
+            f'gripper command: frac={frac:.3f} -> angle={angle:.2f} deg')
+        # 也放到线程里：即使这次 fibre 调用卡住，也只丢掉这一条指令，
+        # 不会冻结执行器。
+        threading.Thread(
+            target=self._send_gripper_angle, args=(angle,),
+            daemon=True, name='gripper-cmd').start()
+
+    def _send_gripper_angle(self, angle):
         try:
             self.dummy_driver.robot.hand.set_angle(angle)
-            self.gripper_target = frac
-            self.get_logger().info(
-                f'gripper command: frac={frac:.3f} -> angle={angle:.2f} deg')
         except Exception as exc:  # noqa: BLE001
             self.get_logger().error(f'gripper command failed: {exc}')
 
