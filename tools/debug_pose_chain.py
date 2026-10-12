@@ -43,6 +43,15 @@ def get_list(text, key, default=None):
     return [float(v) for v in m.group(1).split(',') if v.strip()]
 
 
+def wrap360(v, lo=0.0):
+    """Wrap an angle into [lo, lo + 360). Matches the driver's normaliser."""
+    while v < lo:
+        v += 360.0
+    while v >= lo + 360.0:
+        v -= 360.0
+    return v
+
+
 def classify(urdf_rad):
     """Describe the model pose from the joint angles, via real FK."""
     try:
@@ -146,15 +155,25 @@ def main():
             print(f'  {n:<16} {v:+.5f} rad  ({math.degrees(v):+8.2f} deg)')
     print()
 
-    # Reconstruct the upstream stages for cross-checking
     print('reconstructed chain (for cross-checking only)')
+    # Reconstruct the upstream stages for cross-checking.
+    #
+    # move_j must be derived the SAME way the driver does it, otherwise this
+    # line reports a value the device was never sent and looks like a
+    # calibration failure. An earlier version used `movej = ang + mjoff`,
+    # which drops both the sign divide and the wrap; on the 7 pose it printed
+    # [0, 75, 0, 0, 0, 0] while the config and the device both say
+    # [0, 0, 90, 0, 0, 0]. That cost a round of chasing a non-existent bug.
+    #
+    # Driver: move_j = urdf_deg / sign + move_j_offset_deg, then wrapped into
+    # [wrap_min_deg, wrap_min_deg + 360).
     urdf_deg = [math.degrees(v) for v in urdf_rad]
-    chain = [urdf_deg[i] - uoff[i] for i in range(6)]
     ang = []
     for i in range(6):
         s = sign[i] if abs(sign[i]) > 1e-12 else 1.0
-        ang.append(chain[i] / s + off[i])
-    movej = [ang[i] + mjoff[i] for i in range(6)]
+        ang.append((urdf_deg[i] - uoff[i]) / s + off[i])
+    movej = [wrap360(urdf_deg[i] / (sign[i] if abs(sign[i]) > 1e-12 else 1.0)
+                     + mjoff[i]) for i in range(6)]
     print(f'  implied angle space  = {[round(v, 2) for v in ang]}')
     print(f'  implied move_j space = {[round(v, 2) for v in movej]}')
     print('  (compare the move_j line with home_joints_deg / '
