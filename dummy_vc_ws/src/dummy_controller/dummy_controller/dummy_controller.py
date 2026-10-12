@@ -442,10 +442,21 @@ class dummy_controller(LifecycleNode):
                 '(only one process can own it at a time).')
         self.get_logger().info('device connected')
 
-        # 电机设为上电
-        self.get_logger().info('enabling motors ...')
+        # 电机设为上电。
+        #
+        # 注意这条日志的措辞：**"sent" 不是 "enabled"。** 这行以前写的是
+        # "motors enabled"，而它只是无条件打印的——设备是否真的加上了力矩，
+        # 软件侧看不到。实测中 homing() 能驱动手臂而 move_j 完全无效，所以
+        # "set_enable 到底有没有到达轴" 是一个必须靠人工确认的问题：使能后
+        # 用手推 joint_1，推不动说明力矩在，推得动说明这行根本没生效。
+        #
+        # 不要把这行日志当成"电机已使能"的证据。
+        self.get_logger().info('sending set_enable(True) ...')
         self.dummy_driver.robot.set_enable(True)
-        self.get_logger().info('motors enabled')
+        self.get_logger().info(
+            'set_enable(True) returned. Whether the axes actually hold torque '
+            'cannot be read back from here; verify by hand if move_j does '
+            'nothing (see tools/probe_attrs.py).')
 
         # 夹爪初始化。**必须在带超时的线程里做。**
         #
