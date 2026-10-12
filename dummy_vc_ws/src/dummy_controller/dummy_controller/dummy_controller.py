@@ -66,8 +66,8 @@ class dummy_controller(LifecycleNode):
         #
         # 这两个数组会被 ROS 参数覆盖，见 _declare_params。
         # ------------------------------------------------------------------
-        self.joint_sign = [1.0, 1.0, -1.0, 1.0, 1.0, 1.0]
-        self.joint_offset_deg = [0.215, 74.572, -90.125, -0.910, -0.035, -0.040]
+        self.joint_sign = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+        self.joint_offset_deg = [0.215, 74.572, -91.474, -0.910, -0.035, -0.040]
 
         # 位置参数：单位是**度**，且这里的角度是 **move_j 空间**（设备侧），
         # **不是** URDF 角度。下发时直接原样交给 move_j，不做任何变换。
@@ -90,11 +90,11 @@ class dummy_controller(LifecycleNode):
 
     def _declare_params(self):
         """声明并读取参数。on_configure 之后调用。"""
-        default_sign = [1.0, 1.0, -1.0, 1.0, 1.0, 1.0]
+        default_sign = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
         # (1) 7 姿态的 angle 回读就是该姿态的偏置（此时 URDF 应为全零）
-        default_offset_deg = [0.215, 74.572, -90.125, -0.910, -0.035, -0.040]
+        default_offset_deg = [0.215, 74.572, -91.474, -0.910, -0.035, -0.040]
         # (2) move_j 与 angle 在 j3 上差 87.70
-        default_movej_offset_deg = [0.0, 0.0, 87.7, 0.0, 0.0, 0.0]
+        default_movej_offset_deg = [0.215, 74.572, -181.474, -0.910, -0.035, -0.040]
         # (3) URDF 空间里的附加偏置，默认全零。
         #     曾经把 j3 设成 180 想抵消姿态反差，方向加反了，反而把本该为 0
         #     的值推成 180——那正是问题本身。详见 config 里的推导记录。
@@ -111,6 +111,9 @@ class dummy_controller(LifecycleNode):
         # 让 robot_state_publisher 能发布手指关节的 TF
         self.declare_parameter('finger_travel_m', 0.023)
         self.declare_parameter('hand_max_angle', 90.0)
+        # move_j 下发前的整圈归一化区间，见 normalize_movej()
+        self.declare_parameter('wrap_min_deg', 0.0)
+        self.declare_parameter('wrap_max_deg', 360.0)
 
         self.joint_sign = list(self.get_parameter('joint_sign').value)
         self.joint_offset_deg = list(
@@ -132,9 +135,9 @@ class dummy_controller(LifecycleNode):
                 self.get_logger().error(
                     f'{name} must have exactly 6 elements, got {len(val)}; '
                     'falling back to defaults')
-                self.joint_sign = [1.0, 1.0, -1.0, 1.0, 1.0, 1.0]
-                self.joint_offset_deg = [0.215, 74.572, -90.125, -0.910, -0.035, -0.040]
-                self.move_j_offset_deg = [0.0, 0.0, 87.7, 0.0, 0.0, 0.0]
+                self.joint_sign = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+                self.joint_offset_deg = [0.215, 74.572, -91.474, -0.910, -0.035, -0.040]
+                self.move_j_offset_deg = [0.215, 74.572, -181.474, -0.910, -0.035, -0.040]
                 self.urdf_offset_deg = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
                 break
 
@@ -144,55 +147,95 @@ class dummy_controller(LifecycleNode):
         self.get_logger().info(f'urdf_offset_deg      = {self.urdf_offset_deg}')
 
     # ----------------------------------------------------------------------
-    # 三个坐标系的换算（改这里之前务必先读 config/dummy_controller.yaml 的说明）
+    # 坐标换算（改之前务必先读 config/dummy_controller.yaml 的推导记录）
     #
-    #   move_j 空间   robot.move_j 的角度（度）。home/reset 属于这个空间。
-    #   angle 空间    robot.joint_N.angle 的原始回读（度）。
-    #   URDF 空间     URDF / MoveIt / /joint_states（弧度）。
+    # 三个空间：
+    #   angle    robot.joint_N.angle 的原始回读（度）—— 设备的物理量
+    #   move_j   robot.move_j 的指令值（度）—— 设备的指令量
+    #   URDF     URDF / MoveIt / /joint_states（弧度）
     #
-    # 关系：
-    #   URDF   = sign * (angle - joint_offset_deg)
-    #   angle  = move_j - move_j_offset_deg
+    # 关键设计：**两条链各自一步，不互相推导**。
+    #   urdf_deg = angle - joint_offset_deg           [回读 -> 模型]
+    #   move_j   = urdf_deg + move_j_offset_deg       [模型 -> 指令]
     #
-    # 因此 move_j 到 URDF 是：
-    #   URDF   = sign * (move_j - move_j_offset_deg - joint_offset_deg)
-    #            + urdf_offset_deg
+    # 为什么强调"不互相推导"：早期版本让 urdf_to_movej 走
+    # "URDF -> angle -> move_j" 三步，而 joint_offset 与 move_j_offset 是在
+    # 不同锚点上分别拟合的，中间还要除一个 gain，结果对 j2 累积出约 149 度
+    # 的复合误差。两条链各自独立拟合就不会有这个问题。
     #
-    # urdf_offset_deg 是**在 URDF 空间里试参数用的**，可通过 ROS 参数覆盖，
-    # 不必重新编译。用途是区分两种偏差：
-    #   sign 错    -> 实物与模型**转向相反**
-    #   offset 错  -> 实物与模型转向相同，但整体差一个固定角度
-    # 例如整体差 180 度时可临时加：
-    #   -p urdf_offset_deg:="[0,0,180,0,0,0]"
-    #
-    # 7 姿态实测校验：move_j j3=90 -> angle 2.30 -> URDF 0.00
-    #   90 - 87.7 = 2.30      （move_j -> angle，注意是**减**）
-    #   2.30 - 2.30 = 0.00    （angle  -> URDF）
+    # 一致性锚点（config 里两个偏置都由此推出）：
+    #   7 姿态  angle = [0.215, 74.572, -91.474, -0.910, -0.035, -0.040]
+    #           urdf  = [0, 0, 0, 0, 0, 0]
+    #           move_j= [0, 0, 90, 0, 0, 0]
+    # 已验证：joint_offset 取该表时 urdf 恰好为 0；
+    #         move_j_offset 取该表时 move_j 恰好为 [0,0,90,...]。
     # ----------------------------------------------------------------------
-    @staticmethod
-    def _apply_sign(sign, vals):
-        out = []
-        for i in range(6):
-            s = sign[i]
-            if abs(s) < 1e-12:
-                s = 1.0
-            out.append(s * float(vals[i]))
-        return np.array(out)
-
     def angle_to_urdf_deg(self, angle_deg):
         """angle 空间（度）-> URDF 关节角（**度**）。"""
-        shifted = [float(angle_deg[i]) - self.joint_offset_deg[i]
-                   for i in range(6)]
-        signed = self._apply_sign(self.joint_sign, shifted)
-        return np.array([signed[i] + self.urdf_offset_deg[i]
+        return np.array([float(angle_deg[i]) - self.joint_offset_deg[i]
                          for i in range(6)])
 
     def angle_to_urdf(self, angle_deg):
         """angle 空间（度）-> URDF 关节角（**弧度**）。
 
-        这是 ROS 侧唯一应该使用的回读入口（/joint_states 需要弧度）。
+        这是回读发布的唯一入口（/joint_states 需要弧度）。
         """
         return np.radians(self.angle_to_urdf_deg(angle_deg))
+
+    def urdf_to_angle(self, urdf_rad):
+        """URDF 关节角（弧度）-> angle 空间（度）。angle_to_urdf 的逆。"""
+        urdf_deg = np.degrees(np.asarray(urdf_rad, dtype=float))
+        return np.array([float(urdf_deg[i]) + self.joint_offset_deg[i]
+                         for i in range(6)])
+
+    def normalize_movej(self, movej_deg):
+        """把 move_j 角度收进设备能接受的范围。
+
+        设备角度**不缠绕**，会无限累加。经过偏置运算后可能落到
+        [-360, 0] 之类的区间。直接把 -272 这种值发给硬件风险不明，所以先
+        归一化。整圈的差别对运动本身没有影响。
+
+        参数 wrap_min_deg / wrap_max_deg 可收紧区间；区间宽度小于 360 度时
+        会真的做夹取（用于有明确行程的关节）。
+        """
+        lo = float(self.get_parameter('wrap_min_deg').value)
+        hi = float(self.get_parameter('wrap_max_deg').value)
+        out = []
+        for i in range(6):
+            v = float(movej_deg[i])
+            if hi - lo < 359.0:
+                while v < lo:
+                    v += 360.0
+                while v > hi:
+                    v -= 360.0
+            else:
+                while v < lo:
+                    v += 360.0
+                while v >= lo + 360.0:
+                    v -= 360.0
+            out.append(v)
+        return np.array(out)
+
+    def urdf_to_movej(self, urdf_rad):
+        """URDF 关节角（弧度）-> move_j 空间（度）。
+
+        这是把 MoveIt 轨迹点转成设备指令的唯一入口。结果已做整圈归一化。
+
+        换算常量是**派生量**，不是独立参数：
+
+            move_j = angle - move_j_offset_deg
+            angle  = urdf  + joint_offset_deg
+            =>  move_j = urdf + (joint_offset_deg - move_j_offset_deg)
+
+        当前两偏置之差恰为 [0, 0, 90, 0, 0, 0]，正好是参考项目 rad_fix 里的
+        rad_volumn_diff。刻意做成派生量而不是再存一份，是为了不引入第三个
+        可以各自漂移的数字——那正是前几轮反复出错的根源。
+        """
+        urdf_deg = np.degrees(np.asarray(urdf_rad, dtype=float))
+        delta = [self.joint_offset_deg[i] - self.move_j_offset_deg[i]
+                 for i in range(6)]
+        out = np.array([float(urdf_deg[i]) + delta[i] for i in range(6)])
+        return self.normalize_movej(out)
 
     def movej_to_angle(self, movej_deg):
         """move_j 空间（度）-> angle 空间（度）。"""
@@ -205,24 +248,11 @@ class dummy_controller(LifecycleNode):
                          for i in range(6)])
 
     def movej_to_urdf(self, movej_deg):
-        """move_j 空间（度）-> URDF 关节角（**弧度**）。"""
-        return self.angle_to_urdf(self.movej_to_angle(movej_deg))
-
-    def urdf_to_movej(self, urdf_rad):
-        """URDF 关节角（弧度）-> move_j 空间（度）。
-
-        这是把 MoveIt 轨迹点转成设备指令的唯一入口。
-        """
-        urdf_deg = np.degrees(np.asarray(urdf_rad, dtype=float))
-        out = []
-        for i in range(6):
-            s = self.joint_sign[i]
-            if abs(s) < 1e-12:
-                s = 1.0
-            signed = float(urdf_deg[i]) - self.urdf_offset_deg[i]
-            angle_i = signed / s + self.joint_offset_deg[i]
-            out.append(angle_i + self.move_j_offset_deg[i])
-        return np.array(out)
+        """move_j 空间（度）-> URDF 关节角（**弧度**）。与 urdf_to_movej 互逆。"""
+        delta = [self.joint_offset_deg[i] - self.move_j_offset_deg[i]
+                 for i in range(6)]
+        urdf_deg = [float(movej_deg[i]) - delta[i] for i in range(6)]
+        return np.radians(np.array(urdf_deg))
 
     # ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓ Lifecycle node callback ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓
     def on_configure(self, state: State) -> TransitionCallbackReturn:
@@ -540,6 +570,12 @@ class dummy_controller(LifecycleNode):
         joint_names 的顺序可能与我们的关节顺序不同，必须按名字重排，
         不能假设它们已经是 dummy2_joint1..6 的顺序。
         """
+        # 收到轨迹先记一条日志。缺少这一行会导致「实物没动」时无法判断
+        # 是回调没触发、还是被拒绝、还是执行了但没效果。
+        self.get_logger().info(
+            f'RECEIVED JointTrajectory: {len(msg.points)} point(s), '
+            f'joint_names={list(msg.joint_names)}')
+
         if self._traj_executing:
             self.get_logger().warn(
                 'A trajectory is already executing, ignoring the new one')

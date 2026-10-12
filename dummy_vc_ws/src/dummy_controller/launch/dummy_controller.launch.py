@@ -46,9 +46,9 @@ from launch_ros.actions import LifecycleNode, Node
 # checker tools/check_coord_spaces.py verifies that the YAML, the driver code
 # defaults and these values all agree.
 DEFAULTS = {
-    'joint_sign': '[1.0, 1.0, -1.0, 1.0, 1.0, 1.0]',
-    'joint_offset_deg': '[0.215, 74.572, -90.125, -0.910, -0.035, -0.040]',
-    'move_j_offset_deg': '[0.0, 0.0, 87.7, 0.0, 0.0, 0.0]',
+    'joint_sign': '[1.0, 1.0, 1.0, 1.0, 1.0, 1.0]',
+    'joint_offset_deg': '[0.215, 74.572, -91.474, -0.910, -0.035, -0.040]',
+    'move_j_offset_deg': '[0.215, 74.572, -181.474, -0.910, -0.035, -0.040]',
     'urdf_offset_deg': '[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]',
     'home_joints_deg': '[0.0, 0.0, 90.0, 0.0, 0.0, 0.0]',
     'reset_joints_deg': '[0.0, -75.0, 180.0, 0.0, 0.0, 0.0]',
