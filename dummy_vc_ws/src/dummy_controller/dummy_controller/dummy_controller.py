@@ -55,7 +55,7 @@ class dummy_controller(LifecycleNode):
         #   robot.joint_N.set_position 度
         #   URDF / MoveIt / /joint_states  弧度
         # ------------------------------------------------------------------
-        self.joint_sign = [-1.0, 1.0, -1.0, 1.0, -1.0, -1.0]
+        self.joint_sign = [-1.0, -1.0, -1.0, 1.0, -1.0, -1.0]
         self.joint_offset_deg = [0.215, 74.572, -91.474, -0.910, -0.035, -0.040]
         self.move_j_offset_deg = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
 
@@ -83,7 +83,7 @@ class dummy_controller(LifecycleNode):
 
     def _declare_params(self):
         """声明并读取参数。on_configure 之后调用。"""
-        default_sign = [-1.0, 1.0, -1.0, 1.0, -1.0, -1.0]
+        default_sign = [-1.0, -1.0, -1.0, 1.0, -1.0, -1.0]
         # (1) 7 姿态的 angle 回读就是该姿态的偏置（此时 URDF 应为全零）
         default_offset_deg = [0.215, 74.572, -91.474, -0.910, -0.035, -0.040]
         # (2) move_j 与 angle 在 j3 上差 87.70
@@ -178,7 +178,7 @@ class dummy_controller(LifecycleNode):
                 self.get_logger().error(
                     f'{name} must have exactly 6 elements, got {len(val)}; '
                     'falling back to defaults')
-                self.joint_sign = [-1.0, 1.0, -1.0, 1.0, -1.0, -1.0]
+                self.joint_sign = [-1.0, -1.0, -1.0, 1.0, -1.0, -1.0]
                 self.joint_offset_deg = [0.215, 74.572, -91.474, -0.910, -0.035, -0.040]
                 self.move_j_offset_deg = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
                 self.urdf_offset_deg = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
