@@ -87,6 +87,10 @@ DESCRIPTIONS = {
         'Largest travel (deg) a single move_j may ask for. Beyond this the '
         'command is refused instead of sent, because the device ignores '
         'unreachable setpoints silently.',
+    'movej_accepted_range_deg':
+        'Per-joint lo,hi of move_j values the device accepts (12 numbers). '
+        'Values outside are dropped SILENTLY, taking the whole command with '
+        'them. Measured with tools/probe_range.py.',
     'movej_current_trim_deg':
         'Per-joint trim (deg) added to the reference pose the driver keeps '
         'for whole-turn folding. Use it only to compensate a mis-anchored '

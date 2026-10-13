@@ -128,6 +128,11 @@ class dummy_controller(LifecycleNode):
         # 整圈折算的"当前位置"，不改变 homing 到达的物理姿态。
         self.declare_parameter('movej_current_trim_deg',
                                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        # move_j 可接受区间，逐关节下界/上界交替，共 12 个数，单位度。
+        # **实测得来**（tools/probe_range.py）。区间外的值被设备静默丢弃。
+        self.declare_parameter('movej_accepted_range_deg', [
+            -165.0, 165.0, -75.0, 90.0, 45.0, 180.0,
+            -180.0, 165.0, -90.0, 90.0, -180.0, 180.0])
         # 设备连接超时（秒）。**不要设为 0 或负数**：fibre 的 find_any 在
         # timeout=None 时会永久阻塞，没有设备时会让启动静默卡死。
         self.declare_parameter('connect_timeout_sec', 30.0)
@@ -308,57 +313,87 @@ class dummy_controller(LifecycleNode):
             return None
 
     def normalize_movej(self, movej_deg, current_deg=None):
-        """把 move_j 目标折算成设备真正够得着的等价值。
+        """把 move_j 目标折算进设备的可接受区间。
 
-        **这里曾经是整份驱动最严重的 bug。** 原实现把每个角度归一化进
-        [0, 360)，于是物理意图 -20.22 度被写成 339.78 度。设备按字面理解，
-        就去转将近一整圈 —— 超出关节行程，命令被**静默拒绝**，表现为
-        "日志说下发成功、机械臂完全不动"。
+        **这个函数修过两次，两次都是同一个教训的不同侧面。**
 
-        实测三组对照（同一物理目标，只改写法）：
+        第一版把每个角度归一化进 [0, 360)，于是物理意图 -20.22 度被写成
+        339.78 度；设备按字面理解要转将近一整圈，命令被静默拒绝。改成"离
+        当前位置最近的整圈等价"之后，j1 之类的关节好了，**但 j3 仍然不动**。
 
-            [340.0, 0, 90, 0, 0, 0]   归一化进 [0,360)    -> 无反应
-            [-20.0, 0, 90, 0, 0, 0]   就近等价 / 原值      -> 正常动作
+        第二版失败的教训更重要：**设备有一个实测出来的、很窄而且偏离零点的
+        可接受区间**，而"就近整圈等价"假设区间是绕原点的一整圈。实测区间是
 
-        所以正确做法是：对每个关节取**离当前位置最近的整圈等价角**。
-        整圈等价即 target + 360*k，k 取让结果最接近 current 的那个整数。
+            joint_1 [-165, 165]   joint_2 [-75, 90]    joint_3 [45, 180]
+            joint_4 [-180, 165]   joint_5 [-90, 90]    joint_6 [-180, 180]
 
-        current_deg 缺省时回退到旧行为（按 wrap_min_deg 归一化），但这只用于
-        没有回读可用的场合；正常下发路径都会传入当前角度。
+        j3 的最小可接受值是 +45。驱动早期算出的 -1.474 落在区间外，**而且它
+        的任何整圈平移（-361.5、358.5、718.5）也都在区间外** —— 所以整圈折算
+        对它无能为力。区间外的值被设备静默丢弃，整条命令不执行。
 
-        同时做**可达性检查**：即便取了就近等价，仍可能离当前位置太远
-        （例如超过一整圈的一半），那说明目标不可达。这种情况下报错，
-        而不是静默下发 —— 静默失败正是这个 bug 能藏这么久的原因。
+        正确做法：把每个目标平移整圈，落到该关节的 [lo, hi] 之内。区间可能
+        跨过 0/360 接缝（例如 [-180, 165]），所以用带符号的取模而不是夹取。
+
+        找不到合法等价值时**报错**，不静默下发 —— 静默失败正是这件事能藏这么
+        久的原因。
         """
-        if current_deg is None:
-            lo = float(self.get_parameter('wrap_min_deg').value)
-            out = []
-            for i in range(6):
-                v = float(movej_deg[i])
-                while v < lo:
-                    v += 360.0
-                while v >= lo + 360.0:
-                    v -= 360.0
-                out.append(v)
-            return np.array(out)
+        rng = list(self.get_parameter('movej_accepted_range_deg').value)
+        if len(rng) != 12:
+            self.get_logger().error(
+                'movej_accepted_range_deg must hold 12 numbers (lo,hi per '
+                'joint); falling back to a permissive full turn')
+            rng = [-180.0, 180.0] * 6
 
         limit = float(self.get_parameter('max_move_jump_deg').value)
         out = []
         for i in range(6):
             target = float(movej_deg[i])
-            cur = float(current_deg[i])
-            # 离当前位置最近的整圈等价角
-            best = target + 360.0 * round((cur - target) / 360.0)
-            travel = best - cur
-            if abs(travel) > limit:
+            lo, hi = float(rng[2 * i]), float(rng[2 * i + 1])
+            width = hi - lo
+            if width <= 0.0 or width >= 359.999:
+                # A full turn (or a bad interval) means every value is
+                # reachable, so just take the nearest whole-turn equivalent.
+                best = target
+                if current_deg is not None:
+                    cur = float(current_deg[i])
+                    best = target + 360.0 * round((cur - target) / 360.0)
+                out.append(best)
+                continue
+
+            # Fold into [lo, hi] by moving to the interval's own frame.
+            x = (target - lo) % 360.0
+            candidates = [x - 360.0, x, x + 360.0]
+            inside = [c for c in candidates if -1e-9 <= c <= width + 1e-9]
+            if inside:
+                # Prefer the equivalent that is closest to where we are.
+                if current_deg is not None:
+                    cur = float(current_deg[i])
+                    best = min(inside,
+                               key=lambda c: abs((lo + c) - cur))
+                else:
+                    best = inside[0]
+                best = lo + best
+            else:
+                # Nothing lands inside this joint's accepted interval: the
+                # target pose is outside what the device will do at all.
                 self.get_logger().error(
-                    f'joint{i + 1}: target {target:.2f} deg (nearest equivalent '
-                    f'{best:.2f}) is {travel:+.2f} deg from the current '
-                    f'{cur:.2f} deg, beyond max_move_jump_deg={limit:.0f}. '
-                    'The device ignores unreachable setpoints SILENTLY, so '
-                    'this command would look like "sent ok, nothing moved". '
-                    'Refusing it instead. Check the target pose and the '
-                    'calibration, not the transport.')
+                    f'joint{i + 1}: target {target:.2f} deg has no equivalent '
+                    f'inside the accepted interval [{lo:.1f}, {hi:.1f}]. The '
+                    'device would drop the WHOLE command silently. Refusing '
+                    'it instead -- this means the target pose is outside the '
+                    'joint travel, or the calibration is inconsistent.')
+                out.append(target)
+                continue
+
+            travel = best - (float(current_deg[i])
+                             if current_deg is not None else best)
+            if current_deg is not None and abs(travel) > limit:
+                self.get_logger().error(
+                    f'joint{i + 1}: folding {target:.2f} into [{lo:.1f}, '
+                    f'{hi:.1f}] gives {best:.2f}, which is {travel:+.2f} deg '
+                    f'from the current {float(current_deg[i]):.2f}, beyond '
+                    f'max_move_jump_deg={limit:.0f}. Refusing it rather than '
+                    'sending something the arm cannot reach.')
             out.append(best)
         return np.array(out)
 

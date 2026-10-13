@@ -99,7 +99,11 @@ def load_methods():
     parts.append('    def get_parameter(self, name):')
     parts.append('        class P:')
     parts.append('            def __init__(self, v): self.value = v')
-    parts.append('        return P(getattr(self, name, 0.0))')
+    parts.append('        default = 0.0')
+    parts.append('        if name == "movej_accepted_range_deg":')
+    parts.append('            default = [-165.0, 165.0, -75.0, 90.0, '
+                 '45.0, 180.0, -180.0, 165.0, -90.0, 90.0, -180.0, 180.0]')
+    parts.append('        return P(getattr(self, name, default))')
     found = []
     for node in cls.body:
         if isinstance(node, ast.FunctionDef) and node.name in wanted:
