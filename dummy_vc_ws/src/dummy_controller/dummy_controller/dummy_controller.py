@@ -124,6 +124,10 @@ class dummy_controller(LifecycleNode):
         # 能藏很久的原因。默认 180：一个关节一次转过半圈以上，几乎肯定是
         # 整圈折算选错了，或者目标姿态本身有问题。
         self.declare_parameter('max_move_jump_deg', 180.0)
+        # 参考位姿微调（度，逐关节）。见配置文件的说明：只补偿驱动用来做
+        # 整圈折算的"当前位置"，不改变 homing 到达的物理姿态。
+        self.declare_parameter('movej_current_trim_deg',
+                               [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         # 设备连接超时（秒）。**不要设为 0 或负数**：fibre 的 find_any 在
         # timeout=None 时会永久阻塞，没有设备时会让启动静默卡死。
         self.declare_parameter('connect_timeout_sec', 30.0)
@@ -168,6 +172,13 @@ class dummy_controller(LifecycleNode):
             self.gripper_enable = bool(raw_enable)
         self.connect_timeout_sec = float(
             self.get_parameter('connect_timeout_sec').value)
+        self.movej_current_trim_deg = list(
+            self.get_parameter('movej_current_trim_deg').value)
+        if len(self.movej_current_trim_deg) != 6:
+            self.get_logger().error(
+                'movej_current_trim_deg must have exactly 6 elements; '
+                'ignoring it and using zeros')
+            self.movej_current_trim_deg = [0.0] * 6
         if self.connect_timeout_sec <= 0.0:
             self.get_logger().warn(
                 f'connect_timeout_sec={self.connect_timeout_sec} would block '
@@ -286,10 +297,12 @@ class dummy_controller(LifecycleNode):
         回退路径只用于第一次下发之前；一旦发过命令，命令历史就是准确的。
         """
         if self._last_cmd_movej is not None:
-            return list(self._last_cmd_movej)
+            return [self._last_cmd_movej[i] + self.movej_current_trim_deg[i]
+                    for i in range(6)]
         try:
             raw_deg = self.read_raw_angles()
             return [float(raw_deg[i]) - self.move_j_offset_deg[i]
+                    + self.movej_current_trim_deg[i]
                     for i in range(6)]
         except Exception:  # noqa: BLE001
             return None

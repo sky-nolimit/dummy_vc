@@ -87,6 +87,10 @@ DESCRIPTIONS = {
         'Largest travel (deg) a single move_j may ask for. Beyond this the '
         'command is refused instead of sent, because the device ignores '
         'unreachable setpoints silently.',
+    'movej_current_trim_deg':
+        'Per-joint trim (deg) added to the reference pose the driver keeps '
+        'for whole-turn folding. Use it only to compensate a mis-anchored '
+        'start pose; it does not change the pose homing() reaches.',
     'home_joints_deg':
         'The 7 pose, in move_j space (device degrees).',
     'reset_joints_deg':
