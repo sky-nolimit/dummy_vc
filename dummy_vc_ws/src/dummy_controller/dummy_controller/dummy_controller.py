@@ -145,6 +145,18 @@ class dummy_controller(LifecycleNode):
         self.declare_parameter('movej_accepted_range_deg', [
             -165.0, 165.0, -75.0, 90.0, 45.0, 180.0,
             -180.0, 165.0, -90.0, 90.0, -180.0, 180.0])
+        # URDF 全零时应当下发的 move_j 值，逐关节，单位度。
+        #
+        # **这是整条下发链唯一的常数项**，取代了此前把 joint_offset_deg 和
+        # move_j_offset_deg 相加的写法。那个写法对 j3 给出 -1.474，落在设备
+        # 可接受区间 [45, 180] 之外，于是整条命令被静默丢弃 —— 就是那个
+        # "下发成功但机械臂不动"。
+        #
+        # 取值就是 home_joints_deg：URDF 全零 = 7 姿态，而 7 姿态对应的
+        # move_j 就是 home_joints_deg，这一点由 homing()、probe_pairs 的实测
+        # 配对、以及 probe_range 的可接受区间三方印证。
+        self.declare_parameter('movej_urdf_zero_deg',
+                               [0.0, 0.0, 90.0, 0.0, 0.0, 0.0])
         # 设备连接超时（秒）。**不要设为 0 或负数**：fibre 的 find_any 在
         # timeout=None 时会永久阻塞，没有设备时会让启动静默卡死。
         self.declare_parameter('connect_timeout_sec', 30.0)
@@ -196,6 +208,13 @@ class dummy_controller(LifecycleNode):
                 'movej_current_trim_deg must have exactly 6 elements; '
                 'ignoring it and using zeros')
             self.movej_current_trim_deg = [0.0] * 6
+        self.movej_urdf_zero_deg = list(
+            self.get_parameter('movej_urdf_zero_deg').value)
+        if len(self.movej_urdf_zero_deg) != 6:
+            self.get_logger().error(
+                'movej_urdf_zero_deg must have exactly 6 elements; falling '
+                'back to home_joints (URDF zero is the 7 pose)')
+            self.movej_urdf_zero_deg = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
         if self.connect_timeout_sec <= 0.0:
             self.get_logger().warn(
                 f'connect_timeout_sec={self.connect_timeout_sec} would block '
@@ -435,59 +454,101 @@ class dummy_controller(LifecycleNode):
         可接受区间。**不传它会退回旧的 [0,360) 语义**，正常路径都应传入。
         """
         urdf_deg = np.degrees(np.asarray(urdf_rad, dtype=float))
-        out = np.array([float(urdf_deg[i]) / self._safe_sign(i)
-                        + self.joint_offset_deg[i]
-                        + self.move_j_offset_deg[i]
+        # 常数项经 get_parameter 读取，而不是用实例属性 —— 这样
+        # tools/check_conversions.py 的测试桩（只 exec 方法、不跑
+        # on_configure）也能驱动这个函数，否则它会 AttributeError。
+        zero = list(self.get_parameter('movej_urdf_zero_deg').value)
+        if len(zero) != 6:
+            self.get_logger().error(
+                'movej_urdf_zero_deg must have exactly 6 elements; using the '
+                '7 pose values instead')
+            zero = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
+        out = np.array([float(urdf_deg[i]) / self._safe_sign(i) + zero[i]
                         for i in range(6)])
         return self.normalize_movej(out, current_deg)
 
     def movej_to_angle(self, movej_deg):
         """move_j 空间（度）-> angle 空间（度）。angle_to_movej 的逆。
 
-        `angle_to_movej` 是 `move_j = angle + mjoff`（经 angle -> URDF -> move_j
-        复合后 joff 抵消），所以逆变换就是 `angle = move_j - mjoff`。
+        `angle_to_movej` 是 `move_j = angle - joff + zero`，所以逆变换就是
 
-        旧实现多减了一个 joint_offset_deg，与旧的 angle_to_movej 恰好互逆 ——
-        两个错误互相抵消，往返测试因此一直是通过的。这类"自洽但不对"的组合
-        正是本项目反复踩的坑，所以现在两个函数必须成对修改。
+            angle = move_j - zero + joff
+
+        **必须与 angle_to_movej 成对修改。** 二者各自看着"合理"却互不逆，
+        是本项目反复踩的坑；check_conversions.py 的对拍就是为了抓这个。
         """
-        return np.array([float(movej_deg[i]) - self.move_j_offset_deg[i]
-                         for i in range(6)])
+        zero = list(self.get_parameter('movej_urdf_zero_deg').value)
+        if len(zero) != 6:
+            self.get_logger().error(
+                'movej_urdf_zero_deg must have exactly 6 elements; using the '
+                '7 pose values instead')
+            zero = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
+        return np.array([float(movej_deg[i]) - zero[i]
+                         + self.joint_offset_deg[i] for i in range(6)])
 
     def angle_to_movej(self, angle_deg):
         """angle 空间（度）-> move_j 空间（度）。movej_to_angle 的逆。
 
-        **这个快捷式曾经与两步链不自洽。** 两步链是
+        必须与两步链**代数等价**。两步链是
 
             angle -> URDF  :  urdf   = sign * (angle - joff)
-            URDF  -> move_j:  move_j = urdf/sign + joff + mjoff
+            URDF  -> move_j:  move_j = urdf/sign + zero
 
-        复合起来 sign 两次相消，joff 也正好抵消：
+        复合后 sign 相消，于是
 
-            move_j = angle - joff + joff + mjoff = angle + mjoff
+            move_j = angle - joff + zero
 
-        旧实现写成 `angle - joff + mjoff`，多减了一个 joff，于是与两步链整体
-        差 2*joff（j2 差 149 度、j3 差 183 度）。它不在下发路径上（下发走
-        urdf_to_movej），所以这个错误一直没暴露，只有 check_conversions.py
-        的对拍会碰到。
+        其中 `zero = movej_urdf_zero_deg`（URDF 全零时下发的 move_j，即 7 姿态）。
+
+        **这里改过两次，两次都是同一个毛病：凭"看起来该相消"写公式。**
+
+        第一版写 `angle - joff + mjoff`，而 `mjoff` 与 `joff` 承担的职责不同，
+        整体差 2*joff（j2 差 149 度、j3 差 183 度）。
+
+        第二版写成 `angle + mjoff`（joff 完全抵消），在旧的 down-link 下**恰好
+        与两步链一致**，但那是两个错误互相抵消 —— 旧的 down-link 本身错了
+        （对 j3 给出 -1.474，落在设备可接受区间 [45,180] 之外）。down-link 修正
+        之后，这里就露出不一致了。
+
+        所以现在直接由两步链的公式推出常数项，不再依赖任何"抵消"的直觉。
 
         **不做整圈归一化**，保持为纯换算。要下发给设备请走 urdf_to_movej
         （它带区间折叠），或自行调用 normalize_movej。
         """
-        return np.array([float(angle_deg[i]) + self.move_j_offset_deg[i]
-                         for i in range(6)])
+        zero = list(self.get_parameter('movej_urdf_zero_deg').value)
+        if len(zero) != 6:
+            self.get_logger().error(
+                'movej_urdf_zero_deg must have exactly 6 elements; using the '
+                '7 pose values instead')
+            zero = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
+        return np.array([float(angle_deg[i]) - self.joint_offset_deg[i]
+                         + zero[i] for i in range(6)])
 
     def movej_to_urdf(self, movej_deg):
         """move_j 空间（度）-> URDF 关节角（**弧度**）。与 urdf_to_movej 互逆。
 
-        下滑链是 `move_j = urdf/sign + joff + mjoff`，所以逆变换要把**两项都
-        减掉**再乘 sign：`urdf = sign * (move_j - mjoff - joff)`。
-        旧实现只减了 mjoff，与下滑链不构成互逆对 —— 往返测试当时能通过，
-        只是因为同一个错误在正反两次调用里相互抵消了。
+        下滑链是 `move_j = urdf/sign + zero`，所以逆变换就是
+
+            urdf = sign * (move_j - zero)
+
+        这个函数**必须与 urdf_to_movej 成对修改**。它改过两次，两次都是因为
+        只改了一边：
+
+          第一版只减了 move_j_offset_deg，与当时的下滑链不构成互逆对；
+          第二版减了 mjoff 和 joff 两项，与**当时**的下滑链互逆，但那条下滑链
+          本身是错的（对 j3 给出 -1.474，超出设备可接受区间）。下滑链修正为
+          `urdf/sign + zero` 之后，这里就必须跟着简化。
+
+        往返测试当时能通过，只是因为同一个错误在正反两次调用里相互抵消 ——
+        这类"自洽但不对"的组合是本项目反复踩的坑。
         """
-        urdf_deg = [self._safe_sign(i)
-                    * (float(movej_deg[i]) - self.move_j_offset_deg[i]
-                       - self.joint_offset_deg[i])
+        zero = list(self.get_parameter('movej_urdf_zero_deg').value)
+        if len(zero) != 6:
+            self.get_logger().error(
+                'movej_urdf_zero_deg must have exactly 6 elements; using the '
+                '7 pose values instead')
+            zero = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
+        urdf_deg = [self._safe_sign(i) * (float(movej_deg[i]) - zero[i])
                     for i in range(6)]
         return np.radians(np.array(urdf_deg))
 

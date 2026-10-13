@@ -81,29 +81,35 @@ def wrap(v, lo=0.0):
     return v
 
 
-def make_conversions(joff, mjoff, sign):
+def make_conversions(joff, mjoff, sign, zero=None):
     """Return the conversions, mirroring the driver algebra exactly.
+
+    The down-link has ONE constant, `zero` = the move_j value that corresponds
+    to URDF all-zeros (the 7 pose). That is `movej_urdf_zero_deg` in the config,
+    and it equals home_joints_deg.
 
         angle -> urdf :  urdf    = sign * (angle - joff)
         urdf  -> angle:  angle   = urdf / sign + joff
-        urdf  -> move_j: move_j  = urdf / sign + joff + mjoff
-        move_j -> urdf:  urdf    = sign * (move_j - mjoff - joff)
-        angle -> move_j: move_j  = angle + mjoff
+        urdf  -> move_j: move_j  = urdf / sign + zero
+        move_j -> urdf:  urdf    = sign * (move_j - zero)
+        angle -> move_j: move_j  = angle - joff + zero
 
-    Two of these used to be written differently here, and both were wrong:
+    **`zero` replaces an older pair of terms, `joff + mjoff`.** That older form
+    looked reasonable and two chains were built to be mutual inverses around it,
+    so the round trips passed -- but its value for joint_3 came out as -1.474,
+    outside the device's accepted interval [45, 180], so the device dropped the
+    whole command. j2 was off by 74.572 deg and only escaped notice because it
+    stayed inside [-75, 90].
 
-    * `urdf_to_movej` omitted the `joff` term. Composing
-      `angle -> urdf -> move_j` cancels the sign but NOT `joff`, so the driver
-      adds it. Dropping it shifted joint_2 by 74.572 deg and joint_3 by
-      91.474 deg -- and joint_3's shift landed outside its accepted interval,
-      which is why the device dropped those commands silently.
-
-    * `movej_to_urdf` omitted the same term, so the round trip still passed:
-      two matching errors cancel. That is exactly the trap this self-test is
-      supposed to catch, so the copies here must track the driver, not diverge
-      from it. `tools/check_conversions.py` imports the real functions and is
-      the stronger check; keep both in step.
+    The lesson worth keeping: a pair of formulas can be perfectly self-consistent
+    and still describe the device wrongly. Mutual-inverse checks cannot catch
+    that. What catches it is `tools/check_downlink.py`, which compares against
+    the measured (move_j, raw) pairs, and `tools/probe_range.py`, which measures
+    what the device actually accepts.
     """
+    if zero is None:
+        zero = list(mjoff)
+
     def angle_to_urdf(a):
         return [sign[i] * (a[i] - joff[i]) for i in range(6)]
 
@@ -111,13 +117,13 @@ def make_conversions(joff, mjoff, sign):
         return [u[i] / sign[i] + joff[i] for i in range(6)]
 
     def urdf_to_movej(u):
-        return [u[i] / sign[i] + joff[i] + mjoff[i] for i in range(6)]
+        return [u[i] / sign[i] + zero[i] for i in range(6)]
 
     def movej_to_urdf(m):
-        return [sign[i] * (m[i] - mjoff[i] - joff[i]) for i in range(6)]
+        return [sign[i] * (m[i] - zero[i]) for i in range(6)]
 
     def angle_to_movej(a):
-        return [a[i] + mjoff[i] for i in range(6)]
+        return [a[i] - joff[i] + zero[i] for i in range(6)]
 
     return (angle_to_urdf, urdf_to_angle, urdf_to_movej, movej_to_urdf,
             angle_to_movej)
@@ -136,6 +142,7 @@ def main():
     text = open(CONFIG, encoding='utf-8').read()
     joff = get_list(text, 'joint_offset_deg')
     mjoff = get_list(text, 'move_j_offset_deg')
+    zero = get_list(text, 'movej_urdf_zero_deg')
     sign = ([float(v) for v in args.sign.split(',')] if args.sign
             else get_list(text, 'joint_sign'))
 
@@ -158,7 +165,7 @@ def main():
         print('FATAL: joint_sign contains a zero; the conversion divides by it')
         return 1
 
-    a2u, u2a, u2m, m2u, a2m = make_conversions(joff, mjoff, sign)
+    a2u, u2a, u2m, m2u, a2m = make_conversions(joff, mjoff, sign, zero)
     failures = []
 
     def check(label, got, want, tol=1e-6):

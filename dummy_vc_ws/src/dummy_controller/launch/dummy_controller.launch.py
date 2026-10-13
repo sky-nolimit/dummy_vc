@@ -94,6 +94,10 @@ DESCRIPTIONS = {
         'How often /joint_states is published from the cached angles (Hz). '
         'This is what makes RViz animate smoothly, and it does not touch the '
         'device.',
+    'movej_urdf_zero_deg':
+        'The move_j value that corresponds to URDF all-zeros (the 7 pose), '
+        'per joint. This is the only constant in the down-link; it equals '
+        'home_joints_deg.',
     'movej_accepted_range_deg':
         'Per-joint lo,hi of move_j values the device accepts (12 numbers). '
         'Values outside are dropped SILENTLY, taking the whole command with '

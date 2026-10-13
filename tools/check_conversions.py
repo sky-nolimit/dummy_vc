@@ -102,11 +102,21 @@ def load_methods():
     parts.append('    def get_parameter(self, name):')
     parts.append('        class P:')
     parts.append('            def __init__(self, v): self.value = v')
-    parts.append('        default = 0.0')
-    parts.append('        if name == "movej_accepted_range_deg":')
-    parts.append('            default = [-165.0, 165.0, -75.0, 90.0, '
-                 '45.0, 180.0, -180.0, 165.0, -90.0, 90.0, -180.0, 180.0]')
-    parts.append('        return P(getattr(self, name, default))')
+    # The real node assigns these from ROS parameters during on_configure,
+    # which the stub does not run, so seed the ones the methods read.
+    parts.append('        seeded = {')
+    parts.append('            "movej_urdf_zero_deg": '
+                 '[0.0, 0.0, 90.0, 0.0, 0.0, 0.0],')
+    parts.append('            "movej_accepted_range_deg": '
+                 '[-165.0, 165.0, -75.0, 90.0, 45.0, 180.0, -180.0, 165.0, '
+                 '-90.0, 90.0, -180.0, 180.0],')
+    parts.append('            "wrap_min_deg": 0.0,')
+    parts.append('            "wrap_max_deg": 360.0,')
+    parts.append('            "max_move_jump_deg": 180.0,')
+    parts.append('        }')
+    parts.append('        if name in seeded:')
+    parts.append('            return P(seeded[name])')
+    parts.append('        return P(getattr(self, name, 0.0))')
     found = []
     for node in cls.body:
         if isinstance(node, ast.FunctionDef) and node.name in wanted:
