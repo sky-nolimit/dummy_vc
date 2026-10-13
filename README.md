@@ -20,9 +20,10 @@ Dummy_vc/
 │       ├── dummy_controller/      ROS 2 控制器（lifecycle 节点 + fibre 驱动）—— 唯一硬件通道
 │       └── dummy_vc_calibration/  阶段 0 硬件标定节点（预览-确认-执行）
 │
-├── docs/                  方案与操作手册
+├── docs/                  方案、手册与进展报告
 │   ├── 01-视觉抓取方案.md          完整技术方案（分阶段计划与风险清单）
-│   └── 02-阶段0标定操作手册.md      阶段 0 的逐步操作指引
+│   ├── 02-阶段0标定操作手册.md      阶段 0 的逐步操作指引
+│   └── 03-进展与问题报告.md        **当前进展、阻塞问题与待咨询问题**
 │
 ├── tools/                 不依赖 ROS 的独立工具脚本（索引见 tools/README.md）
 │   ├── check_syntax.py            全仓库 Python 语法检查
