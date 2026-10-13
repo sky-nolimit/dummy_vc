@@ -74,6 +74,10 @@ class dummy_controller(LifecycleNode):
         self.current_urdf_rad = np.zeros(6)
         self.current_end_pose = np.zeros(6)
 
+        # 最后一次下发成功的 move_j 值，作为"设备当前命令位置"的权威来源。
+        # 见 commanded_movej()：不用回读反推，因为那个反推式子没有物理依据。
+        self._last_cmd_movej = None
+
         # 轨迹执行
         self._traj_executing = False
 
@@ -252,6 +256,43 @@ class dummy_controller(LifecycleNode):
                 f'joint_sign[{i}] is zero; treating as 1.0')
             return 1.0
         return s
+
+    def commanded_movej(self):
+        """本节点最后一次下发成功的 move_j 值。
+
+        为什么要有这个东西，而不是从原始回读反推当前位置：
+
+        `move_j` 是只写不读的接口，设备不回读命令值。此前驱动用
+
+            current_move_j = raw - move_j_offset_deg
+
+        反推，但那个式子**没有任何物理依据** —— 它是把两个不同来源的常数
+        硬拼在一起。实测暴露出后果：j3 反推得到 -181.474，而依据实测关系
+        （readback = move_j - 180，gain +1，残差 < 0.011 度）该关节真实的
+        move_j 位置是约 +90。差了 270 度。于是"就近整圈等价"把 j3 的目标从
+        -1.474 推到 -360，落进设备拒绝的取值区间，**整条命令被静默丢弃**。
+
+        驱动自己知道它发过什么，所以直接用命令历史既准确又不需要任何假设。
+        初值取 None，表示"还没发过"，首次使用时回退到回读反推。
+        """
+        return self._last_cmd_movej
+
+    def _remember_cmd_movej(self, movej_deg):
+        self._last_cmd_movej = [float(v) for v in movej_deg]
+
+    def guess_current_movej(self):
+        """当前位置的 move_j 估计值：优先用命令历史，否则回退到回读反推。
+
+        回退路径只用于第一次下发之前；一旦发过命令，命令历史就是准确的。
+        """
+        if self._last_cmd_movej is not None:
+            return list(self._last_cmd_movej)
+        try:
+            raw_deg = self.read_raw_angles()
+            return [float(raw_deg[i]) - self.move_j_offset_deg[i]
+                    for i in range(6)]
+        except Exception:  # noqa: BLE001
+            return None
 
     def normalize_movej(self, movej_deg, current_deg=None):
         """把 move_j 目标折算成设备真正够得着的等价值。
@@ -1010,21 +1051,25 @@ class dummy_controller(LifecycleNode):
             f'Executing trajectory: {total} waypoints, '
             f'joint order map {order}')
 
-        # 当前位置（move_j 空间），用来把每个 waypoint 折算成"就近整圈等价角"。
+        # 当前命令位置（move_j 空间），作为"就近整圈等价"的参考。
         #
-        # 起点取一次真实回读；此后每下发一个 waypoint 就用该 waypoint 自己作为
-        # 下一个的参考。这样多 waypoint 轨迹会连续地走，而不是每个点都相对
-        # 最初的姿态折算（那会在中途跳整圈）。
-        try:
-            raw_now = self.read_device()
-            cur_movej = [float(raw_now[i]) - self.move_j_offset_deg[i]
-                         for i in range(6)]
-        except Exception as exc:  # noqa: BLE001
+        # **用命令历史，不用回读反推。** 后者是 `raw - move_j_offset_deg`，
+        # 那个式子没有物理依据：实测 j3 上它与真实命令位置相差 270 度，导致
+        # 目标被推到设备拒绝的区间、整条命令静默失效。驱动自己知道发过什么，
+        # 那才是权威来源。只有在本节点还没发过任何命令时才回退到回读。
+        cur_movej = self.guess_current_movej()
+        if cur_movej is None:
             self.get_logger().error(
-                f'cannot read the current pose ({exc}); refusing to execute a '
-                'trajectory without it, because the nearest-equivalent '
-                'conversion would be guessing.')
+                'cannot determine the current command pose (no command sent '
+                'yet and the readback is unavailable); refusing to execute a '
+                'trajectory because the nearest-equivalent conversion would be '
+                'guessing.')
             return
+        src = ('command history' if self.commanded_movej() is not None
+               else 'readback fallback (no command sent yet)')
+        self.get_logger().info(
+            f'trajectory reference pose from {src}: '
+            f'{[round(v, 2) for v in cur_movej]}')
 
         t_start = time.monotonic()
         for idx, point in enumerate(msg.points):
@@ -1065,9 +1110,15 @@ class dummy_controller(LifecycleNode):
         self.get_logger().info('Trajectory execution complete')
 
     def move_joints(self, joints_deg):
-        """下发关节角度（度）。"""
+        """下发关节角度（度）。
+
+        下发成功后记录本次命令值，作为"设备当前命令位置"的权威来源。设备
+        不回读 move_j，而从原始回读反推的式子没有物理依据（实测 j3 可差
+        270 度），所以命令历史是唯一可靠的位置来源。
+        """
         self.dummy_driver.robot.move_j(joints_deg[0], joints_deg[1], joints_deg[2],
                                        joints_deg[3], joints_deg[4], joints_deg[5])
+        self._remember_cmd_movej(joints_deg)
 
     def off_dummy(self):
         self.dummy_driver.robot.set_enable(False)
