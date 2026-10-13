@@ -87,6 +87,13 @@ DESCRIPTIONS = {
         'Largest travel (deg) a single move_j may ask for. Beyond this the '
         'command is refused instead of sent, because the device ignores '
         'unreachable setpoints silently.',
+    'state_read_hz':
+        'How often the device is polled for fresh angles (Hz). Device I/O is '
+        'blocking; a slower read does not affect correctness.',
+    'joint_state_pub_hz':
+        'How often /joint_states is published from the cached angles (Hz). '
+        'This is what makes RViz animate smoothly, and it does not touch the '
+        'device.',
     'movej_accepted_range_deg':
         'Per-joint lo,hi of move_j values the device accepts (12 numbers). '
         'Values outside are dropped SILENTLY, taking the whole command with '

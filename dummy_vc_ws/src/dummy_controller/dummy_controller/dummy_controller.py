@@ -128,6 +128,10 @@ class dummy_controller(LifecycleNode):
         # 整圈折算的"当前位置"，不改变 homing 到达的物理姿态。
         self.declare_parameter('movej_current_trim_deg',
                                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        # 状态读取与发布的频率，见 init_pub_sub 两个定时器的说明。
+        # 读得慢、发得快：读数受阻塞式 USB 往返限制，发布不受。
+        self.declare_parameter('state_read_hz', 10.0)
+        self.declare_parameter('joint_state_pub_hz', 50.0)
         # move_j 可接受区间，逐关节下界/上界交替，共 12 个数，单位度。
         # **实测得来**（tools/probe_range.py）。区间外的值被设备静默丢弃。
         self.declare_parameter('movej_accepted_range_deg', [
@@ -705,19 +709,57 @@ class dummy_controller(LifecycleNode):
         # TF 不再由本节点发布：tool0 / gripper_tcp / camera_link 等全部在
         # dummy2_urdf.xacro 里静态定义，交给 robot_state_publisher。
 
-        # Timer 50ms (20Hz)，6 次硬件往返约 30~60ms，50ms 更稳妥
-        self.poll_timer = self.create_timer(0.05, self.call_poll_position)
-        
+        # ------------------------------------------------------------------
+        # 两个定时器，**刻意分开**：一个读硬件，一个发话题。
+        #
+        # 原来只有一个 20 Hz 的定时器，里面既读 6 个 joint_N.angle、又读
+        # hand.angle、然后才发布 —— 每秒 140 次阻塞式 USB 往返，而且全部在
+        # 执行器线程里。后果：
+        #   - 发布频率被 USB 往返时间拖住，名义 20 Hz 实际更低
+        #   - RViz 收到的是"跳变"而不是连续变化，看起来就是"更新慢、没有过程"
+        #   - 轨迹回调、订阅、服务都要和这些读数抢执行器
+        #
+        # 拆开之后：读数慢一点没关系（关节不会突变），发布则稳定按固定频率
+        # 发缓存值，不碰 USB。这正是 RViz 需要的。
+        # ------------------------------------------------------------------
+        read_hz = float(self.get_parameter('state_read_hz').value)
+        pub_hz = float(self.get_parameter('joint_state_pub_hz').value)
+        if read_hz <= 0.0:
+            read_hz = 10.0
+        if pub_hz <= 0.0:
+            pub_hz = 50.0
+
+        self.poll_timer = self.create_timer(1.0 / read_hz,
+                                           self.call_poll_position)
+        self.pub_timer = self.create_timer(1.0 / pub_hz,
+                                          self.call_publish_state)
+        self.get_logger().info(
+            f'state read {read_hz:.1f} Hz (device I/O), '
+            f'joint_states publish {pub_hz:.1f} Hz (cached)')
+
     def call_poll_position(self):
+        """低频：读一次硬件，刷新缓存的当前姿态。
+
+        单位换算与发布都放在 call_publish_state 里，这里只负责取数。
+        """
         try:
-            # 读取当前关节角度
             self.current_urdf_rad = self.current_joints_callback()
-            # 读取当前末端位置
+            # 末端位姿设备不支持回读，恒为零；保留调用是为了接口一致
             self.current_end_pose = self.current_end_callback()
-            self.pub_current_joints_and_end_pose()
         except Exception as e:
             self.get_logger().error(f'Poll position error: {str(e)}')
-        
+
+    def call_publish_state(self):
+        """高频：用缓存值发布，不碰硬件。
+
+        这样 /joint_states 的频率由定时器决定，不受 USB 往返时间影响，
+        RViz 的动画才是连续的。
+        """
+        try:
+            self.pub_current_joints_and_end_pose()
+        except Exception as e:
+            self.get_logger().error(f'Publish state error: {str(e)}')
+
     def pub_current_joints_and_end_pose(self):
         # 发布当前关节角度
         self.pub_current_joints()
@@ -921,7 +963,10 @@ class dummy_controller(LifecycleNode):
         if hasattr(self, 'poll_timer') and self.poll_timer is not None:
             self.destroy_timer(self.poll_timer)
             self.get_logger().info("Destroyed poll_timer")
-    
+        if hasattr(self, 'pub_timer') and self.pub_timer is not None:
+            self.destroy_timer(self.pub_timer)
+            self.get_logger().info("Destroyed pub_timer")
+
     def _send_named_pose(self, movej_deg, label):
         """把命名位姿下发到硬件。
 
