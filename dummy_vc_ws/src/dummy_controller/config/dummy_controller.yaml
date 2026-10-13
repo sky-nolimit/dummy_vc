@@ -121,6 +121,11 @@ dummy_controller:
     wrap_min_deg: 0.0
     wrap_max_deg: 360.0
 
+    # single move_j allowed travel (deg); beyond this the target is refused
+    # rather than sent, because the device ignores unreachable setpoints
+    # SILENTLY and that looks exactly like 'sent ok, arm did not move'.
+    max_move_jump_deg: 180.0
+
     # ---------------------------------------------------------------------
     # 命名位姿，单位是 **move_j 空间的度**（设备侧）。
     # 直接沿用上游驱动里已被实体机械臂验证过的值。

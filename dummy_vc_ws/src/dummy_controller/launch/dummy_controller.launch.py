@@ -83,6 +83,10 @@ DESCRIPTIONS = {
     'wrap_max_deg':
         'Upper bound the move_j command is normalised into. A span narrower '
         'than 360 deg makes the normaliser clamp instead of wrapping.',
+    'max_move_jump_deg':
+        'Largest travel (deg) a single move_j may ask for. Beyond this the '
+        'command is refused instead of sent, because the device ignores '
+        'unreachable setpoints silently.',
     'home_joints_deg':
         'The 7 pose, in move_j space (device degrees).',
     'reset_joints_deg':

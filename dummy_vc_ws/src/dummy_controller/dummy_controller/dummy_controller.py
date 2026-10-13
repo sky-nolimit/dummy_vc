@@ -111,9 +111,15 @@ class dummy_controller(LifecycleNode):
         self.declare_parameter('grip_current_limit', 1.0)
         # 兼容旧参数名，避免已有配置直接报"未声明参数"
         self.declare_parameter('hand_max_angle', 90.0)
-        # move_j 下发前的整圈归一化区间，见 normalize_movej()
+        # move_j 下发前的整圈归一化区间（仅在拿不到当前姿态时的回退路径使用）
         self.declare_parameter('wrap_min_deg', 0.0)
         self.declare_parameter('wrap_max_deg', 360.0)
+        # 单次 move_j 允许的最大行程（度）。超过就报错而不是静默下发。
+        #
+        # 设备**会静默忽略够不着的设定值** —— 这正是"下发成功但机械臂不动"
+        # 能藏很久的原因。默认 180：一个关节一次转过半圈以上，几乎肯定是
+        # 整圈折算选错了，或者目标姿态本身有问题。
+        self.declare_parameter('max_move_jump_deg', 180.0)
         # 设备连接超时（秒）。**不要设为 0 或负数**：fibre 的 find_any 在
         # timeout=None 时会永久阻塞，没有设备时会让启动静默卡死。
         self.declare_parameter('connect_timeout_sec', 30.0)
@@ -247,51 +253,80 @@ class dummy_controller(LifecycleNode):
             return 1.0
         return s
 
-    def normalize_movej(self, movej_deg):
-        """把 move_j 角度收进设备能接受的范围。
+    def normalize_movej(self, movej_deg, current_deg=None):
+        """把 move_j 目标折算成设备真正够得着的等价值。
 
-        设备角度**不缠绕**，会无限累加。经过偏置运算后可能落到
-        [-360, 0] 之类的区间。直接把 -272 这种值发给硬件风险不明，所以先
-        归一化。整圈的差别对运动本身没有影响。
+        **这里曾经是整份驱动最严重的 bug。** 原实现把每个角度归一化进
+        [0, 360)，于是物理意图 -20.22 度被写成 339.78 度。设备按字面理解，
+        就去转将近一整圈 —— 超出关节行程，命令被**静默拒绝**，表现为
+        "日志说下发成功、机械臂完全不动"。
 
-        参数 wrap_min_deg / wrap_max_deg 可收紧区间；区间宽度小于 360 度时
-        会真的做夹取（用于有明确行程的关节）。
+        实测三组对照（同一物理目标，只改写法）：
+
+            [340.0, 0, 90, 0, 0, 0]   归一化进 [0,360)    -> 无反应
+            [-20.0, 0, 90, 0, 0, 0]   就近等价 / 原值      -> 正常动作
+
+        所以正确做法是：对每个关节取**离当前位置最近的整圈等价角**。
+        整圈等价即 target + 360*k，k 取让结果最接近 current 的那个整数。
+
+        current_deg 缺省时回退到旧行为（按 wrap_min_deg 归一化），但这只用于
+        没有回读可用的场合；正常下发路径都会传入当前角度。
+
+        同时做**可达性检查**：即便取了就近等价，仍可能离当前位置太远
+        （例如超过一整圈的一半），那说明目标不可达。这种情况下报错，
+        而不是静默下发 —— 静默失败正是这个 bug 能藏这么久的原因。
         """
-        lo = float(self.get_parameter('wrap_min_deg').value)
-        hi = float(self.get_parameter('wrap_max_deg').value)
-        out = []
-        for i in range(6):
-            v = float(movej_deg[i])
-            if hi - lo < 359.0:
-                while v < lo:
-                    v += 360.0
-                while v > hi:
-                    v -= 360.0
-            else:
+        if current_deg is None:
+            lo = float(self.get_parameter('wrap_min_deg').value)
+            out = []
+            for i in range(6):
+                v = float(movej_deg[i])
                 while v < lo:
                     v += 360.0
                 while v >= lo + 360.0:
                     v -= 360.0
-            out.append(v)
+                out.append(v)
+            return np.array(out)
+
+        limit = float(self.get_parameter('max_move_jump_deg').value)
+        out = []
+        for i in range(6):
+            target = float(movej_deg[i])
+            cur = float(current_deg[i])
+            # 离当前位置最近的整圈等价角
+            best = target + 360.0 * round((cur - target) / 360.0)
+            travel = best - cur
+            if abs(travel) > limit:
+                self.get_logger().error(
+                    f'joint{i + 1}: target {target:.2f} deg (nearest equivalent '
+                    f'{best:.2f}) is {travel:+.2f} deg from the current '
+                    f'{cur:.2f} deg, beyond max_move_jump_deg={limit:.0f}. '
+                    'The device ignores unreachable setpoints SILENTLY, so '
+                    'this command would look like "sent ok, nothing moved". '
+                    'Refusing it instead. Check the target pose and the '
+                    'calibration, not the transport.')
+            out.append(best)
         return np.array(out)
 
-    def urdf_to_movej(self, urdf_rad):
+    def urdf_to_movej(self, urdf_rad, current_deg=None):
         """URDF 关节角（弧度）-> move_j 空间（度）。
 
-        这是把 MoveIt 轨迹点转成设备指令的唯一入口。结果已做整圈归一化。
+        这是把 MoveIt 轨迹点转成设备指令的唯一入口。
 
             move_j = urdf_deg / sign + move_j_offset_deg
 
         move_j_offset_deg 就是 7 姿态的 move_j 值 [0,0,90,0,0,0]，因为锚点处
-        urdf = 0。这一点在 tools/selftest_conversion.py 里有断言，改动公式
-        会立刻被那个自测抓到——早期版本正是在这里多叠了一次偏置，导致
-        下发的 j2 差了 149 度，实物完全不动。
+        urdf = 0。这一点在 tools/selftest_conversion.py 里有断言。
+
+        current_deg 是设备当前位置（move_j 空间），用于把结果折算成离当前位置
+        最近的整圈等价角。**不传它会退回旧的 [0,360) 归一化，而那正是导致
+        "下发成功但机械臂不动" 的写法**，所以正常路径都应传入。
         """
         urdf_deg = np.degrees(np.asarray(urdf_rad, dtype=float))
         out = np.array([float(urdf_deg[i]) / self._safe_sign(i)
                         + self.move_j_offset_deg[i]
                         for i in range(6)])
-        return self.normalize_movej(out)
+        return self.normalize_movej(out, current_deg)
 
     def movej_to_angle(self, movej_deg):
         """move_j 空间（度）-> angle 空间（度）。angle_to_movej 的逆。
@@ -855,8 +890,14 @@ class dummy_controller(LifecycleNode):
         joint_offset_deg 项。两者合起来使下发的目标与当前姿态差了几十度，
         一旦真的接上急停按钮，按下去就是一次大角度抽动而不是停住。
         """
-        self.read_device()                      # 刷新 current_urdf_rad（弧度）
-        movej_deg = self.urdf_to_movej(self.current_urdf_rad)
+        # read_device() 返回 angle 空间（度）的原始读数；move_j 空间就是它
+        # 减去 move_j_offset_deg。急停要下发的正是"当前位置"，所以它同时
+        # 充当就近等价的参考点。
+        raw_deg = self.read_device()            # 刷新 current_urdf_rad（弧度）
+        cur_movej = [float(raw_deg[i]) - self.move_j_offset_deg[i]
+                     for i in range(6)]
+        movej_deg = self.urdf_to_movej(self.current_urdf_rad,
+                                       current_deg=cur_movej)
         self._send_named_pose(movej_deg, 'emergency stop')
 
     def reset_dummy(self, wait=True):
@@ -969,6 +1010,22 @@ class dummy_controller(LifecycleNode):
             f'Executing trajectory: {total} waypoints, '
             f'joint order map {order}')
 
+        # 当前位置（move_j 空间），用来把每个 waypoint 折算成"就近整圈等价角"。
+        #
+        # 起点取一次真实回读；此后每下发一个 waypoint 就用该 waypoint 自己作为
+        # 下一个的参考。这样多 waypoint 轨迹会连续地走，而不是每个点都相对
+        # 最初的姿态折算（那会在中途跳整圈）。
+        try:
+            raw_now = self.read_device()
+            cur_movej = [float(raw_now[i]) - self.move_j_offset_deg[i]
+                         for i in range(6)]
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().error(
+                f'cannot read the current pose ({exc}); refusing to execute a '
+                'trajectory without it, because the nearest-equivalent '
+                'conversion would be guessing.')
+            return
+
         t_start = time.monotonic()
         for idx, point in enumerate(msg.points):
             if len(point.positions) < len(order):
@@ -987,14 +1044,18 @@ class dummy_controller(LifecycleNode):
             if wait > 0:
                 time.sleep(wait)
 
-            # URDF 弧度 -> 设备角度（含 sign/offset 逆变换），单位是度
-            movej_deg = self.urdf_to_movej(urdf_rad)
+            # URDF 弧度 -> 设备角度（含 sign/offset 逆变换），单位是度。
+            # 传入当前位置，结果会被折算成离它最近的整圈等价角 —— 不这样做
+            # 就会重演"下发 340 度、设备够不着、静默不动"那个 bug。
+            movej_deg = self.urdf_to_movej(urdf_rad, current_deg=cur_movej)
             try:
                 self.move_joints(movej_deg)
             except Exception as exc:
                 self.get_logger().error(
                     f'Waypoint {idx} command failed: {exc}; aborting trajectory')
                 return
+            # 下一个 waypoint 以本 waypoint 为参考，保证轨迹连续
+            cur_movej = [float(v) for v in movej_deg]
 
             if idx % 10 == 0 or idx == total - 1:
                 self.get_logger().info(
