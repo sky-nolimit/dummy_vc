@@ -53,9 +53,15 @@ pkill -f dummy_controller
 
 | 工具 | 作用 |
 |---|---|
+| `probe_pairs.py` | **记录 (命令, 回读) 配对** —— 标定的权威数据来源。两个命名姿态 + 逐关节扫描,结果存 JSON。`--refs-only` 只走两个姿态,很快 |
+| `probe_relation.py` | 单关节最小二乘拟合 `raw = a·move_j + b`,从数据里读出 gain / offset / sign |
+| `resolve_signs.py` | **三项要求联立求解标定**:几何折叠 + 7 姿态读回全零 + 目标链复现实测命令 |
+| `fold_signs.py` | 穷举 j2/j3 的符号,用真实 URDF 做正运动学判断收缩姿态是否真的折叠 |
+| `analyse_range.py` | 归类 `probe_range` 的输出,区分"区间外被拒"与"等于基准位姿的空操作" |
 | `probe_mapping.py` | 逐个关节测量"命令值 ↔ 回读值"的 gain 与 offset。**offset 必须从设备读出来,不能靠推导** —— 实测 j3 的 gain 是 +1、offset 是 −180 |
 | `probe_range.py` | 扫出设备**实际接受**的 move_j 取值区间。区间外的值会被**静默丢弃**(整条命令不执行),这是"下发成功但机械臂不动"的直接原因 |
 | `trace_control.py` | 用具体例子(如"j3 转 30 度")逐步打印整条控制链路的每个数值及其来历 |
+| `solve_signs.py` | **已废弃的符号求解思路,保留作记录** —— 它按位移方向推符号,结论是错的,被几何校验推翻。其 joint_offset 部分仍有效 |
 
 ## 需要 ROS 环境(驱动正在运行)
 

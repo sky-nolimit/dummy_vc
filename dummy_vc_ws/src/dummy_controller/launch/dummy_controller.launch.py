@@ -15,7 +15,7 @@ Why this launch file exists:
    different value for one run without editing any file:
 
        ros2 launch dummy_controller dummy_controller.launch.py \\
-         joint_sign:="[-1.0, 1.0, -1.0, 1.0, -1.0, -1.0]"
+         joint_sign:="[-1.0, 1.0, 1.0, 1.0, -1.0, -1.0]"
 
    This matters because ROS 2 launch does not reliably forward
    `--ros-args -p name:=value` to a node declared with parameters=[file].
@@ -32,7 +32,7 @@ Usage:
     ros2 launch dummy_controller dummy_controller.launch.py
     ros2 launch dummy_controller dummy_controller.launch.py activate:=false
     ros2 launch dummy_controller dummy_controller.launch.py \\
-        joint_sign:="[-1.0, 1.0, -1.0, 1.0, -1.0, -1.0]"
+        joint_sign:="[-1.0, 1.0, 1.0, 1.0, -1.0, -1.0]"
 
 About the lifecycle commands below
 ----------------------------------

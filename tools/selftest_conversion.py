@@ -49,7 +49,12 @@ JOINTS = [f'dummy2_joint{i}' for i in range(1, 7)]
 
 # Physical anchor: the device reaches the 7 pose when commanded
 # move_j = [0,0,90,0,0,0], and its raw angle readback there is ANGLE_7POSE.
-ANGLE_7POSE = [0.215, 74.572, -91.474, -0.910, -0.035, -0.040]
+#
+# 取值来自 tools/probe_pairs.py 的实测（2026-10-13），不再是早期手工锚定的
+# 旧值 [0.215, 74.572, -91.474, -0.910, -0.035, -0.040]：旧值在 j3 上差
+# 1.5 度，正是手动锚定引入的误差。这一项必须与配置里的 joint_offset_deg
+# 一致，否则锚点校验会失败 —— 而它就是用来保证这一点的。
+ANGLE_7POSE = [-0.000, 75.032, -90.016, -0.002, -0.000, -0.007]
 MOVEJ_7POSE = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
 URDF_7POSE = [0.0] * 6
 
@@ -79,11 +84,25 @@ def wrap(v, lo=0.0):
 def make_conversions(joff, mjoff, sign):
     """Return the conversions, mirroring the driver algebra exactly.
 
-        angle -> urdf :  urdf   = sign * (angle - joff)
-        urdf  -> angle:  angle  = urdf / sign + joff
-        urdf  -> move_j: move_j = urdf / sign + mjoff, wrapped
-        move_j -> angle: angle  = move_j - mjoff
-        move_j -> urdf:  urdf   = sign * (move_j - mjoff)
+        angle -> urdf :  urdf    = sign * (angle - joff)
+        urdf  -> angle:  angle   = urdf / sign + joff
+        urdf  -> move_j: move_j  = urdf / sign + joff + mjoff
+        move_j -> urdf:  urdf    = sign * (move_j - mjoff - joff)
+        angle -> move_j: move_j  = angle + mjoff
+
+    Two of these used to be written differently here, and both were wrong:
+
+    * `urdf_to_movej` omitted the `joff` term. Composing
+      `angle -> urdf -> move_j` cancels the sign but NOT `joff`, so the driver
+      adds it. Dropping it shifted joint_2 by 74.572 deg and joint_3 by
+      91.474 deg -- and joint_3's shift landed outside its accepted interval,
+      which is why the device dropped those commands silently.
+
+    * `movej_to_urdf` omitted the same term, so the round trip still passed:
+      two matching errors cancel. That is exactly the trap this self-test is
+      supposed to catch, so the copies here must track the driver, not diverge
+      from it. `tools/check_conversions.py` imports the real functions and is
+      the stronger check; keep both in step.
     """
     def angle_to_urdf(a):
         return [sign[i] * (a[i] - joff[i]) for i in range(6)]
@@ -92,12 +111,16 @@ def make_conversions(joff, mjoff, sign):
         return [u[i] / sign[i] + joff[i] for i in range(6)]
 
     def urdf_to_movej(u):
-        return [wrap(u[i] / sign[i] + mjoff[i]) for i in range(6)]
+        return [u[i] / sign[i] + joff[i] + mjoff[i] for i in range(6)]
 
     def movej_to_urdf(m):
-        return [sign[i] * (m[i] - mjoff[i]) for i in range(6)]
+        return [sign[i] * (m[i] - mjoff[i] - joff[i]) for i in range(6)]
 
-    return angle_to_urdf, urdf_to_angle, urdf_to_movej, movej_to_urdf
+    def angle_to_movej(a):
+        return [a[i] + mjoff[i] for i in range(6)]
+
+    return (angle_to_urdf, urdf_to_angle, urdf_to_movej, movej_to_urdf,
+            angle_to_movej)
 
 
 def close(a, b, tol=1e-6):
@@ -135,7 +158,7 @@ def main():
         print('FATAL: joint_sign contains a zero; the conversion divides by it')
         return 1
 
-    a2u, u2a, u2m, m2u = make_conversions(joff, mjoff, sign)
+    a2u, u2a, u2m, m2u, a2m = make_conversions(joff, mjoff, sign)
     failures = []
 
     def check(label, got, want, tol=1e-6):
