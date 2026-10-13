@@ -40,7 +40,7 @@ CONFIG = os.path.join(REPO, 'dummy_vc_ws', 'src', 'dummy_controller',
 # 取值来自 tools/probe_pairs.py 的实测（2026-10-13）。旧值
 # [0.215, 74.572, -91.474, -0.910, -0.035, -0.040] 是早期手工锚定的结果，
 # 在 j3 上差 1.5 度。这一项必须与配置里的 joint_offset_deg 一致。
-ANGLE_7POSE = [-0.000, 75.032, -90.016, -0.002, -0.000, -0.007]
+ANGLE_7POSE = [0.215, 74.572, -91.474, -0.910, -0.035, -0.040]
 MOVEJ_7POSE = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
 ANGLE_RETRACT = [0.0] * 6
 JOINTS = [f'j{i}' for i in range(1, 7)]

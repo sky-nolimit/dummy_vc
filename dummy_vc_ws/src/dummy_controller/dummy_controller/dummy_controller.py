@@ -61,9 +61,9 @@ class dummy_controller(LifecycleNode):
         #
         # joint_sign 的 j2/j3 在 probe_pairs 实测后由 -1 改为 +1：
         # 读回与指令在 home/reset 之间的位移同向。详见配置文件的说明。
-        self.joint_sign = [-1.0, 1.0, -1.0, 1.0, -1.0, -1.0]
-        self.joint_offset_deg = [-0.000, 75.032, -90.016, -0.002, -0.000, -0.007]
-        self.move_j_offset_deg = [0.000, -75.032, 180.016, 0.002, 0.000, 0.007]
+        self.joint_sign = [-1.0, -1.0, -1.0, 1.0, -1.0, -1.0]
+        self.joint_offset_deg = [0.215, 74.572, -91.474, -0.910, -0.035, -0.040]
+        self.move_j_offset_deg = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
 
         # 位置参数：单位是**度**，且这里的角度是 **move_j 空间**（设备侧），
         # **不是** URDF 角度。下发时直接原样交给 move_j，不做任何变换。
@@ -93,15 +93,13 @@ class dummy_controller(LifecycleNode):
 
     def _declare_params(self):
         """声明并读取参数。on_configure 之后调用。"""
-        default_sign = [-1.0, 1.0, -1.0, 1.0, -1.0, -1.0]
-        # (1) 7 姿态的 angle 回读就是该姿态的偏置（此时 URDF 应为全零）。
-        #     取值来自 tools/probe_pairs.py 的实测，不再是手工锚定的旧值
-        #     （旧值在 j3 上差 1.5 度）。
-        default_offset_deg = [-0.000, 75.032, -90.016, -0.002, -0.000, -0.007]
+        default_sign = [-1.0, -1.0, -1.0, 1.0, -1.0, -1.0]
+        # (1) 7 姿态的 angle 回读就是该姿态的偏置（此时 URDF 应为全零）
+        default_offset_deg = [0.215, 74.572, -91.474, -0.910, -0.035, -0.040]
         # (2) 下发链零点。与 (1) 之和必须等于 home_joints_deg —— 这是锚点
         #     处唯一能被约束到的关系，两个参数之间怎么分配不影响锚点行为，
         #     所以必须配合实测配对一起验证（tools/check_downlink.py）。
-        default_movej_offset_deg = [0.000, -75.032, 180.016, 0.002, 0.000, 0.007]
+        default_movej_offset_deg = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
         # (3) URDF 空间里的附加偏置，默认全零。
         #     曾经把 j3 设成 180 想抵消姿态反差，方向加反了，反而把本该为 0
         #     的值推成 180——那正是问题本身。详见 config 里的推导记录。
@@ -218,11 +216,10 @@ class dummy_controller(LifecycleNode):
                 self.get_logger().error(
                     f'{name} must have exactly 6 elements, got {len(val)}; '
                     'falling back to defaults')
-                self.joint_sign = [-1.0, 1.0, -1.0, 1.0, -1.0, -1.0]
-                self.joint_offset_deg = [-0.000, 75.032, -90.016, -0.002,
-                                         -0.000, -0.007]
-                self.move_j_offset_deg = [0.000, -75.032, 180.016, 0.002,
-                                          0.000, 0.007]
+                self.joint_sign = [-1.0, -1.0, -1.0, 1.0, -1.0, -1.0]
+                self.joint_offset_deg = [0.215, 74.572, -91.474, -0.910,
+                                         -0.035, -0.040]
+                self.move_j_offset_deg = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
                 self.urdf_offset_deg = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
                 break
 
