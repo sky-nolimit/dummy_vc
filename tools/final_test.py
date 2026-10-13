@@ -18,15 +18,24 @@ Checks
   3  each joint moves in BOTH directions when told to, and comes back
   4  the 7 pose is reachable: commanding URDF zero lands at URDF zero
 
+**Timing.** This arm is slow and its speed is not constant, so every wait here
+polls until the joints actually stop changing (tools/rig_common.py) instead of
+sleeping a fixed time. A fixed sleep long enough for the worst case wastes
+minutes, and one sized for a small move truncates a large one and reports a
+false failure -- an earlier probe did exactly that and produced a completely
+wrong conclusion. Each move prints how long it actually took and whether the
+timeout was hit, so truncation is visible rather than silent.
+
 Exit status 0 only if every check passes.
 """
 import argparse
 import math
+import os
 import sys
 import time
 
-JOINTS = [f'dummy2_joint{i}' for i in range(1, 7)]
-TRAJ_TOPIC = '/joint_trajectory_controller/joint_trajectory'
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from rig_common import JOINTS, TRAJ_TOPIC, angles_deg, wait_settled  # noqa: E402
 
 
 class Result:
@@ -80,14 +89,17 @@ class Rig:
         while time.monotonic() - t0 < seconds:
             self.rclpy.spin_once(self.node, timeout_sec=0.05)
 
+    def read(self):
+        return angles_deg(self.state)
+
+    def wait(self, timeout):
+        return wait_settled(self.spin, self.read, timeout=timeout)
+
     def wait_for_state(self, timeout=8.0):
         t0 = time.monotonic()
         while time.monotonic() - t0 < timeout and len(self.state) < 6:
             self.rclpy.spin_once(self.node, timeout_sec=0.1)
         return [j for j in JOINTS if j not in self.state]
-
-    def angles_deg(self):
-        return [math.degrees(self.state.get(j, float('nan'))) for j in JOINTS]
 
     def send(self, positions_rad, seconds=3):
         traj = self.JointTrajectory()
@@ -125,6 +137,10 @@ def main():
                     help='minimum acceptable /joint_states rate (default 20)')
     ap.add_argument('--move-deg', type=float, default=10.0,
                     help='per-joint test amplitude (default 10)')
+    ap.add_argument('--move-timeout', type=float, default=40.0,
+                    help='max seconds to wait for one move to settle (default '
+                         '40). Raise it if the arm is slower than expected; a '
+                         'truncated wait is reported, never hidden.')
     args = ap.parse_args()
 
     res = Result()
@@ -161,10 +177,10 @@ def main():
     print('=' * 70)
     print('2. the arm is stationary when it should be')
     print('=' * 70)
-    before = rig.angles_deg()
+    before, _, _ = rig.wait(5.0)
     print(f'  angles now: {[round(v, 3) for v in before]} deg')
     rig.spin(1.5)
-    after = rig.angles_deg()
+    after = rig.read()
     print(f'  1.5 s later: {[round(v, 3) for v in after]} deg')
     drift = max(abs(after[i] - before[i]) for i in range(6))
     print(f'  worst drift = {drift:.4f} deg')
@@ -187,26 +203,35 @@ def main():
     print('  Success: a positive command moves the joint, the equal negative')
     print('  command brings it back. Failure means the joint does not move,')
     print('  the direction is inverted, or the command is dropped silently.')
+    print('  Each move is waited on until the joints stop changing; the')
+    print('  elapsed time is printed so a timeout-driven false reading is')
+    print('  obvious.')
+    truncated_any = False
     for idx, name in enumerate(JOINTS):
-        a0 = rig.angles_deg()
+        # start from a settled pose so d1 is measured from rest
+        a0, _, _ = rig.wait(args.move_timeout)
 
-        target = list(rig.state[j] for j in JOINTS)
+        target = [rig.state[j] for j in JOINTS]
         target[idx] = rig.state[name] + math.radians(args.move_deg)
         rig.send(target)
-        rig.spin(5.0)
-        a1 = rig.angles_deg()
+        a1, t1, trunc1 = rig.wait(args.move_timeout)
+        truncated_any = truncated_any or trunc1
 
         target[idx] = rig.state[name] - math.radians(args.move_deg)
         rig.send(target)
-        rig.spin(5.0)
-        a2 = rig.angles_deg()
+        a2, t2, trunc2 = rig.wait(args.move_timeout)
+        truncated_any = truncated_any or trunc2
 
         d1 = a1[idx] - a0[idx]
         d2 = a2[idx] - a1[idx]
         moved = abs(d1) > args.move_deg * 0.3
         returned = abs(d2) > args.move_deg * 0.3 and d1 * d2 < 0
+        note = ''
+        if trunc1 or trunc2:
+            note = '  <-- WAIT TIMED OUT, readings may be mid-travel'
         print(f'  j{idx + 1}: {a0[idx]:9.3f} -> {a1[idx]:9.3f} -> '
-              f'{a2[idx]:9.3f}   out {d1:+8.3f}  back {d2:+8.3f}')
+              f'{a2[idx]:9.3f}   out {d1:+8.3f} ({t1:4.1f}s)  '
+              f'back {d2:+8.3f} ({t2:4.1f}s){note}')
         if not moved:
             res.add(False, f'j{idx + 1} responds to a command',
                     f'commanded {args.move_deg:+.0f} deg, the joint moved '
@@ -227,16 +252,21 @@ def main():
     print('  zero and the target zero disagree -- a calibration fault, not a')
     print('  transport one.')
     rig.send([0.0] * 6)
-    rig.spin(14.0)
-    landed = rig.angles_deg()
-    print(f'  landed at: {[round(v, 3) for v in landed]} deg')
-    worst = max(abs(v) for v in landed if v == v)
-    print(f'  worst |angle| = {worst:.3f} deg (tolerance {args.tol_deg})')
-    res.add(worst <= args.tol_deg, 'URDF zero reaches URDF zero',
-            '' if worst <= args.tol_deg else
-            'the target chain and the readback chain disagree about where '
-            'zero is; they share joint_offset_deg, so check its sign and the '
-            'two formulas')
+    landed, elapsed, trunc = rig.wait(args.move_timeout * 2)
+    print(f'  landed at: {[round(v, 3) for v in landed]} deg   '
+          f'(settled in {elapsed:.1f}s)')
+    if trunc:
+        res.add(False, 'returning to the 7 pose settles',
+                f'joints were still moving after {args.move_timeout * 2:.0f}s; '
+                're-run with a larger --move-timeout')
+    else:
+        worst = max(abs(v) for v in landed if v == v)
+        print(f'  worst |angle| = {worst:.3f} deg '
+              f'(tolerance {args.tol_deg})')
+        res.add(worst <= args.tol_deg, 'URDF zero reaches URDF zero',
+                '' if worst <= args.tol_deg else
+                'the target chain and the readback chain disagree about where '
+                'zero is; check movej_urdf_zero_deg and the down-link')
 
     rig.close()
 
@@ -247,6 +277,10 @@ def main():
     passed = sum(1 for ok, _, _ in res.rows if ok is True)
     skipped = sum(1 for ok, _, _ in res.rows if ok is None)
     print(f'  passed {passed}, failed {len(res.failures)}, skipped {skipped}')
+    if truncated_any:
+        print('\n  NOTE: at least one move hit its timeout, so a "did not')
+        print('  move" result above may be a measurement artefact rather than')
+        print('  a real fault. Re-run with a larger --move-timeout first.')
     if not res.failures:
         print('\n  ALL CHECKS PASSED -- the drive path is usable.')
         if skipped:

@@ -9,27 +9,35 @@ published angle is offset by that much.
 Success criterion: after settling, every joint in /joint_states is within
 `--tol` degrees of zero.
 
+**Waiting.** The arm is slow and its speed is not constant, so this polls until
+the joints stop changing (`tools/rig_common.py`) rather than sleeping a fixed
+time. A fixed sleep either truncates a long move -- reporting a false failure --
+or wastes time on a short one. If the timeout is hit, that is said explicitly
+and the check fails as inconclusive rather than as a fault.
+
 Failure means the calibration anchor is wrong, not that the transport is broken
 -- so the message says which.
 
     python3 tools/go_zero.py
-    python3 tools/go_zero.py --tol 0.5
+    python3 tools/go_zero.py --tol 0.5 --timeout 90
 """
 import argparse
 import math
+import os
 import sys
 import time
 
-JOINTS = [f'dummy2_joint{i}' for i in range(1, 7)]
-TOPIC = '/joint_trajectory_controller/joint_trajectory'
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from rig_common import JOINTS, TRAJ_TOPIC, angles_deg, wait_settled  # noqa: E402
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--tol', type=float, default=1.5,
                     help='acceptance tolerance in degrees (default 1.5)')
-    ap.add_argument('--settle', type=float, default=12.0,
-                    help='seconds to wait after commanding')
+    ap.add_argument('--timeout', type=float, default=60.0,
+                    help='max seconds to wait for the move to settle (default '
+                         '60). Raise it if the arm is slower than expected.')
     args = ap.parse_args()
 
     try:
@@ -44,27 +52,35 @@ def main():
 
     rclpy.init()
     node = Node('go_zero')
-    got = {}
+    state = {}
 
     def on_state(msg):
         for name, pos in zip(msg.name, msg.position):
-            got[name] = pos
+            state[name] = pos
 
     node.create_subscription(JointState, '/joint_states', on_state, 10)
-    pub = node.create_publisher(JointTrajectory, TOPIC, 10)
+    pub = node.create_publisher(JointTrajectory, TRAJ_TOPIC, 10)
+
+    def spin(seconds):
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < seconds:
+            rclpy.spin_once(node, timeout_sec=0.05)
+
+    def read():
+        return angles_deg(state)
 
     # wait for a full joint state
     t0 = time.time()
-    while time.time() - t0 < 6.0 and len(got) < 6:
+    while time.time() - t0 < 6.0 and len(state) < 6:
         rclpy.spin_once(node, timeout_sec=0.1)
-    missing = [j for j in JOINTS if j not in got]
+    missing = [j for j in JOINTS if j not in state]
     if missing:
         print(f'FAIL: /joint_states is missing {missing}; is the driver up?')
         node.destroy_node()
         rclpy.shutdown()
         return 2
 
-    before = [math.degrees(got[j]) for j in JOINTS]
+    before, _, _ = wait_settled(spin, read, timeout=args.timeout)
     print(f'  before: {[round(v, 3) for v in before]} deg')
 
     traj = JointTrajectory()
@@ -77,16 +93,18 @@ def main():
         pub.publish(traj)
         rclpy.spin_once(node, timeout_sec=0.2)
 
-    t0 = time.time()
-    while time.time() - t0 < args.settle:
-        rclpy.spin_once(node, timeout_sec=0.1)
-
-    after = [math.degrees(got[j]) for j in JOINTS]
+    after, elapsed, truncated = wait_settled(spin, read, timeout=args.timeout)
     node.destroy_node()
     rclpy.shutdown()
 
-    print(f'  after : {[round(v, 3) for v in after]} deg')
-    worst = max(abs(v) for v in after)
+    print(f'  after : {[round(v, 3) for v in after]} deg   '
+          f'(settled in {elapsed:.1f}s)')
+    if truncated:
+        print(f'  RESULT: INCONCLUSIVE -- joints were still moving after '
+              f'{args.timeout:.0f}s.')
+        print('          Re-run with a larger --timeout; this is not a fault.')
+        return 2
+    worst = max(abs(v) for v in after if v == v)
     print(f'  worst |angle| = {worst:.3f} deg (tolerance {args.tol})')
     if worst <= args.tol:
         print('  RESULT: reached the 7 pose; the readback zero is consistent')
@@ -95,10 +113,12 @@ def main():
     print('          This is a calibration problem, not a transport one:')
     print('          the readback chain\'s zero (joint_offset_deg) does not')
     print('          match where the target chain actually parks the arm.')
-    print('          The two chains use the same joint_offset_deg, so if they')
-    print('          disagree, one of the formulas or the offset sign is off.')
+    print('          The two chains use movej_urdf_zero_deg and')
+    print('          joint_offset_deg separately, so check that they describe')
+    print('          the same physical pose.')
     return 1
 
 
 if __name__ == '__main__':
     sys.exit(main())
+
