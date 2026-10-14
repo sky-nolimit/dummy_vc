@@ -26,6 +26,26 @@ false failure -- an earlier probe did exactly that and produced a completely
 wrong conclusion. Each move prints how long it actually took and whether the
 timeout was hit, so truncation is visible rather than silent.
 
+**KNOWN PROBLEM -- the timing does not track the arm.** A hardware run showed
+checks 3 and 4 reporting FAIL for every joint while a person watching the arm
+saw all six move correctly in both directions. The script advances to the next
+joint while the previous move is still running, so it compares against a stale
+pose and reports "did not move".
+
+The waits here do try to follow the arm (start lag, then settle -- see
+tools/rig_common.py, and tools/selftest_wait.py passes against simulated slow
+devices). So the fault is not simply a missing wait. The most likely remaining
+cause is that `/joint_states` does not reflect the device's motion promptly:
+under this driver the published angles are converted from the device readback,
+so if the poll of the device lags the command, the published pose holds still
+while the arm is already travelling, and any observer of `/joint_states` --
+including this script -- sees the move start after it really did.
+
+Until that is understood, **treat this script's checks 3 and 4 as unreliable and
+do not act on their FAIL output.** Checks 1 and 2 (state present and publishing,
+no drift when idle) were verified good on hardware. The offline checks in
+tools/run_checks.py do not depend on any of this and are trustworthy.
+
 Exit status 0 only if every check passes.
 """
 import argparse
