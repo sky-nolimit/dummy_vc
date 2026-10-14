@@ -362,6 +362,17 @@
   <parent link="dummy_hand_v1_1"/>
   <child link="dummy_leftfinger_v1_1"/>
   <axis xyz="1.0 -0.0 0.000761"/>
+  <!--
+    ⚠ 下面的行程 (0~0.023 m) 和整个夹爪几何都来自**原作者的通用夹爪模型**，
+    与实物不符。实物是舵机 + 齿轮齿条 + 两条直线导轨 + 两个打印长手指。
+
+    见 docs/04-已知缺陷与未决问题.md 的 A1。差异有几十毫米，对抓取精度是
+    致命的。
+
+    重建时要一起改：这里、dummy2_finger_joint2、gripper_tcp 的 origin
+    （真实抓取中心）、以及 MoveIt 的 config/dummy2.srdf 里 gripper 组与
+    open/closed 组状态。只改 mesh 不够。
+  -->
   <limit upper="0.023" lower="0.0" effort="100" velocity="100"/>
 </joint>
 
@@ -370,6 +381,7 @@
   <parent link="dummy_hand_v1_1"/>
   <child link="dummy_rightfiger_v1_1"/>
   <axis xyz="-1.0 0.0 -0.000761"/>
+  <!-- 同 dummy2_finger_joint1：行程与几何与实物不符，见 docs/04 的 A1。 -->
   <limit upper="0.023" lower="0.0" effort="100" velocity="100"/>
 </joint>
 
