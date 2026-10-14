@@ -1,0 +1,30 @@
+# Planning scene monitor settings.
+#
+# What is being watched: /joint_states from the driver. That is the ONLY source
+# of the arm's real state, and its accuracy is bounded by the driver's readback
+# behaviour -- the published pose lags the device somewhat (the driver polls the
+# device and republishes a cached value). MoveIt plans from whatever it last
+# received, so a stale reading means it plans from slightly the wrong start
+# state.
+#
+# That is why allowed_start_tolerance is set relatively loose in
+# moveit_controllers.yaml: strictness there would turn a small readback lag into
+# a refused execution.
+
+planning_scene_monitor:
+  publish_planning_scene: true
+  publish_geometry_updates: true
+  publish_state_updates: true
+  publish_transforms_updates: true
+  # Same rate as the driver's publish rate (joint_state_pub_hz, default 50).
+  # Polling faster than it publishes buys nothing.
+  publish_planning_scene_hz: 30.0
+
+# The octomap monitor turns depth data into collision geometry automatically.
+# It is DISABLED for now: the camera has not arrived, and enabling it without a
+# depth source only adds a sensor that never produces data. Turn it on when the
+# camera is integrated (stage 4), together with the point cloud topic.
+octomap_monitor:
+  octomap_frame: base_link
+  octomap_resolution: 0.02
+  max_range: 2.0

@@ -74,6 +74,8 @@ CHECKS = [
      'URDF is valid, the joint tree is connected', True, []),
     ('check_urdf_limits.py',
      'URDF limits do not exceed the measured device travel', True, []),
+    ('check_moveit_config.py',
+     'the MoveIt config agrees with the URDF and the device', True, []),
     ('check_launch_consistency.py',
      'launch will not raise on an undocumented config key', True, []),
     ('check_conversions.py',

@@ -1,0 +1,23 @@
+# Kinematics solvers, one entry per planning group.
+#
+# KDL is chosen because it has no extra dependencies and is the reference
+# solver. It is not the fastest or the most reliable near singularities -- if
+# planning starts failing on reachable targets, the usual next step is
+# TRAC-IK (trac_ik_kinematics_plugin) or pick_ik, which are drop-in
+# replacements for the line below.
+#
+# `timeout` is how long an IK attempt may take. The Dummy arm's joints are
+# slow but IK is pure computation, so this is unrelated to the arm's speed.
+# `resolution` is the joint-space step for the search.
+
+dummy_arm:
+  kinematics_solver: kdl_kinematics_plugin/KDLKinematicsPlugin
+  kinematics_solver_search_resolution: 0.005
+  kinematics_solver_timeout: 0.05
+  kinematics_solver_attempts: 3
+
+gripper:
+  kinematics_solver: kdl_kinematics_plugin/KDLKinematicsPlugin
+  kinematics_solver_search_resolution: 0.005
+  kinematics_solver_timeout: 0.05
+  kinematics_solver_attempts: 3

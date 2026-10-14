@@ -1,0 +1,76 @@
+# How MoveIt sends a planned trajectory to the driver.
+#
+# The driver subscribes to a bare topic and executes the waypoints itself:
+#
+#     topic     /joint_trajectory_controller/joint_trajectory
+#     type      trajectory_msgs/JointTrajectory
+#     timing    it sleeps until each waypoint's time_from_start is due, then
+#               sends that waypoint
+#
+# There is no ros2_control here. The driver talks to the device directly, so
+# `moveit_simple_controller_manager/JointTrajectoryControllerHandle` is the
+# right handle: it just publishes the message.
+#
+# The topic name is a historical accident (nothing is actually running a
+# joint_trajectory_controller) but it is what the driver listens on, and the
+# driver has moved with the project, so matching it is the low-risk choice.
+
+trajectory_execution:
+  # Give a trajectory time to start moving before declaring failure.
+  allowed_start_tolerance: 0.05
+  # MoveIt raises an error if execution overruns the planned duration by more
+  # than these factors. The arm is SLOW, and its real speed is not modelled by
+  # MoveIt's velocity limits (the driver does not implement them), so without
+  # generous scaling every execution would look like an overrun.
+  #
+  # This is the single most likely knob to need tuning: if you see
+  # "Execution completed with error" while the arm is moving fine, raise these.
+  allowed_execution_duration_scaling: 10.0
+  allowed_goal_duration_margin: 5.0
+  execution_duration_monitoring: true
+  # The arm cannot be stopped instantly; killing a trajectory mid-flight would
+  # leave it somewhere unplanned.
+  disable_collision_checks: false
+  wait_for_trajectory_completion: true
+
+# The controller is NAMED to match the driver, on purpose.
+#
+# `JointTrajectoryControllerHandle` publishes to
+#     /<controller_name>/joint_trajectory
+# and the driver subscribes to
+#     /joint_trajectory_controller/joint_trajectory
+#
+# so naming it `joint_trajectory_controller` makes the two line up exactly,
+# with no reliance on `action_ns`. That matters because action_ns only sets the
+# ACTION namespace; the topic comes from the controller name, and a mismatch
+# there publishes a planned trajectory into the void with no error anywhere --
+# MoveIt reports success, the arm does not move.
+#
+# If the driver's topic is ever renamed, rename this key too, or the same
+# silent-failure class comes back. tools/check_moveit_config.py compares the
+# two and fails when they drift.
+
+moveit_controller_manager: moveit_simple_controller_manager/MoveItSimpleControllerManager
+
+moveit_simple_controller_manager:
+  controller_names:
+    - joint_trajectory_controller
+  joint_trajectory_controller:
+    type: moveit_simple_controller_manager/JointTrajectoryControllerHandle
+    action_ns: joint_trajectory
+    default: true
+    joints:
+      - dummy2_joint1
+      - dummy2_joint2
+      - dummy2_joint3
+      - dummy2_joint4
+      - dummy2_joint5
+      - dummy2_joint6
+
+# The gripper is deliberately NOT listed.
+#
+# Its hand interface on the device blocks forever and produces no motion (see
+# the gripper notes in docs/). Registering a controller for it would let MoveIt
+# believe it can grip, and a plan that includes a close command would then hang
+# on a call that never returns. Leaving it out means MoveIt plans the arm only,
+# which is what actually works today.

@@ -1,0 +1,58 @@
+# OMPL planner configuration.
+#
+# Only RRTConnect is enabled by default for the arm. The Setup Assistant lists
+# a dozen planners; enabling them all makes the RViz dropdown long and makes
+# failures harder to attribute. RRTConnect is the standard first choice for a
+# 6-DOF arm with no special structure to exploit.
+#
+# To try another planner, add it under planner_configs AND to the group's
+# `planner_configs` list below. The commented entries are the ones usually
+# worth trying next:
+#   RRTstar        -- asymptotically optimal, slower, better paths
+#   PRM            -- good if the workspace is cluttered and plans repeat
+#   EST            -- sometimes succeeds where RRTConnect does not
+
+planning_plugin: ompl_interface/OMPLPlanner
+request_adapters: >-
+  default_planner_request_adapters/AddTimeOptimalParameterization
+  default_planner_request_adapters/ResolveConstraintFrames
+  default_planner_request_adapters/FixWorkspaceBounds
+  default_planner_request_adapters/FixStartStateBounds
+  default_planner_request_adapters/FixStartStateCollision
+  default_planner_request_adapters/FixStartStatePathConstraints
+start_state_max_bounds_error: 0.1
+
+planner_configs:
+  RRTConnect:
+    type: geometric::RRTConnect
+    range: 0.0
+  RRTstar:
+    type: geometric::RRTstar
+    range: 0.0
+    goal_bias: 0.05
+    delay_collision_checking: 1
+  PRM:
+    type: geometric::PRM
+    max_nearest_neighbors: 10
+  EST:
+    type: geometric::EST
+    range: 0.0
+    goal_bias: 0.05
+
+dummy_arm:
+  default_planner_config: RRTConnect
+  planner_configs:
+    - RRTConnect
+    - RRTstar
+    - PRM
+    - EST
+  # Give the planner generous room. This is COMPUTE time, not arm time: the
+  # arm itself is slow, but solving is fast, and a short timeout here shows up
+  # as "planning failed" on targets that are actually reachable.
+  longest_valid_segment_fraction: 0.005
+
+gripper:
+  default_planner_config: RRTConnect
+  planner_configs:
+    - RRTConnect
+  longest_valid_segment_fraction: 0.005

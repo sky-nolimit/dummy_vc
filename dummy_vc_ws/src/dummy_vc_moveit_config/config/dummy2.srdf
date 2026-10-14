@@ -1,0 +1,142 @@
+<?xml version="1.0"?>
+<!--
+  SRDF: the semantic half of the robot description. MoveIt reads this together
+  with the URDF.
+
+  Naming here is not free choice: every link and joint string must match
+  dummy2_urdf.xacro exactly, and the arm chain is checked by
+  tools/check_moveit_config.py so a rename upstream fails loudly rather than
+  producing a planner that quietly does nothing.
+-->
+<robot name="dummy2">
+
+  <!-- ==================================================================
+       虚拟关节：把固定在世界里的机械臂接到 world 上。
+
+       xacro 里已经有 world_to_base 这个固定关节，所以这一条是与之对应的
+       语义声明。没有它，MoveIt 会认为整条链没有根，规划时无法把工作台
+       (PlanningScene 里的 box) 和机械臂放进同一个坐标系。
+       ================================================================== -->
+  <virtual_joint name="world_to_base" type="fixed"
+                 parent_frame="world" child_link="base_link"/>
+
+  <!-- ==================================================================
+       规划组 1：机械臂本体
+
+       链是 base_link -> gripper_tcp。用 gripper_tcp 而不是 link7_v1_1，
+       因为抓取关心的是夹爪的抓取中心，不是最后一节连杆的末端。
+       ================================================================== -->
+  <group name="dummy_arm">
+    <chain base_link="base_link" tip_link="gripper_tcp"/>
+  </group>
+
+  <!-- ==================================================================
+       规划组 2：夹爪
+
+       两个 prismatic 手指不是一个链（它们并联到 dummy_hand_v1_1），
+       所以用 joint 列表而不是 chain。
+
+       **这个组目前是"声明存在但不可驱动"的。** 设备侧的 hand 接口有三个
+       方法但全部永久阻塞（详见 docs/ 里的夹爪记录），所以：
+         * 这里声明它，是为了让手指出现在 RViz 里、也让 /joint_states 能
+           上报它们（驱动发布的是**命令值**，因为夹爪没有回读）
+         * 规划器可以规划它，但**发下去不会产生动作**
+         * 真正夹取那一步现在做不到。这是已知缺口，不是配置错误。
+       ================================================================== -->
+  <group name="gripper">
+    <joint name="dummy2_finger_joint1"/>
+    <joint name="dummy2_finger_joint2"/>
+  </group>
+
+  <!-- ==================================================================
+       命名状态
+
+       数值全部是**弧度**，与 home_joints_deg / reset_joints_deg 在 URDF
+       空间的换算结果一致。
+
+         home  = 7 姿态     move_j [0,0,90,0,0,0]  ->  URDF 全零
+         reset = 断电收缩    move_j [0,-75,180,0,0,0] -> URDF [0,+75,-90,0,0,0]
+
+       reset 那一组是**给断电用的**：机械臂不工作时停在这个姿态。把它写进
+       SRDF 是为了让 MoveIt 知道这个姿态是合法的（j2 正好在上限、j3 正好在
+       下限），而不是当成越界。
+       ================================================================== -->
+  <group_state name="home" group="dummy_arm">
+    <joint name="dummy2_joint1" value="0"/>
+    <joint name="dummy2_joint2" value="0"/>
+    <joint name="dummy2_joint3" value="0"/>
+    <joint name="dummy2_joint4" value="0"/>
+    <joint name="dummy2_joint5" value="0"/>
+    <joint name="dummy2_joint6" value="0"/>
+  </group_state>
+
+  <group_state name="reset" group="dummy_arm">
+    <joint name="dummy2_joint1" value="0"/>
+    <joint name="dummy2_joint2" value="1.3089969"/>
+    <joint name="dummy2_joint3" value="-1.5707963"/>
+    <joint name="dummy2_joint4" value="0"/>
+    <joint name="dummy2_joint5" value="0"/>
+    <joint name="dummy2_joint6" value="0"/>
+  </group_state>
+
+  <group_state name="open" group="gripper">
+    <joint name="dummy2_finger_joint1" value="0.023"/>
+    <joint name="dummy2_finger_joint2" value="0.023"/>
+  </group_state>
+
+  <group_state name="closed" group="gripper">
+    <joint name="dummy2_finger_joint1" value="0.0"/>
+    <joint name="dummy2_finger_joint2" value="0.0"/>
+  </group_state>
+
+  <!-- ==================================================================
+       末端执行器
+
+       parent_link 取 link7_v1_1 而不是 gripper_tcp：gripper_tcp 本身就是
+       规划组的末端，把它同时当作末端执行器的父连杆会让组和末端重叠。
+       ================================================================== -->
+  <end_effector name="dummy_gripper" parent_link="link7_v1_1"
+                group="gripper" parent_group="dummy_arm"/>
+
+  <!-- ==================================================================
+       默认关闭的碰撞对
+
+       相邻连杆在 URDF 里是固定连接或直接铰接，它们的几何本来就穿插在
+       一起（STL 是原始设计网格，没有做碰撞简化），不禁用会导致规划器
+       认为机械臂一直自碰撞，规划必然失败。
+
+       下面列的**只限相邻**。任何非相邻的一对都不禁用 —— 那才是真正需要
+       检测的自碰撞。
+       ================================================================== -->
+  <disable_collisions link1="base_link"         link2="link1_v1_1"          reason="Adjacent"/>
+  <disable_collisions link1="link1_v1_1"        link2="link2_3_v4_1"        reason="Adjacent"/>
+  <disable_collisions link1="link2_3_v4_1"      link2="link4_v3_1"          reason="Adjacent"/>
+  <disable_collisions link1="link4_v3_1"        link2="link5_v3_1"          reason="Adjacent"/>
+  <disable_collisions link1="link5_v3_1"        link2="link6_v3_1"          reason="Adjacent"/>
+  <disable_collisions link1="link6_v3_1"        link2="link7_v1_1"          reason="Adjacent"/>
+
+  <!-- 腕部与手爪之间的固定连接 -->
+  <disable_collisions link1="link7_v1_1"        link2="dummy_hand_v1_1"     reason="Adjacent"/>
+  <disable_collisions link1="link7_v1_1"        link2="tool0"               reason="Adjacent"/>
+  <disable_collisions link1="tool0"             link2="gripper_tcp"         reason="Adjacent"/>
+
+  <!-- 手指与手掌：手指滑块本来就嵌在手掌里 -->
+  <disable_collisions link1="dummy_hand_v1_1"   link2="dummy_leftfinger_v1_1"  reason="Adjacent"/>
+  <disable_collisions link1="dummy_hand_v1_1"   link2="dummy_rightfiger_v1_1"  reason="Adjacent"/>
+  <!-- 两指对开，永远不会互相碰到（一个沿 +x 一个沿 -x） -->
+  <disable_collisions link1="dummy_leftfinger_v1_1" link2="dummy_rightfiger_v1_1" reason="Never"/>
+
+  <!--
+    相机是外置固定的，不装在机械臂上，所以它与任何连杆都不会碰。但这里
+    **故意不写 camera_link 的 disable_collisions**：相机在 planning scene
+    里的存在感应当由实际情况决定，而不是由这行声明替我们决定。等相机
+    到货、手眼标定完成后再按实际是否互相干涉来决定要不要禁用。
+  -->
+
+  <!--
+    注意：**没有**列出 link2_3_v4_1 <-> link4_v3_1 之外的任何"间隔一对"。
+    原始 STL 网格很细，如果规划明显变慢，下一步应当给连杆加简化碰撞体
+    （box/cylinder），而不是继续加 disable_collisions —— 后者会让真正的
+    自碰撞被漏检。
+  -->
+</robot>
