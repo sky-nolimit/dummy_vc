@@ -72,6 +72,12 @@ def main():
     ap.add_argument('--limit', type=float, default=0.1,
                     help='value for set_current_limit; deliberately small')
     ap.add_argument('--timeout', type=float, default=3.0)
+    ap.add_argument('--prime', action='store_true',
+                    help='call robot.set_enable(True) BEFORE touching hand, '
+                         'replicating what the driver does at startup')
+    ap.add_argument('--prime-only', action='store_true',
+                    help='only call robot.set_enable(True) and report; do not '
+                         'touch the hand at all')
     ap.add_argument('--dry-run', action='store_true')
     args = ap.parse_args()
 
@@ -88,6 +94,8 @@ def main():
     print(f'  values: set_angle({args.angle}), '
           f'set_current_limit({args.limit}), set_enable(True)')
     print(f'  timeout per call: {args.timeout}s')
+    if args.prime or args.prime_only:
+        print('  PRIMING: robot.set_enable(True) first, as the driver does')
     print()
     print('  WATCH THE FINGERS, the two white LEDs on the gripper, and listen')
     print('  for any click or whine. Note the step number where anything')
@@ -96,6 +104,8 @@ def main():
 
     if args.dry_run:
         print('  --dry-run: nothing will be called.')
+        if args.prime or args.prime_only:
+            print('    step 0: would call robot.set_enable(True)')
         for i, name in enumerate(order, 1):
             print(f'    step {i}: would call hand.{name}(...)')
         return 0
@@ -110,9 +120,28 @@ def main():
     if dev is None:
         print('FATAL: no device found. Stop dummy_controller first.')
         return 1
-    hand = dev.robot.hand
+    robot = dev.robot
+    hand = robot.hand
     print('  connected')
     print()
+
+    # --- optional priming, replicating the driver's startup order ---------
+    if args.prime or args.prime_only:
+        print('  step 0: robot.set_enable(True) ... ', end='', flush=True)
+        state, dt, info = call_timed(lambda: robot.set_enable(True),
+                                     args.timeout)
+        if state == 'ok':
+            print(f'ok  ({dt:.2f}s)')
+        elif state == 'blocked':
+            print(f'BLOCKED  ({dt:.2f}s)')
+        else:
+            print(f'raised  ({dt:.2f}s): {info}')
+        print('         Did the fingers stiffen (servo now holding)? That is')
+        print('         the observable effect of this call on the gripper.')
+        print()
+        if args.prime_only:
+            print('  --prime-only: stopping here without touching the hand.')
+            return 0
 
     args_for = {
         'set_angle': (args.angle, float),
