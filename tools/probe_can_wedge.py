@@ -5,7 +5,7 @@ The hypothesis this tests
 -------------------------
 The firmware sends CAN frames through one shared function:
 
-    interface_can.cpp
+    Bsp/communication/interface_can.cpp
         void CanSendMessage(CAN_context* canCtx, uint8_t* txData, ...)
         {
             if (canCtx->handle->Instance == CAN1)
@@ -15,12 +15,11 @@ The firmware sends CAN frames through one shared function:
                 HAL_CAN_AddTxMessage(canCtx->handle, txHeader, txData, ...);
         }
 
-Note two things: the acquire waits FOREVER, and the function does not release
-the semaphore itself -- some CAN-TX-complete callback is supposed to.
-
+Two things stand out: the acquire waits FOREVER, and the function does not
+release the semaphore itself -- some CAN-TX-complete callback is supposed to.
 If that callback fails to fire for the gripper's frame, the semaphore never
-comes back and the firmware is stuck inside CanSendMessage for good. That single
-fault would explain every observation at once:
+returns and the firmware is stuck inside CanSendMessage for good. One fault,
+explaining everything at once:
 
   * the hand calls never return            -> the firmware is stuck in the send
   * the client never gets an answer        -> the firmware never reaches the reply
@@ -28,11 +27,11 @@ fault would explain every observation at once:
   * each call costs ~50 s                  -> two endpoint operations, each
                                               exhausting the client's resend budget
 
-The prediction, and it is a sharp one
--------------------------------------
+The prediction, and it is sharp
+-------------------------------
 Motor commands go through the SAME function on the SAME bus (CAN1). So if a hand
-call wedges it, then **every move_j issued afterwards should also stop working**
--- and it should stop working for a command that worked a moment earlier.
+call wedges it, **every move_j issued afterwards should also stop working** --
+including a command that worked a moment earlier.
 
 This script checks exactly that:
 
@@ -41,15 +40,16 @@ This script checks exactly that:
     3. move_j away from home again              -> works, or wedged?
 
 Outcome A: step 3 still moves the arm
-    The hypothesis is WRONG. The CAN bus survives a hand call, so the fault is
-    somewhere in the hand path itself, not in shared bus contention.
+    The hypothesis is WRONG. The bus survives a hand call, so the fault is in
+    the hand path itself -- the frame is not reaching the servo, or the servo
+    does not answer on that bus. Going direct-to-CAN is then worth doing,
+    because it can settle which.
 
 Outcome B: step 3 does not move the arm
-    The hypothesis is CONFIRMED, and it is serious: one hand call permanently
-    disables the arm until the controller is power-cycled. That also means the
-    driver must never call hand.* -- not even once for a look.
-
-Either answer is worth having, and this is the cheapest way to get it.
+    The hypothesis is CONFIRMED, and it is serious: one hand call disables the
+    arm until the controller is power-cycled. The driver must then never call
+    hand.* -- not even once to look. It is also a clean bug report for the
+    vendor: "set_angle wedges CAN TX for all subsequent commands".
 
 SAFETY
 ------
@@ -59,54 +59,33 @@ within reach.
 
     pkill -f dummy_controller
     python3 tools/probe_can_wedge.py
-    python3 tools/probe_can_wedge.py --skip-hand      # control: steps 1 and 3 only
+    python3 tools/probe_can_wedge.py --skip-hand      # control run
 """
 import argparse
 import os
 import sys
+import threading
 import time
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(HERE)
-sys.path.insert(0, os.path.join(REPO, 'dummy_vc_ws', 'src', 'dummy_controller'))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from device_session import (connect, move_and_report, power_on,  # noqa: E402
+                            wait_settle)
 
-JR = ['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6']
-
-# home_joints_deg: the 7 pose. ARM_A nudges joint_1 by 15 deg, which is well
-# inside its measured accepted range of [-165, 165].
+# home_joints_deg is the 7 pose. ARM_A nudges joint_1 by -15 deg, well inside
+# its measured accepted range of [-165, 165].
 HOME = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
 ARM_A = [-15.0, 0.0, 90.0, 0.0, 0.0, 0.0]
 
 HAND_ANGLE = 0.0        # firmware range is 0..30; 0 is the closed end
-
-
-def raw(robot):
-    return [float(getattr(robot, n).angle) for n in JR]
-
-
-def wait_settle(robot, timeout=25.0, eps=0.05, quiet=0.8):
-    t0 = time.monotonic()
-    last = raw(robot)
-    stable = time.monotonic()
-    while time.monotonic() - t0 < timeout:
-        time.sleep(0.2)
-        now = raw(robot)
-        if max(abs(now[i] - last[i]) for i in range(6)) > eps:
-            stable = time.monotonic()
-        elif time.monotonic() - stable > quiet:
-            return now, time.monotonic() - t0, False
-        last = now
-    return raw(robot), time.monotonic() - t0, True
+JUDGE_JOINT = 0         # joint_1 is the one being nudged
 
 
 def wait_call(fn, timeout):
     """Run fn on a daemon thread and report whether it finished.
 
-    Returns (state, elapsed, detail). `state` is 'RETURNED', 'RAISED' or
-    'STILL-RUNNING'. The thread is daemonic and never joined past the deadline,
-    so a call that never returns cannot stop the script.
+    Returns (state, elapsed, detail). The thread is daemonic and never joined
+    past the deadline, so a call that never returns cannot stop the script.
     """
-    import threading
     box = {}
     t0 = time.monotonic()
 
@@ -130,82 +109,61 @@ def wait_call(fn, timeout):
     return 'RETURNED', el, f'value={box.get("value")!r}'
 
 
-def move_test(robot, target, label, timeout):
-    """Command `target` and report whether the arm actually moved."""
-    before = raw(robot)
-    try:
-        robot.move_j(*target)
-        err = None
-    except Exception as exc:  # noqa: BLE001
-        err = f'{type(exc).__name__}: {exc}'
-    after, elapsed, trunc = wait_settle(robot, timeout)
-    # joint_1 is the one being nudged; use it as the indicator
-    moved = abs(after[0] - before[0])
-    print(f'  {label}')
-    print(f'    before j1 = {before[0]:+8.3f}')
-    print(f'    after  j1 = {after[0]:+8.3f}   (moved {moved:.3f} deg, '
-          f'{elapsed:.1f}s{"  WAIT TRUNCATED" if trunc else ""})')
-    if err:
-        print(f'    RAISED: {err}')
-    ok = moved > 5.0
-    print(f'    -> {"MOVED" if ok else "DID NOT MOVE"}')
-    print()
-    return ok
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--timeout', type=float, default=25.0,
-                    help='seconds to wait for arm settle (default 25)')
+                    help='seconds to wait for the arm to settle (default 25)')
     ap.add_argument('--hand-timeout', type=float, default=60.0,
                     help='seconds to tolerate for the hand call (default 60)')
     ap.add_argument('--skip-hand', action='store_true',
                     help='control run: steps 1 and 3 only, no hand call')
     args = ap.parse_args()
 
-    try:
-        import dummy_cli_tool.ref_tool as ref_tool
-    except Exception as exc:  # noqa: BLE001
-        print(f'FATAL: cannot use dummy_cli_tool ({exc})')
-        return 2
-
     print('=== probe_can_wedge ===')
     print()
     print('  Question: does one hand call wedge the shared CAN bus, so that')
     print('  motor commands stop working afterwards?')
     print()
-    print('  If YES, the driver must NEVER call hand.* -- not even to look.')
-    print()
 
-    dev = ref_tool.find_any(path='usb', timeout=15.0)
-    if dev is None:
-        print('FATAL: no device found. Stop dummy_controller first.')
+    robot, hand = connect()
+    if robot is None:
         return 1
-    robot = dev.robot
-    hand = robot.hand
-    print('  connected')
+
+    # NOT optional. Without this the axes have no torque, commands are accepted
+    # and nothing moves -- which would make every result below meaningless.
+    if not power_on(robot):
+        print('  The enable call did not return cleanly, so motor motion cannot')
+        print('  be trusted. Stopping rather than reporting a false "no move".')
+        return 1
+    print('  axes enabled (set_enable(True)); without this the arm is limp')
     print()
 
     print('=' * 74)
     print('STEP 1 -- motor control before anything touches the gripper')
     print('=' * 74)
-    # start from a known pose
     try:
         robot.move_j(*HOME)
     except Exception:  # noqa: BLE001
         pass
     wait_settle(robot, args.timeout)
-    if not move_test(robot, ARM_A, 'move_j -> ARM_A (j1 -15)', args.timeout):
-        print('  The arm did not move BEFORE any hand call, so this test cannot')
-        print('  tell us anything about wedging. Fix motor control first.')
+    if not move_and_report(robot, ARM_A, 'move_j -> ARM_A (j1 -15)',
+                           args.timeout, index=JUDGE_JOINT):
+        print('  The arm did not move BEFORE any hand call.')
+        print()
+        print('  That is a motor-control problem, not a CAN-wedge result. The')
+        print('  most common cause is a missed setup step, and the second most')
+        print('  common is that a PREVIOUS hand call already wedged the bus --')
+        print('  in which case power-cycle the controller and run this again.')
         return 1
+    print('  Baseline is good: the arm responds.')
+    print()
 
     print('=' * 74)
     print('STEP 2 -- one hand call')
     print('=' * 74)
     if args.skip_hand:
-        print('  --skip-hand: control run, not touching the hand')
-        print('  Expect step 3 to MOVE. If it does, the test harness is sound.')
+        print('  --skip-hand: control run, not touching the hand.')
+        print('  Expect step 3 to MOVE. If it does, this harness is sound.')
         print()
     else:
         print(f'  hand.set_angle({HAND_ANGLE})  (firmware range is 0..30)')
@@ -217,31 +175,32 @@ def main():
         if detail:
             print(f'       {detail}')
         if state == 'RETURNED':
-            print('    It returned. Note that it returned None more often than')
-            print('    not: the client does not raise after exhausting its')
-            print('    retries, it just falls through and returns.')
+            print('    Note: the client does NOT raise after exhausting its')
+            print('    retries -- the raise statement sits inside the retry loop')
+            print('    and is only reached on a late attempt. The last timeout')
+            print('    just falls out of the loop and returns None.')
         print()
 
     print('=' * 74)
     print('STEP 3 -- can the motor still command, after the hand call?')
     print('=' * 74)
-    # go back to home first, so a failure here is about the bus, not distance
     try:
         robot.move_j(*HOME)
     except Exception:  # noqa: BLE001
         pass
     wait_settle(robot, args.timeout)
-    moved_again = move_test(robot, ARM_A, 'move_j -> ARM_A again (j1 -15)',
-                            args.timeout)
+    moved_again = move_and_report(robot, ARM_A,
+                                  'move_j -> ARM_A again (j1 -15)',
+                                  args.timeout, index=JUDGE_JOINT)
 
     print('=' * 74)
     print('VERDICT')
     print('=' * 74)
     if args.skip_hand:
         if moved_again:
-            print('  Control run: the arm moved both times, with no hand call.')
-            print('  So the harness is sound -- a failure after a hand call')
-            print('  would mean the hand call is what broke it.')
+            print('  Control run: the arm moved both times with no hand call,')
+            print('  so the harness is sound. A failure after a hand call would')
+            print('  therefore mean the hand call is what broke it.')
         else:
             print('  Control run FAILED: the arm stopped moving even without a')
             print('  hand call. Motor control is not reliable enough for this')
@@ -252,25 +211,27 @@ def main():
         print('  OUTCOME A: the arm still moves after a hand call.')
         print()
         print('  The shared-CAN-wedge hypothesis is WRONG. The bus survives, so')
-        print('  the fault is inside the hand path itself: either the frame is')
-        print('  not reaching the servo, or the servo is not answering on it.')
+        print('  the fault is in the hand path itself: either the frame is not')
+        print('  reaching the servo, or the servo does not answer on that bus.')
         print()
-        print('  Next: look at the servo, not the firmware.')
+        print('  Next: go at the servo directly over CAN. That settles whether')
+        print('  anything is listening on node 7 at all, which the firmware')
+        print('  path cannot tell us.')
     else:
         print('  OUTCOME B: the arm STOPPED moving after one hand call.')
         print()
         print('  The shared-CAN-wedge hypothesis is CONFIRMED.')
         print()
-        print('  One hand call permanently disables motor commands until the')
-        print('  controller is power-cycled. That matches the firmware:')
-        print('  CanSendMessage acquires sem_can1_tx with osWaitForever and')
-        print('  never releases it, so if the TX-complete callback does not fire')
-        print('  for the gripper frame, every later send blocks forever.')
+        print('  One hand call disables motor commands until the controller is')
+        print('  power-cycled. That matches the firmware, where CanSendMessage')
+        print('  acquires sem_can1_tx with osWaitForever and never releases it:')
+        print('  if the TX-complete callback does not fire for the gripper frame,')
+        print('  every later send blocks forever.')
         print()
         print('  Consequences, both important:')
         print('    1. the driver must NEVER call hand.* -- one call costs the')
         print('       whole arm until a power cycle')
-        print('    2. this is a firmware bug with a clear report to the vendor:')
+        print('    2. this is a firmware bug with a clear report for the vendor:')
         print('       "set_angle wedges CAN TX for all subsequent commands"')
     return 0
 
