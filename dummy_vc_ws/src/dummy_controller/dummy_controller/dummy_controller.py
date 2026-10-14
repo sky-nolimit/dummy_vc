@@ -119,8 +119,13 @@ class dummy_controller(LifecycleNode):
         # 这两个值的差决定手指位移的折算比例，填错只影响 RViz 显示。
         self.declare_parameter('grip_angle_closed', 0.0)
         self.declare_parameter('grip_angle_open', 90.0)
-        # 夹持力上限。这是唯一能防"夹碎"的手段，从小值开始试。
-        self.declare_parameter('grip_current_limit', 1.0)
+        # 夹持力上限。这是唯一能防"夹碎"的手段。
+        #
+        # **默认 0.1 是刻意取小的。** 这个值在使能夹爪之前就被写进设备
+        # （见 _init_gripper_with_timeout 里"要在使能之前压低电流上限"那段），
+        # 所以一旦 gripper_enable 被打开，它立刻生效。取大了，第一次装夹就
+        # 可能压坏东西。方案 R9 要求从极小值开始扫，实测后再填回配置。
+        self.declare_parameter('grip_current_limit', 0.1)
         # 兼容旧参数名，避免已有配置直接报"未声明参数"
         self.declare_parameter('hand_max_angle', 90.0)
         # move_j 下发前的整圈归一化区间（仅在拿不到当前姿态时的回退路径使用）
