@@ -44,23 +44,27 @@ sys.path.insert(0, os.path.join(REPO, 'dummy_vc_ws', 'src', 'dummy_controller'))
 UNDER_ARG = re.compile(r'(^|\.)(args|return)(\[\d+\])?(\.|$)')
 
 
-def walk(node, path=''):
-    """Yield (path, dict) for every endpoint-looking dict in the tree.
+def walk(node, chain=()):
+    """Yield (name_chain, dict) for every endpoint-looking dict.
 
-    Only dicts that look like an ENDPOINT are yielded. Arguments and return
-    descriptors also carry a name and a type, and matching them produces noise
-    like "hand.set_angle.args[0]", so anything reached THROUGH an args/return
-    key is skipped. The segment may carry an index ("args[0]"), hence the regex.
+    The chain is the sequence of `name` fields from the root down. An earlier
+    version built POSITIONAL paths like "[4].members[10].members[0]", which
+    cannot be related to anything and made every lookup in
+    tools/compare_endpoints.py fail. Name chains are stable regardless of how
+    the tree happens to be nested.
     """
     if isinstance(node, dict):
         name = node.get('name')
-        if name and 'type' in node and not UNDER_ARG.search(path):
-            yield path, node
+        here = chain + (name,) if name else chain
+        if name and 'type' in node:
+            yield here, node
         for k, v in node.items():
-            yield from walk(v, f'{path}.{k}' if path else k)
+            if k in ('inputs', 'outputs', 'args', 'return'):
+                continue
+            yield from walk(v, here)
     elif isinstance(node, list):
-        for i, v in enumerate(node):
-            yield from walk(v, f'{path}[{i}]')
+        for v in node:
+            yield from walk(v, chain)
 
 
 def load(args):
@@ -126,11 +130,9 @@ def main():
     print()
 
     want = args.grep.lower()
-    # A hand endpoint is one whose name matches AND which sits under a "hand"
-    # path, because joint names could otherwise match by accident.
-    hits = [(p, d) for p, d in entries
-            if want in str(d.get('name', '')).lower()
-            or want in p.lower()]
+    # Match against the NAME CHAIN, so "hand" finds hand.set_angle and also the
+    # hand object itself, and never matches an unrelated joint by accident.
+    hits = [(c, d) for c, d in entries if want in '.'.join(c).lower()]
     if not hits:
         print(f'no endpoint matches "{args.grep}".')
         print('Try --grep with another word, or --raw to see everything.')
@@ -138,8 +140,8 @@ def main():
 
     print(f'=== {len(hits)} endpoint(s) matching "{args.grep}" ===')
     print()
-    for path, d in hits:
-        print(f'--- {path}')
+    for chain, d in hits:
+        print(f'--- {".".join(chain)}')
         print(json.dumps(d, indent=2, ensure_ascii=False))
         print()
 
