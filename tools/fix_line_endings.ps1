@@ -46,7 +46,18 @@ $textExtensions = @(
 $textNames = @('.gitignore', '.gitattributes', 'CMakeLists.txt', 'Dockerfile')
 
 # Directories never scanned.
-$skipDirs = @('.git', 'build', 'install', 'log', '__pycache__', 'node_modules')
+#
+# `reference` is third-party material kept verbatim: the Dummy firmware, the
+# reference MoveIt workspace, upstream diffs. Its line endings are the authors',
+# and rewriting them would be tampering with the only record of what the vendor
+# actually shipped -- which matters here, because the firmware source is the
+# authority we compare our calibration against.
+#
+# Of course nothing of OURS should be in there. If our own code ever lands under
+# reference/, that is a mistake in the project layout, not a line-ending problem
+# this script should paper over.
+$skipDirs = @('.git', 'build', 'install', 'log', '__pycache__', 'node_modules',
+              'reference')
 
 function Test-IsCandidate([string]$path) {
     $ext = [System.IO.Path]::GetExtension($path).ToLowerInvariant()
