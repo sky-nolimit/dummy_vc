@@ -56,8 +56,20 @@ STEPS = ('read', 'write', 'hand', 'read-after-hand', 'write-after-hand',
          'definition')
 
 
-def watched(label, fn, timeout):
-    """Run fn on a daemon thread; report the outcome within `timeout`."""
+def watched(label, fn, timeout, skip=False):
+    """Run fn on a daemon thread; report the outcome within `timeout`.
+
+    `skip=True` does not call fn at all. That matters because a call that never
+    returns leaves a daemon thread holding a libusb mutex, and then Ctrl-C
+    cannot exit cleanly -- the process aborts with an assertion inside libusb
+    instead. When an earlier step already told us a call hangs, repeating it
+    buys nothing and costs a stuck process.
+    """
+    if skip:
+        print(f'  {label}')
+        print('    -> SKIPPED (a previous step already showed this call never')
+        print('       returns; repeating it would only wedge the process)')
+        return 'SKIPPED'
     box = {}
     t0 = time.monotonic()
 
@@ -88,6 +100,37 @@ def watched(label, fn, timeout):
     return 'OK'
 
 
+def report_retry_budget(robot):
+    """Print the client's actual retry parameters, from the live object.
+
+    Worth doing rather than trusting the source: `_resend_timeout = 5.0` and
+    `_send_attempts = 5` are class attributes, and if a transport overrides them
+    the real budget is different from the ~25 s the source suggests. That
+    difference decides whether "never returns" is even possible.
+    """
+    print('  client retry budget, read from the live channel:')
+    found = False
+    for owner, label in ((robot, 'robot'),):
+        for attr in dir(owner):
+            if attr.startswith('_'):
+                continue
+            obj = getattr(owner, attr, None)
+            ch = getattr(obj, '__channel__', None)
+            if ch is None:
+                continue
+            found = True
+            rt = getattr(ch, '_resend_timeout', None)
+            sa = getattr(ch, '_send_attempts', None)
+            print(f'    via {label}.{attr}: _resend_timeout={rt} '
+                  f'_send_attempts={sa}  -> worst case '
+                  f'{(rt or 0) * (sa or 0):.1f}s per endpoint operation')
+            break
+    if not found:
+        print('    could not reach the channel object from the robot; the')
+        print('    class defaults are _resend_timeout=5.0, _send_attempts=5')
+    print()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--step', required=True, choices=STEPS)
@@ -95,6 +138,12 @@ def main():
                     help='seconds to wait for one operation (default 20)')
     ap.add_argument('--hand-timeout', type=float, default=60.0,
                     help='seconds to tolerate for the hand call (default 60)')
+    ap.add_argument('--redo-hand-call', action='store_true',
+                    help='make the hand call inside read-after-hand / '
+                         'write-after-hand. Off by default: the call never '
+                         'returns and leaves a libusb mutex held, so the '
+                         'process cannot be Ctrl-C\'d cleanly. Only needed if '
+                         'you power-cycled and want the wedge created here.')
     args = ap.parse_args()
 
     print(f'=== probe_scan_after_hand -- step: {args.step} ===')
@@ -184,6 +233,7 @@ def main():
         print('  Calling hand.set_angle(0.0) first (expect no answer), then')
         print('  reading a joint angle to see whether the device still replies.')
         print()
+        report_retry_budget(robot)
         watched('hand.set_angle(0.0)', lambda: hand.set_angle(0.0),
                 args.hand_timeout)
         print()
@@ -195,6 +245,8 @@ def main():
             print('    So the device is NOT wedged -- it still answers on the')
             print('    fibre interface. The failure is specific to the WRITE')
             print('    path (candidate C), not to a stuck firmware loop.')
+        elif st == 'SKIPPED':
+            print('  VERDICT: inconclusive -- the read was skipped.')
         else:
             print('  VERDICT: reads STOPPED working after a hand call.')
             print('    The device no longer answers at all. Combined with the')
@@ -208,17 +260,32 @@ def main():
     print('  Calling hand.set_angle(0.0) first, then commanding a move, to see')
     print('  whether the WRITE path survives.')
     print()
+    report_retry_budget(robot)
+    # Skip by default: the earlier run established that this call never
+    # returns, and repeating it wedges a libusb mutex so the process cannot
+    # even be Ctrl-C'd cleanly. Almost always the hand call was already made
+    # in a previous invocation and the controller was NOT power-cycled, which
+    # is exactly the state this step wants to measure.
     watched('hand.set_angle(0.0)', lambda: hand.set_angle(0.0),
-            args.hand_timeout)
+            args.hand_timeout, skip=not args.redo_hand_call)
+    if args.redo_hand_call:
+        print()
+        print('  (--redo-hand-call was given, so the hand was called here.)')
+    else:
+        print()
+        print('  If a previous invocation already called the hand and you did')
+        print('  NOT power-cycle since, the wedge is already in place and the')
+        print('  measurement below is valid. Pass --redo-hand-call to make the')
+        print('  call in this run instead.')
     print()
     st = watched('move_j(ARM_A) AFTER the hand call',
                  lambda: robot.move_j(*ARM_A), args.timeout)
     print()
     if st == 'OK':
-        print('  VERDICT: writes still work after a hand call, so the CAN bus')
-        print('    is not wedged and the hand fault is local to the gripper.')
-    else:
-        print('  VERDICT: WRITES stopped working after a hand call.')
+        print('  VERDICT: writes still work, so the CAN bus is not wedged and')
+        print('    the hand fault is local to the gripper.')
+    elif st == 'NO-ANSWER':
+        print('  VERDICT: WRITES stopped answering.')
         print('    Motor commands and gripper commands share CanSendMessage on')
         print('    CAN1, so this is the shared-bus wedge (candidate A): one')
         print('    hand call takes the whole arm out until a power cycle.')
