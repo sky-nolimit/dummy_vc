@@ -13,8 +13,17 @@ None of it can be derived: the URDF says the fingers travel 0..0.023 m, while
 the device interface takes `hand.angle`, and no published relation connects
 them. It has to be measured.
 
-**This script does nothing on its own.** Stages are selected explicitly and
-each one prints what it will do before doing it. Stage 0 is read-only.
+**Stage 0 issues no write to the device at all** -- it does not even enable the
+gripper. That is not decoration: the first hardware run of an earlier version
+called `hand.set_enable(True)` before stage 0 and hung, so the "read-only" stage
+never ran. Writes moved to stages 1 and 2, where they belong.
+
+FIRST-RUN FINDING, keep it in view
+----------------------------------
+`hand.set_enable(True)` did not return within 8 s on the first attempt. It is
+not known whether the call is refused, slow, or still pending. Everything about
+the gripper should be treated as unconfirmed until that is understood, and any
+probe should leave the link in a known state before the next one runs.
 
 SAFETY, from the plan's risk list (R9)
 --------------------------------------
@@ -283,6 +292,9 @@ def main():
     ap.add_argument('--timeout', type=float, default=15.0)
     ap.add_argument('--yes', action='store_true',
                     help='skip the confirmation prompt')
+    ap.add_argument('--no-enable', action='store_true',
+                    help='do not call hand.set_enable; useful when the gripper '
+                         'is already energised, or when that call blocks')
     args = ap.parse_args()
 
     try:
@@ -312,19 +324,45 @@ def main():
 
     print('=== probe_gripper ===')
     print()
-    print('  the gripper needs its OWN enable; robot.set_enable() does not')
-    print('  cover it (docs/01 §2, blocking issue 6)')
-    val, blocked = with_timeout(lambda: hand.set_enable(True), 8.0,
-                                'hand.set_enable(True)')
-    if blocked:
-        print('  FATAL: enabling the gripper blocked. Stopping before anything')
-        print('         else touches the link.')
-        return 1
-    print('  gripper enabled')
-    print()
 
     if args.stage == 0:
+        # Stage 0 must be READ ONLY, so it does not enable anything. An earlier
+        # version enabled the gripper first and hung: `hand.set_enable(True)`
+        # did not return within 8 s. That is itself a finding, and it was
+        # hidden behind a "read-only" label that was not true.
         return stage0(hand, robot, args)
+
+    # Stages 1 and 2 need the gripper energised.
+    print('  the gripper needs its OWN enable; robot.set_enable() does not')
+    print('  cover it (docs/01 §2, blocking issue 6)')
+    print('  NOTE: on the first hardware run hand.set_enable(True) did not')
+    print('  return within 8 s. If it blocks again, that is a real finding --')
+    print('  record it, and try --no-enable to see whether the gripper is')
+    print('  already energised from a previous session.')
+    print()
+    if not args.no_enable:
+        val, blocked = with_timeout(lambda: hand.set_enable(True), 8.0,
+                                    'hand.set_enable(True)')
+        if blocked:
+            print('  WARNING: enabling the gripper blocked. It may still be')
+            print('           energised (the call could be pending rather than')
+            print('           refused). Continuing is at your discretion; the')
+            print('           link will stay busy until the call returns.')
+            if not args.yes:
+                try:
+                    if input('Continue anyway? type "yes": ').strip().lower() \
+                            != 'yes':
+                        print('aborted')
+                        return 1
+                except EOFError:
+                    print('aborted')
+                    return 1
+        else:
+            print('  gripper enabled')
+    else:
+        print('  --no-enable: not calling set_enable')
+    print()
+
     if args.stage == 1:
         return stage1(hand, args)
     return stage2(hand, args)
