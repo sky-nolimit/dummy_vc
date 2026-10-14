@@ -38,7 +38,7 @@ class dummy_controller(LifecycleNode):
         self.finger_travel_m = 0.023
 
         # 夹爪全开对应的设备角度（**度**）。标定前用占位值。
-        self.hand_max_angle = 90.0
+        self.hand_max_angle = 30.0
 
         # 夹爪控制量（归一化 0.0 = 全闭，1.0 = 全开）。
         # 目标与回读分开存：目标是我们要它去的，回读是它实际在哪。
@@ -121,19 +121,24 @@ class dummy_controller(LifecycleNode):
         # ---- 夹爪 ----------------------------------------------------------
         # 手指行程上限（米），来自 URDF 的 limit upper
         self.declare_parameter('finger_travel_m', 0.023)
-        # 夹爪全闭 / 全开对应的设备角度（**度**）。阶段 0.4 实测后替换。
-        # 这两个值的差决定手指位移的折算比例，填错只影响 RViz 显示。
+        # 夹爪全闭 / 全开对应的设备角度（**度**）。范围 0~30 由固件源码确定
+        # （dummy_robot.cpp 的 DummyHand::SetAngle 会把 _angle 夹到 [0,30]），
+        # 所以全开是 30 而不是 90。方向（0 是全闭还是全开）仍未实测。
         self.declare_parameter('grip_angle_closed', 0.0)
-        self.declare_parameter('grip_angle_open', 90.0)
+        self.declare_parameter('grip_angle_open', 30.0)
         # 夹持力上限。这是唯一能防"夹碎"的手段。
         #
         # **默认 0.1 是刻意取小的。** 这个值在使能夹爪之前就被写进设备
         # （见 _init_gripper_with_timeout 里"要在使能之前压低电流上限"那段），
         # 所以一旦 gripper_enable 被打开，它立刻生效。取大了，第一次装夹就
         # 可能压坏东西。方案 R9 要求从极小值开始扫，实测后再填回配置。
+        #
+        # 固件里 DummyHand::maxCurrent 的默认值是 0.7，范围 0~1；那个值对
+        # 未标定的夹爪偏大，所以没有沿用。DummyHand::SetEnable(true) 做的事
+        # 就是 SetMaxCurrent(0.7)，即"使能"等于"把电流上限写成 0.7"。
         self.declare_parameter('grip_current_limit', 0.1)
         # 兼容旧参数名，避免已有配置直接报"未声明参数"
-        self.declare_parameter('hand_max_angle', 90.0)
+        self.declare_parameter('hand_max_angle', 30.0)
         # move_j 下发前的整圈归一化区间（仅在拿不到当前姿态时的回退路径使用）
         self.declare_parameter('wrap_min_deg', 0.0)
         self.declare_parameter('wrap_max_deg', 360.0)
@@ -234,9 +239,10 @@ class dummy_controller(LifecycleNode):
         if abs(self.grip_angle_open - self.grip_angle_closed) < 1e-6:
             self.get_logger().error(
                 'grip_angle_open and grip_angle_closed are equal; the finger '
-                'mapping would divide by zero. Falling back to 0..90 deg.')
+                'mapping would divide by zero. Falling back to 0..30 deg, '
+                'which is the range the firmware clamps SetAngle to.')
             self.grip_angle_closed = 0.0
-            self.grip_angle_open = 90.0
+            self.grip_angle_open = 30.0
 
         for name, val in (('joint_sign', self.joint_sign),
                           ('joint_offset_deg', self.joint_offset_deg),
