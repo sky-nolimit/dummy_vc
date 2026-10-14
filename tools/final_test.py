@@ -203,40 +203,51 @@ def main():
     print('  Success: a positive command moves the joint, the equal negative')
     print('  command brings it back. Failure means the joint does not move,')
     print('  the direction is inverted, or the command is dropped silently.')
-    print('  Each move is waited on until the joints stop changing; the')
-    print('  elapsed time is printed so a timeout-driven false reading is')
-    print('  obvious.')
-    truncated_any = False
+    print('  Each move waits for the joints to START moving and then to stop.')
+    print('  The device has a start-up lag of a second or two, so a short')
+    print('  quiet spell right after a command proves nothing -- an earlier')
+    print('  version returned on it and reported "did not move" while the arm')
+    print('  was still stationary and about to start. Elapsed times are')
+    print('  printed so a truncated wait is visible.')
+    inconclusive = False
     for idx, name in enumerate(JOINTS):
         # start from a settled pose so d1 is measured from rest
-        a0, _, _ = rig.wait(args.move_timeout)
+        a0 = rig.wait(args.move_timeout).angles
 
         target = [rig.state[j] for j in JOINTS]
         target[idx] = rig.state[name] + math.radians(args.move_deg)
         rig.send(target)
-        a1, t1, trunc1 = rig.wait(args.move_timeout)
-        truncated_any = truncated_any or trunc1
+        r1 = rig.wait(args.move_timeout)
 
         target[idx] = rig.state[name] - math.radians(args.move_deg)
         rig.send(target)
-        a2, t2, trunc2 = rig.wait(args.move_timeout)
-        truncated_any = truncated_any or trunc2
+        r2 = rig.wait(args.move_timeout)
 
+        a1, a2 = r1.angles, r2.angles
         d1 = a1[idx] - a0[idx]
         d2 = a2[idx] - a1[idx]
-        moved = abs(d1) > args.move_deg * 0.3
+        # Judge the target joint only. wait_settled reports whether ANY joint
+        # changed, which is too loose here: the other joints can jog slightly
+        # when a new command arrives, and that would mask a target joint that
+        # never moved.
+        joint_moved = abs(d1) > args.move_deg * 0.3
+        moved = joint_moved
         returned = abs(d2) > args.move_deg * 0.3 and d1 * d2 < 0
         note = ''
-        if trunc1 or trunc2:
+        if r1.timed_out or r2.timed_out:
             note = '  <-- WAIT TIMED OUT, readings may be mid-travel'
+            inconclusive = True
         print(f'  j{idx + 1}: {a0[idx]:9.3f} -> {a1[idx]:9.3f} -> '
-              f'{a2[idx]:9.3f}   out {d1:+8.3f} ({t1:4.1f}s)  '
-              f'back {d2:+8.3f} ({t2:4.1f}s){note}')
+              f'{a2[idx]:9.3f}   out {d1:+8.3f} ({r1.elapsed:4.1f}s, '
+              f'{"moved" if r1.moved else "still"})  '
+              f'back {d2:+8.3f} ({r2.elapsed:4.1f}s, '
+              f'{"moved" if r2.moved else "still"}){note}')
         if not moved:
             res.add(False, f'j{idx + 1} responds to a command',
                     f'commanded {args.move_deg:+.0f} deg, the joint moved '
-                    f'{d1:+.3f}; the device drops targets it will not act on, '
-                    'so check the accepted range and the calibration')
+                    f'{d1:+.3f} and the angles never changed. The device drops '
+                    'targets it will not act on, so check the accepted range '
+                    'and the down-link')
         elif not returned:
             res.add(False, f'j{idx + 1} returns when told',
                     f'out {d1:+.3f} then {d2:+.3f}: the direction is inverted '
@@ -252,10 +263,13 @@ def main():
     print('  zero and the target zero disagree -- a calibration fault, not a')
     print('  transport one.')
     rig.send([0.0] * 6)
-    landed, elapsed, trunc = rig.wait(args.move_timeout * 2)
+    r4 = rig.wait(args.move_timeout * 2)
+    landed, elapsed = r4.angles, r4.elapsed
     print(f'  landed at: {[round(v, 3) for v in landed]} deg   '
-          f'(settled in {elapsed:.1f}s)')
-    if trunc:
+          f'(settled in {elapsed:.1f}s, '
+          f'{"moved" if r4.moved else "never moved"})')
+    if r4.timed_out:
+        inconclusive = True
         res.add(False, 'returning to the 7 pose settles',
                 f'joints were still moving after {args.move_timeout * 2:.0f}s; '
                 're-run with a larger --move-timeout')
@@ -277,8 +291,8 @@ def main():
     passed = sum(1 for ok, _, _ in res.rows if ok is True)
     skipped = sum(1 for ok, _, _ in res.rows if ok is None)
     print(f'  passed {passed}, failed {len(res.failures)}, skipped {skipped}')
-    if truncated_any:
-        print('\n  NOTE: at least one move hit its timeout, so a "did not')
+    if inconclusive:
+        print('\n  NOTE: at least one wait hit its timeout, so a "did not')
         print('  move" result above may be a measurement artefact rather than')
         print('  a real fault. Re-run with a larger --move-timeout first.')
     if not res.failures:
