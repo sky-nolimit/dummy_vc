@@ -33,3 +33,14 @@ debug.log
 #     在 Ubuntu 上永远不会用到，node_modules 同理）---
 reference/**/zadig-*.exe
 reference/**/node_modules/
+
+# --- 参考资料里的第三方库 ---
+#
+# esp32-iot 是 Mongoose OS 的库（Sergey Lyubka / Cesanta），80 MB、2851 个
+# 文件，带十几个各厂商的 demo 工程。它是 Dummy 那块 ESP32 联网板用的，与
+# 机械臂本体无关，而且上游有仓库可以取。
+#
+# 文件仍然在磁盘上（git rm --cached 只改索引），只是不进版本库。
+# 需要看它的时候直接读 `reference/Firmware/esp32-iot/`。
+reference/Firmware/esp32-iot/
+
