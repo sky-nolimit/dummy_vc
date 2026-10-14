@@ -72,6 +72,8 @@ CHECKS = [
      'no CRLF in the git objects Linux will receive', True, []),
     ('check_urdf.py',
      'URDF is valid, the joint tree is connected', True, []),
+    ('check_urdf_limits.py',
+     'URDF limits do not exceed the measured device travel', True, []),
     ('check_launch_consistency.py',
      'launch will not raise on an undocumented config key', True, []),
     ('check_conversions.py',

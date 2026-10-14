@@ -253,7 +253,29 @@
   <parent link="base_link"/>
   <child link="link1_v1_1"/>
   <axis xyz="0.0 -0.0 -1.0"/>
-  <limit upper="3.141593" lower="-3.141593" effort="100" velocity="100"/>
+  <!--
+    Limits throughout this file are the DEVICE's real travel, measured with
+    tools/probe_range.py and classified with tools/analyse_range.py. They are
+    NOT the vendor's datasheet values, and the difference matters: the device
+    silently drops an entire command that contains a move_j value it will not
+    act on, so a limit that is looser than the device lets MoveIt plan a motion
+    the arm will then ignore with no error anywhere.
+
+    Mapping used for every joint:
+        urdf_deg = sign * (move_j - movej_urdf_zero_deg)
+    with sign = [-1, -1, -1, 1, -1, -1] and
+    movej_urdf_zero_deg = [0, 0, 90, 0, 0, 0].
+
+    Accepted move_j per joint, measured:
+        joint_1 [-165, 165]     joint_4 [-180, 165]
+        joint_2 [ -75,  90]     joint_5 [ -90,  90]
+        joint_3 [  45, 180]     joint_6 [-180, 180]
+
+    Bounds here are rounded outward from the measurements (floor for the lower,
+    ceil for the upper) so they are never tighter than what was observed.
+    tools/check_urdf_limits.py enforces that they are at least not looser.
+  -->
+  <limit upper="2.879793" lower="-2.879793" effort="100" velocity="100"/>
 </joint>
 
 <joint name="dummy2_joint2" type="revolute">
@@ -261,7 +283,26 @@
   <parent link="link1_v1_1"/>
   <child link="link2_3_v4_1"/>
   <axis xyz="1.0 0.0 0.0"/>
-  <limit upper="1.308997" lower="-2.094395" effort="100" velocity="100"/>
+  <!--
+    Limits below are the DEVICE's real travel, not the vendor's datasheet, and
+    they come from measuring what move_j the arm will actually accept
+    (tools/probe_range.py, classified with tools/analyse_range.py).
+
+    The device silently drops a command containing a value it will not act on,
+    taking the whole command with it. So a limit here that is LOOSER than the
+    device is not a harmless rounding difference; MoveIt will happily plan
+    into it and the arm will simply not move.
+
+    Mapping used: urdf_deg = sign * (move_j - movej_urdf_zero_deg), with
+    sign = -1 and movej_urdf_zero_deg = 0 for joint_2, so
+
+        move_j [-75, 90]  ->  urdf [-90, 75].   upper matches exactly;
+        the lower bound here was -120, which the device cannot reach.
+
+    The retracted (power-off) pose is urdf joint_2 = +75, which rests exactly on
+    this upper limit.
+  -->
+  <limit upper="1.308997" lower="-1.570796" effort="100" velocity="100"/>
 </joint>
 
 <joint name="dummy2_joint3" type="revolute">
@@ -269,7 +310,21 @@
   <parent link="link2_3_v4_1"/>
   <child link="link4_v3_1"/>
   <axis xyz="1.0 -0.0 0.0"/>
-  <limit upper="1.308997" lower="-1.570796" effort="100" velocity="100"/>
+  <!--
+    Device travel, measured. move_j [45, 180] with sign = -1 and
+    movej_urdf_zero_deg = 90 gives
+
+        urdf = -(move_j - 90)   ->   move_j 45  ->  urdf +45
+                                     move_j 180 ->  urdf -90
+
+    so urdf is [-90, +45]. The upper bound here was 1.308997 (+75), which is
+    30 deg past anything the device will accept: MoveIt could plan joint_3 to
+    +60 and the arm would ignore the entire command. Tightened to +45.
+
+    The lower bound stays at -90 because the retracted (power-off) pose is
+    exactly urdf joint_3 = -90, so there is no margin to give away.
+  -->
+  <limit upper="0.785398" lower="-1.570796" effort="100" velocity="100"/>
 </joint>
 
 <joint name="dummy2_joint4" type="revolute">
@@ -277,7 +332,7 @@
   <parent link="link4_v3_1"/>
   <child link="link5_v3_1"/>
   <axis xyz="-0.0 1.0 0.0"/>
-  <limit upper="3.141593" lower="-3.141593" effort="100" velocity="100"/>
+  <limit upper="2.879793" lower="-3.141593" effort="100" velocity="100"/>
 </joint>
 
 <joint name="dummy2_joint5" type="revolute">
@@ -285,7 +340,7 @@
   <parent link="link5_v3_1"/>
   <child link="link6_v3_1"/>
   <axis xyz="1.0 0.0 0.0"/>
-  <limit upper="1.745329" lower="-1.745329" effort="100" velocity="100"/>
+  <limit upper="1.570796" lower="-1.570796" effort="100" velocity="100"/>
 </joint>
 
 <joint name="dummy2_joint6" type="revolute">
