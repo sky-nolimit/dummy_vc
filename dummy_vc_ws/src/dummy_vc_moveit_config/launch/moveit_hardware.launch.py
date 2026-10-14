@@ -44,18 +44,34 @@ def generate_launch_description():
         .robot_description_semantic(file_path='config/dummy2.srdf')
         .joint_limits(file_path='config/joint_limits.yaml')
         .trajectory_execution(file_path='config/moveit_controllers.yaml')
-        .planning_scene_monitor(
-            file_path='config/planning_scene_monitor_parameters.yaml')
         .to_moveit_configs()
     )
+
+    # Same report as demo.launch.py: a config file that failed to load shows up
+    # much later as "planning failed" or "the arm did not move", neither of
+    # which points at the cause.
+    urdf = moveit_config.robot_description.get('robot_description', '')
+    print('=' * 70)
+    print('dummy_vc_moveit_config: what was loaded')
+    print('=' * 70)
+    print(f'  robot_description        : {len(urdf)} chars'
+          f'{"  <-- EMPTY, check .setup_assistant" if len(urdf) < 100 else ""}')
+    print(f'  kinematics groups        : '
+          f'{list(moveit_config.robot_description_kinematics.keys())}')
+    print(f'  planning_pipelines       : '
+          f'{list(moveit_config.planning_pipelines.keys())}')
+    traj = moveit_config.trajectory_execution
+    print(f'  trajectory_execution     : {sorted(traj.keys())}')
+    scm = traj.get('moveit_simple_controller_manager', {})
+    print(f'  controllers              : {scm.get("controller_names")}')
+    print('=' * 70)
 
     rviz_config = os.path.join(share, 'config', 'moveit.rviz')
     rviz_arg = DeclareLaunchArgument('rviz', default_value='true',
                                      description='start RViz')
     use_rviz = LaunchConfiguration('rviz')
 
-    robot_description = {'robot_description':
-                         moveit_config.robot_description['robot_description']}
+    robot_description = {'robot_description': urdf}
 
     nodes = [
         rviz_arg,

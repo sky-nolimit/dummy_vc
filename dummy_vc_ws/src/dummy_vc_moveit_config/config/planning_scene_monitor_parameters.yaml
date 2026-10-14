@@ -1,15 +1,24 @@
 # Planning scene monitor settings.
 #
+# **NOT LOADED YET.** Keeping the file because the reasoning is worth recording,
+# but nothing reads it right now: the launch files set the builder up without
+# `planning_scene_monitor`, because that method's parameter names differ between
+# MoveIt releases and guessing one costs a launch attempt each time. move_group
+# falls back to its own defaults, which are adequate for planning.
+#
+# The settings that actually matter for hardware (allowed_start_tolerance,
+# allowed_execution_duration_scaling) are NOT here -- they live in
+# moveit_controllers.yaml, which IS loaded. So nothing important is being lost.
+#
+# To wire this up: run `python3 tools/probe_moveit_api.py` on the target machine
+# and use the signature it prints.
+#
 # What is being watched: /joint_states from the driver. That is the ONLY source
 # of the arm's real state, and its accuracy is bounded by the driver's readback
 # behaviour -- the published pose lags the device somewhat (the driver polls the
 # device and republishes a cached value). MoveIt plans from whatever it last
 # received, so a stale reading means it plans from slightly the wrong start
 # state.
-#
-# That is why allowed_start_tolerance is set relatively loose in
-# moveit_controllers.yaml: strictness there would turn a small readback lag into
-# a refused execution.
 
 planning_scene_monitor:
   publish_planning_scene: true

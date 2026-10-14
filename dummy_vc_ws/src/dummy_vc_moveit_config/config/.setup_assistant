@@ -1,0 +1,22 @@
+# MoveIt Setup Assistant metadata.
+#
+# moveit_configs_utils infers the URDF package from THIS package's name by
+# convention: "X_moveit_config" -> "X_description". Our names do not follow it
+# (the URDF lives in dummy2_urdf_description), so this file is what tells the loader where to
+# actually look. Without it, any launch built on MoveItConfigsBuilder fails at
+# load time with a missing robot_description.
+#
+# The timestamps below are not decoration: the Setup Assistant rewrites this
+# file when it saves, and a config package with a stale or missing file is the
+# usual reason "the assistant does not open my package".
+moveit_setup_assistant_config:
+  urdf:
+    package: dummy2_urdf_description
+    relative_path: urdf/dummy2_urdf.xacro
+    use_xacro: true
+  srdf:
+    relative_path: config/dummy2.srdf
+  configuration:
+    author_name: author
+    author_email: todo@todo.com
+    generated_timestamp: 1791975751.729287

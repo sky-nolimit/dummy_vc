@@ -19,8 +19,24 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
-TARGET = os.path.join(REPO, 'dummy_vc_ws', 'src', 'dummy_vc_moveit_config',
-                      '.setup_assistant')
+PKG = os.path.join(REPO, 'dummy_vc_ws', 'src', 'dummy_vc_moveit_config')
+
+# Written to BOTH locations on purpose.
+#
+# MoveItConfigsBuilder searches for `.setup_assistant` to learn where the URDF
+# and SRDF live. If it cannot find the file it warns
+#     "Cannot infer URDF from <share>/dummy_vc_moveit_config"
+# and falls back to `config/<robot>.urdf`, which does not exist here, so the
+# robot_description ends up empty and every launch fails in a way that looks
+# unrelated to the real cause.
+#
+# The MoveIt Setup Assistant saves it at the package root, but the loader has
+# looked in `config/` in some releases. Writing both costs one small duplicate
+# file and removes the question.
+TARGETS = [
+    os.path.join(PKG, '.setup_assistant'),
+    os.path.join(PKG, 'config', '.setup_assistant'),
+]
 
 URDF_PACKAGE = 'dummy2_urdf_description'
 URDF_RELATIVE = 'urdf/dummy2_urdf.xacro'
@@ -55,10 +71,11 @@ def main():
     now = time.time()
     text = TEMPLATE.format(urdf_pkg=URDF_PACKAGE, urdf_rel=URDF_RELATIVE,
                            srdf_rel=SRDF_RELATIVE, ts=now)
-    os.makedirs(os.path.dirname(TARGET), exist_ok=True)
-    with open(TARGET, 'w', encoding='utf-8', newline='\n') as fh:
-        fh.write(text)
-    print(f'wrote {TARGET}')
+    for target in TARGETS:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, 'w', encoding='utf-8', newline='\n') as fh:
+            fh.write(text)
+        print(f'wrote {target}')
     print(f'  urdf package : {URDF_PACKAGE}')
     print(f'  urdf path    : {URDF_RELATIVE}')
     print(f'  srdf path    : {SRDF_RELATIVE}')
