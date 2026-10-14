@@ -84,6 +84,12 @@ class dummy_controller(LifecycleNode):
         # 见 commanded_movej()：不用回读反推，因为那个反推式子没有物理依据。
         self._last_cmd_movej = None
 
+        # 最后一次下发成功的夹爪角度。**夹爪没有回读** —— 设备上 hand 只有
+        # set_angle / set_current_limit / set_enable，没有任何可读属性
+        # （tools/probe_gripper.py --stage 0 实测）。所以发布手指位置时只能
+        # 用这个命令值，而不是测量值。
+        self._last_gripper_angle = None
+
         # 轨迹执行
         self._traj_executing = False
 
@@ -770,6 +776,14 @@ class dummy_controller(LifecycleNode):
             self.gripper_ready = True
             self.get_logger().info(
                 f'gripper enabled, current limit = {self.grip_current_limit}')
+            # 明确说出"没有回读"这件事。此前驱动读 hand.angle 而该属性不存在，
+            # 于是手指位置永远是 0 且不报错；把限制讲出来，比让人去猜 RViz
+            # 里手指为什么不动要好。
+            self.get_logger().warn(
+                'the gripper has NO position readback: /joint_states will '
+                'report the finger joints at the LAST COMMANDED angle, not a '
+                'measured one. When the fingers are blocked by an object the '
+                'model will still show them closed.')
         else:
             self.gripper_ready = False
             self.get_logger().error(
@@ -926,18 +940,32 @@ class dummy_controller(LifecycleNode):
         -> dummy_rightfiger_v1_1 这两段变换就永远缺失，RViz 会报
         "No transform from [dummy_leftfinger_v1_1] to [base_link]"。
 
-        映射：设备的 hand.angle 线性映射到归一化开合度，再乘以单指行程。
+        **夹爪没有回读。** 设备上 `hand` 只有 `set_angle` /
+        `set_current_limit` / `set_enable` 三个方法，**没有任何可读属性**
+        （tools/probe_gripper.py --stage 0 实测：set_* 3 个，其余 0 个）。
+        所以这里只能返回**最近一次下发的角度**换算出的位置，而不是量出来的
+        位置。
+
+        这意味着：
+          * 手指的 TF 是**命令值**，不是实际值。夹住东西时手指被挡住，
+            RViz 里会显示成"已经合拢到位"，与实际不符。
+          * 此前写的是 `getattr(hand, 'angle', 0.0)` —— 属性不存在，于是
+            **永远返回 0，而且不报错**。结果是手指 TF 恒为全闭位置，看起来
+            像"手指不动"，却没有任何日志提示。这类静默默认值是本项目反复
+            踩的坑，所以改成显式跟踪命令值，并在启动时把"没有回读"这件事
+            明确记进日志。
+
+        映射：命令角度线性映射到归一化开合度，再乘以单指行程。
             frac   = (angle - grip_angle_closed) / (grip_angle_open - grip_angle_closed)
             travel = finger_travel_m * frac
-        grip_angle_closed / grip_angle_open 必须实测（阶段 0.4），当前是占位值，
-        填错只影响 RViz 里手指张开的幅度，不影响 TF 连通性，也不影响夹持力。
+        grip_angle_closed / grip_angle_open 必须**看着手指实测**（阶段 0.4），
+        当前是占位值；填错只影响 RViz 里手指张开的幅度，不影响夹持力。
         """
-        try:
-            angle = float(getattr(self.dummy_driver.robot.hand, 'angle', 0.0))
-        except Exception as exc:
-            self.get_logger().warn(
-                f'cannot read hand angle: {exc}', throttle_duration_sec=5.0)
-            angle = 0.0
+        angle = self._last_gripper_angle
+        if angle is None:
+            # 还没下过任何夹爪命令。返回全闭而不是猜一个中间值：全闭是
+            # 机构的安全静止位，也是唯一不需要标定就能断言的姿态。
+            angle = self.grip_angle_closed
 
         frac = self.angle_to_gripper_frac(angle)
         self.gripper_frac = frac
@@ -990,6 +1018,11 @@ class dummy_controller(LifecycleNode):
     def _send_gripper_angle(self, angle):
         try:
             self.dummy_driver.robot.hand.set_angle(angle)
+            # 只在成功之后记录。夹爪没有回读（见 current_finger_positions 的
+            # 说明），所以这个值就是"我们让它去了哪里"，是发布手指位置时
+            # 唯一可用的依据。失败时保留旧值，免得 RViz 显示一个没发生过的
+            # 姿态。
+            self._last_gripper_angle = float(angle)
         except Exception as exc:  # noqa: BLE001
             self.get_logger().error(f'gripper command failed: {exc}')
 
