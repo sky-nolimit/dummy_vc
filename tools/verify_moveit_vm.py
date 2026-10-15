@@ -194,6 +194,14 @@ def get_param(node, remote_node, name, timeout=5.0):
     return True, val
 
 
+def _one_line(text, limit=120):
+    """把多行输出压成一行，便于塞进详情里。"""
+    if text is None:
+        return '<无输出>'
+    text = ' '.join(str(text).split())
+    return text if len(text) <= limit else text[:limit] + '…'
+
+
 def parse_param_cli_output(out, returncode):
     """把 `ros2 param get` 的输出解析成 python 值。解析不了返回 (False, None)。
 
@@ -229,26 +237,31 @@ def parse_param_cli_output(out, returncode):
 
 
 def param_via_cli(node_name, name, timeout=20.0):
-    """用 `ros2 param get` 读参数。读不到返回 (False, None)。
+    """用 `ros2 param get` 读参数。返回 (ok, value, raw)。
 
     为什么要有这条路：直接调参数服务在某些环境上读不到（服务名/发现时机/发行版
     差异都可能），而 `ros2 param get` 走的是 CLI 自己那套，实测可靠。代价是要起
     一个子进程，所以只在前一条路失败时才用。
+
+    为什么第三个值是 raw：解析失败时**必须能看到原文**，否则"读到了但没解析出来"
+    和"根本没读到"在输出里长得一样，又要多花一个来回。
     """
     import shutil
     import subprocess
 
     if shutil.which('ros2') is None:
-        return False, None   # 恒返回二元组，调用点才敢直接解包
+        return False, None, 'PATH 里没有 ros2'
     try:
         proc = subprocess.run(
             ['ros2', 'param', 'get', node_name, name],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             timeout=timeout, text=True, encoding='utf-8', errors='replace')
-    except Exception:
-        return False, None
+    except Exception as exc:
+        return False, None, '起子进程失败: {}'.format(exc)
 
-    return parse_param_cli_output(proc.stdout or '', proc.returncode)
+    raw = proc.stdout or ''
+    ok, val = parse_param_cli_output(raw, proc.returncode)
+    return ok, val, raw
 
 
 def get_param_any(node, remote_node, name, timeout=5.0):
@@ -260,7 +273,7 @@ def get_param_any(node, remote_node, name, timeout=5.0):
     ok, val = get_param(node, remote_node, name, timeout=timeout)
     if ok:
         return True, param_to_python(val), 'service'
-    ok, py = param_via_cli(remote_node, name)
+    ok, py, _ = param_via_cli(remote_node, name)
     if ok:
         return True, py, 'ros2 param get'
     return False, None, ''
@@ -295,13 +308,15 @@ def get_param_typed(node, remote_node, name, want, timeout=5.0):
     else:
         svc_detail = '参数服务读不到'
 
-    ok, py = param_via_cli(remote_node, name)
+    ok, py, raw = param_via_cli(remote_node, name)
     if ok and isinstance(py, want):
         return True, py, 'ros2 param get', ''
     if ok:
         return False, None, 'ros2 param get', '{}；`ros2 param get` 读到 {}，期望 {}'.format(
             svc_detail, type(py).__name__, want.__name__)
-    return False, None, '', '{}；`ros2 param get` 也读不到'.format(svc_detail)
+    # 解析失败时把 CLI 原文附上 —— 否则"读到但没解析出来"和"没读到"长得一样
+    return False, None, '', '{}；`ros2 param get` 也没读出来: {}'.format(
+        svc_detail, _one_line(raw)[:160])
 
 
 def param_to_python(val):

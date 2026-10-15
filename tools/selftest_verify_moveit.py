@@ -163,7 +163,8 @@ else:
     def _probe(service_ok, service_val, cli_ok, cli_val, want, label):
         mod.get_param = lambda *a, **k: (service_ok, service_val)
         mod.param_to_python = lambda v: v
-        mod.param_via_cli = lambda *a, **k: (cli_ok, cli_val)
+        # param_via_cli 返回 (ok, value, raw)，桩也要给三个
+        mod.param_via_cli = lambda *a, **k: (cli_ok, cli_val, repr(cli_val))
         ok, val, via, detail = mod.get_param_typed(None, '/move_group', 'x', want)
         print('    %-46s -> ok=%-5s via=%-15s val=%-9s %s'
               % (label, ok, via or '-', repr(val)[:9], detail))
@@ -179,6 +180,10 @@ else:
     ok, _, detail = _probe(True, True, True, 42, str, '两条路类型都不对')
     if ok or 'bool' not in detail or 'int' not in detail:
         problems.append('两条路类型都不对时判定有误: ok=%s detail=%s' % (ok, detail))
+    # CLI 读到了但解析不出来 → detail 里必须带原文，否则排查看不出区别
+    ok, _, detail = _probe(True, True, False, None, str, 'CLI 解析失败（要看得到原文）')
+    if ok or '也没读出来' not in detail:
+        problems.append('CLI 解析失败时没把原文带出来: %s' % detail)
     # 服务类型正确 → 直接用服务的，绝不调 CLI。这里把 CLI 设成"一被调用就抛"，
     # 用异常来证明它没被走到；抛出来就说明我们的判定逻辑错了。
     def _must_not_call(*a, **k):
