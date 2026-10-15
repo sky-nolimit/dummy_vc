@@ -408,12 +408,19 @@ def main():
         kin, _ = get_param_any(node, remote, 'robot_description_kinematics')
         if kin is not None:
             solver_groups = sorted(kin.keys()) if hasattr(kin, 'keys') else []
+            # 只有"链"组能有求解器：gripper 是并联手指的关节列表，没有 IK，
+            # 所以这里期望的是 ['dummy_arm'] 而不是两个组都在。
             if solver_groups:
                 check.ok('robot_description_kinematics 有求解器',
-                         ', '.join(solver_groups))
+                         '{}（链组才有 IK；gripper 是关节组，'
+                         '本来就不该有）'.format(', '.join(solver_groups)))
             else:
                 check.fail('robot_description_kinematics 为空',
                            '没有 IK 求解器 —— 检查 config/kinematics.yaml')
+            if 'dummy_arm' not in solver_groups:
+                check.fail('dummy_arm 没有 IK 求解器',
+                           '链组 dummy_arm 必须有条目，否则规划只能靠'
+                           '关节空间目标，笛卡尔目标全部失败')
         else:
             check.fail('读不到 robot_description_kinematics 参数',
                        '两种读法都读不到，先对照 `ros2 param get` 的输出')

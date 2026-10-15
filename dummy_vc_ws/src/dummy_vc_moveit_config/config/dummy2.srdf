@@ -8,7 +8,19 @@
   tools/check_moveit_config.py so a rename upstream fails loudly rather than
   producing a planner that quietly does nothing.
 -->
-<robot name="dummy2">
+<!--
+  name 必须与 URDF 里 <robot name="..."> 逐字相同。
+  这里原来写的是 "dummy2"，而 dummy2_urdf.xacro 里是 "dummy2_urdf"，
+  结果 move_group 在 model.cpp 里直接拒绝建立机器人模型：
+
+    Error: Semantic description is not specified for the same robot as the URDF
+           at line 681 in ./src/model.cpp
+
+  这个错误只打一行 Error，不抛异常、不影响 launch 退出码，症状是
+  "move_group 起来了但规划请求永远没有回应"（表现为客户端超时），
+  而不是一条指向 SRDF 的明确报错 —— 所以踩过一次要写在这里。
+-->
+<robot name="dummy2_urdf">
 
   <!-- ==================================================================
        虚拟关节：把固定在世界里的机械臂接到 world 上。

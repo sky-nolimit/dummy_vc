@@ -93,6 +93,28 @@ def main():
         fail(f'cannot parse {os.path.basename(srdf_path)}: {exc}')
         return 1
 
+    # ---- robot name: URDF and SRDF must agree, or MoveIt builds no model ----
+    # move_group rejects the semantic description outright when the two names
+    # differ ("Semantic description is not specified for the same robot as the
+    # URDF", model.cpp:681). One Error line, no exception, launch stays up --
+    # so the only visible symptom is that planning requests never come back.
+    urdf_root = ET.parse(XACRO).getroot()
+    urdf_name = urdf_root.get('name')
+    srdf_name = srdf.get('name')
+    if urdf_name is None:
+        note('URDF has no <robot name=...>; MoveIt falls back to "robot_description"')
+    if srdf_name is None:
+        note('SRDF has no <robot name=...>; MoveIt falls back to "robot_description"')
+    if urdf_name is not None or srdf_name is not None:
+        u = urdf_name if urdf_name is not None else 'robot_description'
+        s = srdf_name if srdf_name is not None else 'robot_description'
+        if u == s:
+            ok(f'robot name agrees: URDF="{u}" SRDF="{s}"')
+        else:
+            fail(f'robot name MISMATCH: URDF="{u}" SRDF="{s}" -- move_group '
+                 'will refuse to build the robot model, and every planning '
+                 'request will just time out')
+
     vjoints = srdf.findall('virtual_joint')
     if not vjoints:
         fail('no virtual_joint; MoveIt needs one to attach the arm to world')
@@ -106,11 +128,13 @@ def main():
             ok(f'virtual_joint {p} -> {c}')
 
     groups = {}
+    chain_groups = set()
     for g in srdf.findall('group'):
         name = g.get('name')
         members = set()
         chain = g.find('chain')
         if chain is not None:
+            chain_groups.add(name)
             base, tip = chain.get('base_link'), chain.get('tip_link')
             for lk in (base, tip):
                 if lk not in link_names:
@@ -180,8 +204,15 @@ def main():
     # --------------------------------------------------------- kinematics --
     print()
     print('=' * 74)
-    print('3. kinematics.yaml and ompl_planning.yaml cover every group')
+    print('3. kinematics.yaml and ompl_planning.yaml')
     print('=' * 74)
+    # kinematics: only chain groups may have a solver, and every chain group
+    # needs one. ompl: every group needs an entry (motion planning is
+    # meaningful for a joint group too).
+    #
+    # Getting this wrong is silent-ish: a solver on a non-chain group makes
+    # move_group print "Group 'gripper' is not a chain" and carry on; a missing
+    # solver on a chain group leaves that group with no IK at all.
     for fname in ('kinematics.yaml', 'ompl_planning.yaml'):
         try:
             data = load_file(os.path.join(CFG, fname))
@@ -191,12 +222,34 @@ def main():
         if not isinstance(data, dict):
             fail(f'{fname} did not parse into a mapping')
             continue
-        for g in groups:
-            if g in data:
-                ok(f'{fname} has an entry for group "{g}"')
+        for g in sorted(groups, key=str):
+            if fname == 'kinematics.yaml':
+                if g in chain_groups:
+                    if g in data:
+                        ok(f'{fname} has an entry for chain group "{g}"')
+                    else:
+                        fail(f'{fname} has NO entry for chain group "{g}"; '
+                             'that group will have no IK solver')
+                else:
+                    if g in data:
+                        fail(f'{fname} gives the joint group "{g}" a solver, '
+                             'but it is not a chain -- kin. solver plugins can '
+                             "only be built for chains. move_group will log "
+                             f"\"Group '{g}' is not a chain\" and refuse to "
+                             'initialise it. Remove the entry.')
+                    else:
+                        ok(f'{fname} correctly has NO entry for joint group '
+                           f'"{g}"')
             else:
-                fail(f'{fname} has NO entry for group "{g}"; planning that '
-                     'group will fail at load time')
+                if g in data:
+                    ok(f'{fname} has an entry for group "{g}"')
+                else:
+                    fail(f'{fname} has NO entry for group "{g}"; planning that '
+                         'group will fail at load time')
+        for key in data:
+            if key not in groups:
+                note(f'{fname} has a top-level key "{key}" that is not an '
+                     'SRDF group (harmless if it is a default/plugin section)')
 
     # ------------------------------------------------------- joint limits --
     print()
