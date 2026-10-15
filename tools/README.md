@@ -3,9 +3,12 @@
 把"靠眼睛看、靠记忆猜"的事情变成可复现的检查。除标注"需要 ROS"或"需要硬件"
 的以外，都不依赖 ROS 环境，Windows 和 Ubuntu 上都可直接用 Python 执行。
 
-**目前 51 个工具 + 本文件。** 数量不少，所以下面按用途分组，并标出**哪些是
-已经用完的一次性探测脚本**（"可选清理"一节）—— 它们记录了当年的排查过程，
-但不会再被用到。
+**目前 43 个工具 + 本文件。** 数量不少，所以下面按用途分组。
+
+**曾经有 52 个。** 2026-10-14 清理掉了 9 个：8 个是排查特定假设时写的一次性
+脚本（问题定位后不会再被用到），加上 1 个结论本来就是错的。**如果夹爪问题还要
+继续查（比如上 CAN），被删的那几个里只有 `gripper_ids.py` 和
+`dump_protocol.py` 可能还需要** —— 它们的用途在下面第 4 组里说明了替代做法。
 
 > **新增工具前先确认它不与现有工具重叠。** 保留多个职责相同的工具是本项目
 > 反复出错的来源之一。
@@ -83,7 +86,6 @@ pkill -f dummy_controller
 | 工具 | 作用 |
 |---|---|
 | `probe_pairs.py` | **记录 (命令, 回读) 配对** —— 标定的权威数据来源。`--refs-only` 只走两个命名姿态 |
-| `probe_relation.py` | 单关节最小二乘拟合 `raw = a·move_j + b`，读出 gain / offset / sign |
 | `probe_mapping.py` | 逐关节测"命令值 ↔ 回读值"的 gain 与 offset。**offset 必须从设备读出来，不能靠推导** |
 | `probe_range.py` | 扫出设备**实际接受**的 move_j 区间。区间外会被**静默丢弃**（整条命令不执行） |
 | `analyse_range.py` | 归类 `probe_range` 的输出，区分"区间外被拒"与"等于基准位姿的空操作" |
@@ -91,6 +93,10 @@ pkill -f dummy_controller
 
 `probe_moveit_api.py` 的理由：MoveItConfigsBuilder 的参数名在不同发行版里不同，
 **猜错一次就要占用一轮 VM 启动**。这个脚本把"猜"换成"问"。
+
+> `probe_relation.py` 曾用于拟合 `raw = a·move_j + b`，2026-10-14 删除 ——
+> 它与 `probe_mapping.py` 职责重叠，而后者会同时打印下发值和读回值，更便于
+> 人工核对。
 
 ---
 
@@ -107,16 +113,24 @@ pkill -f dummy_controller
 | `probe_scan_after_hand.py` | hand 之后设备还剩什么能用。**一次调用只做一个操作**，带硬期限 |
 | `gripper_call.py` | 只调**一个**夹爪方法并报告结果，不做别的 |
 | `gripper_sequence.py` | 在一个进程里走完夹爪接口，让**调用顺序**可见 |
-| `gripper_ids.py` | 显示夹爪附近的 endpoint ID，确认"固件声明了但不应答" |
-| `dump_hand_protocol.py` | 看固件**如何声明** `hand` 这几个 endpoint |
-| `dump_protocol.py` | 解码设备自己的协议描述，找 `move_j` 需要什么 |
-| `compare_endpoints.py` | 按**名字链**把夹爪 endpoint 与已知能用的对照 |
+| `dump_protocol.py` | 解码设备自己的协议描述，看 `move_j` 与 `hand` 各自需要什么 |
 | `probe_gripper.py` | 靠眼睛标定夹爪（因为夹爪读不出来）。**目前做不到，见 docs/04 A2** |
 | `test_gripper.py` | 走 ROS 话题驱动夹爪。**当前无效** |
 
 **`probe_scan_after_hand.py` 默认不重复那次永不返回的调用**（用
 `--redo-hand-call` 才做）：那个调用会留下一个持有 libusb 互斥量的线程，
 **连 Ctrl-C 都无法干净退出**。
+
+**2026-10-14 删掉的夹爪排查脚本，以及它们的结论现在在哪：**
+
+| 曾用工具 | 它得到的东西 | 现在记在 |
+|---|---|---|
+| gripper_ids | 设备声明 `set_angle` 296/297、`set_enable` 298/299、`set_current_limit` 300/301 | `docs/04` A2 |
+| dump_hand_protocol | 固件如何声明 `hand` 这三个 endpoint | `docs/05` |
+| compare_endpoints | 与已知可用 endpoint 的**按名**对照（路径式匹配会失效） | `docs/05` |
+
+**若还想查 endpoint id**：用 `probe_scan_after_hand.py --step definition`。
+它从**活的对象**读 id 并与设备声明的对照，比解析一份转储更可靠、且不会过期。
 
 ---
 
@@ -182,24 +196,34 @@ URDF/SRDF 位置，找不到就退回 `config/<robot>.urdf`（不存在），于
 
 ---
 
-## 可选清理（尚未执行，等确认）
+## 2026-10-14 的清理记录
 
-下面这些是**排查特定假设时写的一次性脚本，问题定位后不会再被用到**。保留的
-唯一价值是记录当年的排查过程。**删除前需要确认，不单方面处理。**
+删掉 9 个。**保留的决定性依据是"还有没有人 import 它"** —— 逐个查过：
 
-| 工具 | 为什么可以删 |
+| 删除 | 理由 |
 |---|---|
-| `solve_signs.py` | **结论是错的** —— 它按位移方向推符号，被几何校验推翻。文件自身已标注 |
-| `solve_downlink.py` | 一次性推导脚本，其结论已固化进驱动，并由 `check_downlink.py` 持续守着 |
-| `compare_endpoints.py` | 夹爪排查专用，结论已写进 `docs/04` A2 |
-| `dump_protocol.py` | 同上，协议结构已整理进 `docs/05` |
-| `gripper_ids.py` | 同上 |
-| `probe_relation.py` | 与 `probe_mapping.py` 职责重叠（都拟合 gain/offset） |
-| `go_zero.py` | 与 `send_joint_delta.py` 职责重叠 |
-| `find_fold.py` | 与 `find_pose.py`、`fold_signs.py` 职责重叠 |
+| solve_signs | **结论是错的** —— 按位移方向推符号，被几何校验推翻 |
+| solve_downlink | 一次性推导，结论已固化进驱动，并由 `check_downlink.py` 持续守着 |
+| probe_relation | 与 probe_mapping 职责重叠 |
+| find_fold | 与 find_pose、fold_signs 职责重叠 |
+| go_zero | 与 send_joint_delta 职责重叠 |
+| gripper_ids | 夹爪排查专用，结论已进 `docs/04` |
+| dump_hand_protocol | 同上，结论已进 `docs/05` |
+| compare_endpoints | 同上 |
+| solve_j3 | 曾被本文件引用，但**文件本身早已不存在**（清单里的幽灵条目） |
 
-**如果夹爪问题还要继续查（比如上 CAN），则第 4 组里除了 `probe_gripper.py`
-和 `test_gripper.py` 之外都先留着。**
+**查依赖时发现两点，值得记下：**
+
+1. **compare_endpoints 与 dump_hand_protocol 互相 import** —— 删一个必然弄坏
+   另一个，只能同进同出。所以它们是一起删的。
+2. **solve_signs 被 `fold_signs.py` 和 `resolve_signs.py` 提到**，但查过之后
+   发现**只是 docstring 与打印文本里的文件名**，不是 import。
+   **靠 grep 名字判断依赖会出错**，必须看是不是真的 `import`。
+
+**保留的共用模块**（删任何东西前先确认它们在用）：
+`rig_common.py`（`final_test`、`selftest_wait` 用）、`device_session.py`
+（夹爪探测组用）、`yaml_min.py`（`check_moveit_config` 用）、
+`selftest_wait.py`（`final_test`、`run_checks` 用）。
 
 ---
 
