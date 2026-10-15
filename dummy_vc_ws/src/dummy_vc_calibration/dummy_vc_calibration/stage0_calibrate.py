@@ -8,10 +8,9 @@ This prevents a mistyped command from driving the arm into something.
 
 NOTE: this file is deliberately ASCII-only. The workspace is edited on
 Windows and built on Ubuntu; non-ASCII in source files has already caused
-one silent encoding corruption. Chinese documentation lives in
-docs/02-stage0-calibration-manual.md instead.
-
-See docs/02-stage0-calibration-manual.md for the operating procedure.
+one silent encoding corruption. Chinese documentation lives in a local-only
+document instead -- the calibration manual (docs/02) is not committed, so it
+is NOT in a fresh clone. Ask whoever has the working copy if you need it.
 """
 import glob
 import math
@@ -732,7 +731,8 @@ class Stage0Calibrate(Node):
             '  ros2 service call /calib/safety_check std_srvs/srv/Trigger "{}"\n'
             '  # driver angle vs device raw angle (needs dummy_controller running)\n'
             '  ros2 service call /calib/compare_driver std_srvs/srv/Trigger "{}"\n'
-            '\nSee docs/02-stage0-calibration-manual.md')
+            '\nSee the calibration manual (local-only, docs/02) for the '
+            'operating procedure.')
 
 
 def main(args=None):

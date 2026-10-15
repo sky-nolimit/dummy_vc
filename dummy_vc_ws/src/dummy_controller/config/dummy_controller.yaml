@@ -294,7 +294,7 @@ dummy_controller:
     #
     # 手指行程（finger_travel_m = 0.023）**不是**由这个范围推出的：它是
     # URDF 里原模型的 prismatic 行程，而 URDF 的夹爪几何与实物不符
-    # （见 docs/04 的 A1）。整条"角度 → 开口"映射都要等 A1 处理时实测。
+    # （见本机 docs/04 的 A1）。整条"角度 → 开口"映射都要等 A1 处理时实测。
     grip_angle_closed: 0.0
     grip_angle_open: 30.0
 

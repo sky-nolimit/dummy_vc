@@ -70,7 +70,7 @@ moveit_simple_controller_manager:
 # The gripper is deliberately NOT listed.
 #
 # Its hand interface on the device blocks forever and produces no motion (see
-# the gripper notes in docs/). Registering a controller for it would let MoveIt
+# the gripper notes in the local docs/04). Registering a controller for it would let MoveIt
 # believe it can grip, and a plan that includes a close command would then hang
 # on a call that never returns. Leaving it out means MoveIt plans the arm only,
 # which is what actually works today.
