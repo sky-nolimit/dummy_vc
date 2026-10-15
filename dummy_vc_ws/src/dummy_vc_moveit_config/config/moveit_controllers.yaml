@@ -1,19 +1,23 @@
 # How MoveIt sends a planned trajectory to the driver.
 #
-# The driver subscribes to a bare topic and executes the waypoints itself:
+# ★ 重要：MoveIt 的控制器插件只会通过 **action** 下发轨迹（FollowJointTrajectory
+# 或 GripperCommand），没有"只发 topic"的内置类型。而现在的驱动是一个
+# trajectory_msgs/JointTrajectory 的**订阅者**：
 #
 #     topic     /joint_trajectory_controller/joint_trajectory
 #     type      trajectory_msgs/JointTrajectory
 #     timing    it sleeps until each waypoint's time_from_start is due, then
 #               sends that waypoint
 #
-# There is no ros2_control here. The driver talks to the device directly, so
-# `moveit_simple_controller_manager/JointTrajectoryControllerHandle` is the
-# right handle: it just publishes the message.
+# 所以**规划（demo）没问题，执行（真机）现在走不通**：MoveIt 会去找
+# /joint_trajectory_controller/follow_joint_trajectory 这个 action server，
+# 驱动没有，于是不会真正动。这不是配置错误，是接口形态不匹配。
 #
-# The topic name is a historical accident (nothing is actually running a
-# joint_trajectory_controller) but it is what the driver listens on, and the
-# driver has moved with the project, so matching it is the low-risk choice.
+# 真机阶段要改成：驱动实现 FollowJointTrajectory action server（内部复用现有的
+# 轨迹执行逻辑即可），而不是给 MoveIt 写插件。这属于 docs/01 的阶段 3.1。
+#
+# 这里仍然要写对 type，否则 move_group 会当作"没有控制器"（见下面的注释），
+# 连规划组和控制器都关联不上。
 
 trajectory_execution:
   # Give a trajectory time to start moving before declaring failure.
@@ -33,22 +37,19 @@ trajectory_execution:
   disable_collision_checks: false
   wait_for_trajectory_completion: true
 
-# The controller is NAMED to match the driver, on purpose.
+# 控制器名字与驱动的关系。
 #
-# `JointTrajectoryControllerHandle` publishes to
-#     /<controller_name>/joint_trajectory
-# and the driver subscribes to
+# FollowJointTrajectory handle 用的是
+#     /<controller_name>/<action_ns>/follow_joint_trajectory
+# 而驱动订阅的是
 #     /joint_trajectory_controller/joint_trajectory
 #
-# so naming it `joint_trajectory_controller` makes the two line up exactly,
-# with no reliance on `action_ns`. That matters because action_ns only sets the
-# ACTION namespace; the topic comes from the controller name, and a mismatch
-# there publishes a planned trajectory into the void with no error anywhere --
-# MoveIt reports success, the arm does not move.
+# 两者**目前对不上**，这是上面那段说明的"接口形态不匹配"，不是名字写错：
+# 驱动是 topic，插件要 action。等驱动补上 action server（阶段 3.1）之后，
+# 名字保持 `joint_trajectory_controller` 即可，不需要再改名。
 #
-# If the driver's topic is ever renamed, rename this key too, or the same
-# silent-failure class comes back. tools/check_moveit_config.py compares the
-# two and fails when they drift.
+# tools/check_moveit_config.py 会把这个不匹配当作"待办"报出来，而不是让它
+# 悄悄过去 —— 这正是当年"MoveIt 说成功、机械臂不动"那一类问题。
 
 moveit_controller_manager: moveit_simple_controller_manager/MoveItSimpleControllerManager
 
@@ -56,8 +57,20 @@ moveit_simple_controller_manager:
   controller_names:
     - joint_trajectory_controller
   joint_trajectory_controller:
-    type: moveit_simple_controller_manager/JointTrajectoryControllerHandle
-    action_ns: joint_trajectory
+    # ★ 只能是 'FollowJointTrajectory' 或 'GripperCommand'。
+    #
+    # 这两个字符串是 ROS 2 的 action 名（control_msgs/action/...），不是任意
+    # 标识符：moveit_simple_controller_manager 用它们去查已注册的 handle 类型，
+    # 写错就只是打一行
+    #     [ERROR] Unknown controller type: <你写的>
+    #     [INFO]  Returned 0 controllers in list
+    # 然后当作"没有控制器"，不报错、不退出。
+    #
+    # 2026-10 这里原来写的是 'moveit_simple_controller_manager/
+    # JointTrajectoryControllerHandle' —— 那是 ROS 1 的名字，MoveIt 2 里不存在。
+    # 参考：https://moveit.picknik.ai/humble/doc/examples/controller_configuration/controller_configuration_tutorial.html
+    type: FollowJointTrajectory
+    action_ns: follow_joint_trajectory
     default: true
     joints:
       - dummy2_joint1

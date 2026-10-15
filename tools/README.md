@@ -32,7 +32,7 @@ python tools/run_checks.py
 | `fix_line_endings.ps1` | 把工作区的 CRLF 批量转回 LF（PowerShell）。**排除 `reference/`** —— 那是上游原文 |
 | `check_urdf.py` | URDF 结构：XML 合法性、父子引用、树连通性、必需坐标系 |
 | `check_urdf_limits.py` | URDF 关节限位**不超过**设备实测行程 |
-| `check_moveit_config.py` | MoveIt 配置 vs URDF vs 设备实测，三处交叉校验 |
+| `check_moveit_config.py` | MoveIt 配置 vs URDF vs 设备实测，三处交叉校验（含规划组类型、控制器类型、robot name 一致性） |
 | `check_launch_consistency.py` | launch 不会因"配置参数缺 DESCRIPTION"而在启动时抛错 |
 | `check_conversions.py` | **导入真实驱动代码**，验证换算函数两两互逆、快捷式与两步链一致 |
 | `check_downlink.py` | **下发链对实测 (move_j, raw) 配对**，抓"静默丢弃"那类故障 |

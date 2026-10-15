@@ -335,6 +335,15 @@ def main():
         names = scm.get('controller_names') or []
         if not names:
             fail('moveit_simple_controller_manager lists no controllers')
+        # The only two strings moveit_simple_controller_manager understands.
+        # They are ROS 2 action names (control_msgs/action/...), not free-form
+        # identifiers. A wrong value is not an error: the plugin logs
+        #   [ERROR] Unknown controller type: <what you wrote>
+        #   [INFO]  Returned 0 controllers in list
+        # and carries on with no controllers at all. That is how
+        # 'moveit_simple_controller_manager/JointTrajectoryControllerHandle'
+        # (a ROS 1 name) got this far without anything failing loudly.
+        known_types = ('FollowJointTrajectory', 'GripperCommand')
         for cn in names:
             entry = scm.get(cn)
             if not isinstance(entry, dict):
@@ -344,15 +353,24 @@ def main():
                 if jn not in joint_names:
                     fail(f'controller "{cn}" lists joint "{jn}", which is not '
                          'a URDF joint')
-            ok(f'controller "{cn}": {len(entry.get("joints") or [])} joints, '
-               f'type {entry.get("type")}')
+            ctype = entry.get('type')
+            if ctype is None:
+                fail(f'controller "{cn}" has no type; MoveIt will reject it '
+                     f'with "Unknown controller type" and use none of them')
+            elif ctype not in known_types:
+                fail(f'controller "{cn}" has type "{ctype}", which is not one '
+                     f'of {list(known_types)}. move_group will log "Unknown '
+                     'controller type" and then "Returned 0 controllers in '
+                     'list", i.e. it will behave as if no controller exists')
+            else:
+                ok(f'controller "{cn}": {len(entry.get("joints") or [])} '
+                   f'joints, type {ctype} (a valid MoveIt controller type)')
 
-        # The driver's subscription topic is the thing that actually has to
-        # match. `JointTrajectoryControllerHandle` publishes to
-        # /<controller_name>/joint_trajectory, so the controller NAME has to be
-        # the first path segment of the driver's topic. This is worth checking
-        # rather than noting: a mismatch publishes the planned trajectory into
-        # the void, MoveIt reports success, and the arm simply does not move.
+        # Interface-shape check. Every controller plugin dispatches over an
+        # ACTION, so a driver that only subscribes to a topic cannot be driven
+        # by MoveIt, however the names are set. Report that as a TODO rather
+        # than a failure: the demo plans fine without an action server, and the
+        # fix belongs to the driver (docs/01 stage 3.1), not to this config.
         drv_py = os.path.join(REPO, 'dummy_vc_ws', 'src', 'dummy_controller',
                               'dummy_controller', 'dummy_controller.py')
         src = open(drv_py, encoding='utf-8').read()
@@ -366,14 +384,20 @@ def main():
             want = topic.strip('/').split('/')[0]
             ok(f'driver subscribes to {topic}')
             if want in names:
-                ok(f'controller "{want}" publishes to /{want}/joint_trajectory, '
-                   'which is the driver topic')
+                ok(f'controller "{want}" is named after the driver topic, so '
+                   'once the driver exposes the action server the two line up')
             else:
                 fail(f'the driver listens on {topic}, which implies a '
                      f'controller named "{want}", but moveit_controllers.yaml '
-                     f'defines {names}. The planned trajectory would be '
-                     'published to a topic nobody reads: MoveIt reports '
-                     'success and the arm does not move.')
+                     f'defines {names}. Even after the driver grows an action '
+                     'server the two would not meet.')
+            has_action = 'FollowJointTrajectory' in [
+                (scm.get(n) or {}).get('type') for n in names]
+            if has_action and 'ActionServer' not in src and \
+                    'follow_joint_trajectory' not in src:
+                note('driver has no FollowJointTrajectory action server yet; '
+                     'planning works, EXECUTION will not move the arm. '
+                     'See docs/01 stage 3.1.')
 
     # ------------------------------------------------- setup assistant file --
     #
