@@ -42,6 +42,16 @@ import argparse
 import sys
 import time
 
+# ★ 这个 import 必须在模块顶层。`main()` 里的 `import rclpy` 是**局部**名字，
+#   而 `_wait_future()` 是模块级函数 —— 它里面的 `rclpy` 会 NameError。这个
+#   异常当时被 `except Exception` 吞掉、退化成 time.sleep，于是 executor 一次
+#   都没转过、action 回包永远收不到、只能等超时；而 move_group 那边照样算出
+#   了计划。症状就是"规划器看着坏了，其实脚本没在收消息"。
+try:
+    import rclpy
+except ImportError:               # 没 source ROS 时也要能 import 本模块
+    rclpy = None
+
 # ---------------------------------------------------------------------------
 # 期望值。这些数字来自 tools/check_moveit_config.py 核对过的实测关节行程，
 # 单位和 URDF 一样是**度**（MoveIt 打印时也是度）。
@@ -373,7 +383,9 @@ def main():
 
     # -- 0. 导入依赖 --------------------------------------------------------
     try:
-        import rclpy
+        # 注意：rclpy 已在模块顶层 import（_wait_future 要用它），这里只补
+        # 其余几个。**不要再写 `import rclpy`** —— 那只是 main() 的局部名，
+        # 模块级函数看不到，正是之前 _wait_future 静默失败的原因。
         from rclpy.node import Node
         from moveit_msgs.action import MoveGroup
         from moveit_msgs.msg import Constraints, JointConstraint, MotionPlanRequest
@@ -489,15 +501,23 @@ def main():
                        srdf_detail or '两种读法都读不到，先对照 '
                        '`ros2 param get` 的输出')
 
-        kin, kin_detail = None, ''
+        # kinematics 在 demo 里是 rviz2 的节点参数，**不在 move_group 节点上**
+        # （实测 `ros2 param get /move_group robot_description_kinematics` 报
+        # `Parameter not set`）。所以读不到不能判红 —— move_group 用不用它，
+        # 由后面的真实规划说了算。能读到就顺手核一下组名。
+        kin = None
         for cand in candidates:
-            ok_k, py, via, detail = get_param_typed(
+            ok_k, py, _, _ = get_param_typed(
                 node, cand, 'robot_description_kinematics', dict)
             if ok_k:
                 kin = py
-                print('  (kinematics 是用 `{}` 读到的)'.format(via))
                 break
-            kin_detail = detail
+        if kin is None:
+            ok_cli, py, raw = param_via_cli(remote, 'robot_description_kinematics')
+            if ok_cli and isinstance(py, dict) and 'dummy_arm' in py:
+                kin = py
+                print('  (kinematics 只有 CLI 读得到 —— move_group 节点上没这个'
+                      '参数，它给 rviz2 用)')
         if kin is not None:
             solver_groups = sorted(kin.keys()) if hasattr(kin, 'keys') else []
             # 只有"链"组能有求解器：gripper 是并联手指的关节列表，没有 IK，
@@ -514,9 +534,23 @@ def main():
                            '链组 dummy_arm 必须有条目，否则规划只能靠'
                            '关节空间目标，笛卡尔目标全部失败')
         else:
-            check.fail('读不到 robot_description_kinematics 参数',
-                       kin_detail or '两种读法都读不到，先对照 '
-                       '`ros2 param get` 的输出')
+            # 不判红：move_group 上本来就没有这个参数。真正能证明运动学可用的
+            # 只有"规划算得出来"，那是下一节的事。
+            check.note('move_group 节点上没有 robot_description_kinematics 参数',
+                       '这在本配置里是正常的（它只喂给 rviz2）；'
+                       '运动学到底能不能用，看第 3 节的规划结果')
+
+        # -- 2b. 起始状态 ----------------------------------------------
+        # move_group 日志里的 "Found empty JointState message" 表示没有起点。
+        # 那会让规划失败，而且看起来像配置坏了，所以提前查一次。
+        js_ok, js_count, js_what = _joint_state_summary()
+        if js_ok:
+            check.ok('/joint_states 有起始状态', '{} 个关节'.format(js_count))
+        else:
+            check.fail('/joint_states 读不到起始状态', js_what)
+            print('       demo 的起始状态由 joint_state_publisher_gui 提供 ——')
+            print('       那个窗口必须在、并且要发布关节值；报错里会看到')
+            print('       "Found empty JointState message"。')
 
         # -- 3/4. 真的规划一次 ----------------------------------------------
         for group in groups:
@@ -558,11 +592,12 @@ def main():
                 ', '.join('{}={}'.format(k, v) for k, v in goal.items())))
 
             send = client.send_goal_async(g)
-            t0 = time.time()
-            while not send.done() and time.time() - t0 < args.timeout:
-                time.sleep(0.05)
-            if not send.done():
-                check.fail('组 "{}" 发送规划请求超时'.format(group))
+            # ★ 这里必须转 executor，否则回包永远收不到（见 _wait_future 的注释）
+            sent_ok, spin_err = _wait_future(node, send, args.timeout)
+            if not sent_ok:
+                check.fail('组 "{}" 发送规划请求超时'.format(group),
+                           spin_err or '{} s 内没等到 move_group 的响应'.format(
+                               args.timeout))
                 continue
             gh = send.result()
             if gh is None or not gh.accepted:
@@ -571,11 +606,11 @@ def main():
                 continue
 
             res_fut = gh.get_result_async()
-            t0 = time.time()
-            while not res_fut.done() and time.time() - t0 < args.timeout:
-                time.sleep(0.05)
-            if not res_fut.done():
-                check.fail('组 "{}" 规划结果超时'.format(group))
+            res_ok, spin_err2 = _wait_future(node, res_fut, args.timeout)
+            if not res_ok:
+                check.fail('组 "{}" 规划结果超时'.format(group),
+                           spin_err2 or 'move_group 接下了请求但没回结果，'
+                           '看它的终端输出')
                 continue
 
             wrapped = res_fut.result()
@@ -616,6 +651,65 @@ def main():
             rclpy.shutdown()
         except Exception:
             pass
+
+
+def _wait_future(node, fut, timeout, poll=0.05):
+    """等一个 rclpy future 完成。
+
+    ★ 必须一边转 executor 一边等。之前这里只写 `while not fut.done():
+    time.sleep(...)`，结果 move_group 明明已经把计划算出来了（它日志里写着
+    "Motion plan was computed successfully"），脚本却报"发送规划请求超时" ——
+    action 的回包要靠 executor 收，节点不 spin 就永远收不到，future 永远是
+    pending。`wait_for_server()` 能返回 True 是因为它内部自己用了 waitable，
+    只有 action 的回包需要 executor。
+
+    返回 (完成了吗, 第一次异常信息)。第二个值非空表示"没能转 executor" ——
+    这种情况必须报出来，否则又是一次"看着像规划器坏了"。
+    """
+    t0 = time.time()
+    first_error = ''
+    while not fut.done() and time.time() - t0 < timeout:
+        if rclpy is None:
+            first_error = first_error or 'rclpy 没导入（没 source ROS？）'
+            time.sleep(poll)
+            continue
+        try:
+            rclpy.spin_once(node, timeout_sec=poll)
+        except Exception as exc:
+            first_error = first_error or '{}: {}'.format(type(exc).__name__, exc)
+            time.sleep(poll)
+    return fut.done(), first_error
+
+
+def _joint_state_summary(timeout=5.0):
+    """读一次 /joint_states，返回 (ok, 关节数, 名字) 或 (False, 0, 原因)。
+
+    demo 里起始状态由 joint_state_publisher_gui 提供，没有它 move_group 会报
+    "Found empty JointState message"，规划就没有起点（那行 ERROR 在用户日志里
+    出现过四次）。这里提前查一次，把"规划失败"和"没有起点"区分开。
+    """
+    import shutil
+    import subprocess
+    if shutil.which('ros2') is None:
+        return False, 0, 'PATH 里没有 ros2'
+    try:
+        proc = subprocess.run(
+            ['ros2', 'topic', 'echo', '/joint_states', '--once',
+             '--field', 'name'],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            timeout=timeout, text=True, encoding='utf-8', errors='replace')
+    except Exception as exc:
+        return False, 0, '读 /joint_states 失败: {}'.format(exc)
+    raw = proc.stdout or ''
+    if proc.returncode != 0 or 'does not exist' in raw.lower():
+        return False, 0, '/joint_states 话题不存在'
+    # --field name 打印的是 yaml 列表：['a', 'b', ...]
+    import re
+    names = re.findall(r"[A-Za-z0-9_]*(?:joint|finger)[A-Za-z0-9_]*", raw)
+    names = [n for n in names if n and n not in ('joint', 'finger')]
+    if not names:
+        return False, 0, '/joint_states 是空的: {}'.format(_one_line(raw)[:80])
+    return True, len(names), _one_line(raw)[:120]
 
 
 def _check_trajectory_joints(traj, check):

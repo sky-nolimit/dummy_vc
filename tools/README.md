@@ -38,7 +38,7 @@ python tools/run_checks.py
 | `check_downlink.py` | **下发链对实测 (move_j, raw) 配对**，抓"静默丢弃"那类故障 |
 | `selftest_conversion.py` | **标定自测**：锚点、收缩姿态折叠、往返恒等、三处默认值一致 |
 | `selftest_wait.py` | 等待逻辑对**模拟的**慢速设备（含起步延迟）是否可靠 |
-| `selftest_verify_moveit.py` | 静态自查 `verify_moveit_vm.py` 自己的调用点（解包元数、`check.xxx` 是否存在）。**它只能在虚拟机上跑，一个笔误要花一个来回**，所以在本地先查 |
+| `selftest_verify_moveit.py` | 静态自查 `verify_moveit_vm.py` 自己的调用点（解包元数、`check.xxx` 是否存在、有没有"在 A 函数里 import 却给 B 函数用"）。**它只能在虚拟机上跑，一个笔误要花一个来回**，所以在本地先查 |
 
 ### 三个最关键的检查，以及为什么
 
@@ -62,10 +62,19 @@ python tools/run_checks.py
 还没开始动的时候就判定"没动"**。这个自测用模拟设备覆盖四种情形。
 
 **`selftest_verify_moveit.py`** —— `verify_moveit_vm.py` 是唯一只能在虚拟机上
-跑的东西，而它已经因为**自己**的两个笔误白白花掉两个来回：一个是在同一个提交里
-把某个辅助函数的返回值从 2 个改成 3 个，却漏改了另外两处调用点，运行时
-`ValueError: too many values to unpack`；另一个是把"节点名列表里没有"直接判红，
+跑的东西，而它已经因为**自己**的笔误白白花掉三个来回。前两个：把某个辅助函数
+的返回值从 2 个改成 3 个、却漏改了另外两处调用点，运行时
+`ValueError: too many values to unpack`；以及把"节点名列表里没有"直接判红，
 而 `get_node_names()` 本来就可能因为 DDS 发现延迟漏掉活着的节点。
+
+**第三个最值得记：`_wait_future()` 里的 `rclpy` 从来就是 NameError。**
+`import rclpy` 写在了 `main()` 里 —— 那是**局部**名字，而 `_wait_future()` 是
+模块级函数，看不到它。于是 `rclpy.spin_once()` 每次都抛 `NameError`，又被
+`except Exception` 吞掉、退化成 `time.sleep`：**executor 一次都没转过，action
+回包永远收不到，只能等 60 秒超时**。而 `move_group` 那边的日志写着
+`Motion plan was computed successfully.` —— 于是排查看起来像"规划器坏了"，
+实际上脚本根本没在收消息。两次改（先改成"确实 spin"、再加类型门）都没修好，
+因为这根本不是逻辑问题而是作用域问题。
 
 所以这个自测**用 AST 静态检查**，不需要 ROS：
 
@@ -74,9 +83,18 @@ python tools/run_checks.py
 2. `check.<方法>()` 必须在 `Check` 类上真的存在，参数个数也要在允许区间内
    —— 新增 `check.note` 而忘了定义方法就会在这里被抓住
 3. 顶层 `def` 不能重名
+4. **不能在某个函数里 `import`、却在另一个函数里用**（第 4 条专治上面那个
+   `rclpy`）
+5. **顶层被赋成 `None` 的名字不能真被用** —— `except ImportError: rclpy = None`
+   这种兜底本身是对的，但它和"顶层 import 没成功"长得一模一样；真出事时
+   顶层只剩 `rclpy = None`，`rclpy.spin_once` 报 `AttributeError` 又被吞掉，
+   同样是静默失败
 
-它是**纯静态**的，所以不需要任何模拟对象就能跑；代价是它抓不到运行时才出现的
-问题（比如上面那条 DDS 误报）。
+第 4、5 条都做过反向验证：把顶层 `import rclpy` 去掉之后，这个自测报
+`顶层第 50 行把 rclpy 赋成了 None … 但第 397/669/648/674 行真的在用它`。
+
+它是**纯静态**的（外加第 4 项把三个依赖函数换成桩真跑一遍类型门），所以不需要
+任何模拟对象就能跑；代价是它抓不到运行时才出现的问题（比如上面那条 DDS 误报）。
 
 ---
 

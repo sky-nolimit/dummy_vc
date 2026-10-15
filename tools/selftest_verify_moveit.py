@@ -5,6 +5,12 @@
 2. check.<method>() 必须是 Check 上真的存在的方法，参数个数也得对得上
    （新增 check.note 时最容易漏）。
 3. 顶层 def 之间没有重名。
+4. ★ 不要"在某个函数里 import，却在另一个函数里用"。这一条是第四次真机
+   验证踩出来的：`main()` 里写了 `import rclpy`（局部名），而 `_wait_future()`
+   是模块级函数，里面的 `rclpy` 直接 NameError；那个异常又被 `except Exception`
+   吞掉，退化成 time.sleep —— executor 一次都没转过，action 回包收不到，
+   脚本报"规划请求超时"，而 move_group 日志里明明写着
+   `Motion plan was computed successfully.`。查了两轮才找到，代价太大。
 """
 import ast
 import sys
@@ -135,6 +141,82 @@ for node in ast.walk(tree):
             problems.append('第 %d 行 check.%s() 传了 %d 个参数，'
                             '接受 %d..%d 个'
                             % (node.lineno, m, ncall, nargs - ndef, nargs))
+
+# --- 3b. 局部 import 被别的函数用（rclpy 那次事故）---
+# 收集：模块顶层绑定了哪些名字；每个函数内部又 import 了哪些名字。
+top_names = set()
+for node in tree.body:
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        for alias in node.names:
+            top_names.add((alias.asname or alias.name).split('.')[0])
+    elif isinstance(node, ast.Assign):
+        for t in node.targets:
+            if isinstance(t, ast.Name):
+                top_names.add(t.id)
+    elif isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+        top_names.add(node.name)
+
+# 函数名 -> 该函数内部 import 进来、且模块顶层没有的名字
+local_imports = {}
+for name, fn in funcs.items():
+    inner = set()
+    for node in ast.walk(fn):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                short = (alias.asname or alias.name).split('.')[0]
+                if short not in top_names:
+                    inner.add(short)
+    if inner:
+        local_imports[name] = inner
+
+# 每个函数里"被读到的名字"（只算裸 Name，不算属性/关键字）
+for name, fn in funcs.items():
+    own = local_imports.get(name, set())
+    params = {a.arg for a in fn.args.args} | {a.arg for a in fn.args.kwonlyargs}
+    # 本函数自己绑定的局部名（赋值目标、for 目标、with ... as、except ... as）
+    assigned = set()
+    for n2 in ast.walk(fn):
+        if isinstance(n2, ast.Name) and isinstance(n2.ctx, ast.Store):
+            assigned.add(n2.id)
+        elif isinstance(n2, ast.ExceptHandler) and n2.name:
+            assigned.add(n2.name)
+        elif isinstance(n2, (ast.comprehension,)) and isinstance(n2.target, ast.Name):
+            assigned.add(n2.target.id)
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            used = node.id
+            if used in top_names or used in own or used in params or used in assigned:
+                continue
+            # 找到底：这个名字是别的函数里 import 的
+            owners = [f for f, names in local_imports.items() if used in names]
+            if owners:
+                problems.append(
+                    '第 %d 行：函数 %s() 用了 `%s`，但它只在 %s() 里 import —— '
+                    '模块级函数看不到局部的 import，运行时会 NameError'
+                    % (node.lineno, name, used, '/'.join(owners)))
+
+# --- 3c. 顶层被赋成 None 的名字不能真被用 ---
+# `except ImportError: rclpy = None` 这种兜底是对的，但它和"顶层没 import
+# 成功"长得一模一样。真出事时（之前那版就是这样）顶层留下 `rclpy = None`，
+# `_wait_future()` 里 `rclpy.spin_once` 报 AttributeError，又被 `except
+# Exception` 吞掉 —— 于是永远静默。所以：用了就必须在顶层真的 import 成功。
+none_bound = set()
+for node in tree.body:
+    if isinstance(node, ast.Assign):
+        for t in node.targets:
+            if (isinstance(t, ast.Name)
+                    and isinstance(node.value, ast.Constant)
+                    and node.value.value is None):
+                none_bound.add((t.id, node.lineno))
+for name, lineno in sorted(none_bound):
+    uses = [n.lineno for n in ast.walk(tree)
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+            and n.id == name]
+    if uses:
+        problems.append(
+            '顶层第 %d 行把 `%s` 赋成了 None（多半是 import 兜底），但第 %s 行'
+            '真的在用它 —— 会 AttributeError/NameError，再被 except 吞掉就成'
+            '了静默失败' % (lineno, name, '/'.join(str(u) for u in uses[:6])))
 
 # --- 3. 顶层 def 重名 ---
 seen = {}
