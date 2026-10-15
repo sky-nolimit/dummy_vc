@@ -6,9 +6,9 @@
 **目前 43 个工具 + 本文件。** 数量不少，所以下面按用途分组。
 
 **曾经有 52 个。** 2026-10-14 清理掉了 9 个：8 个是排查特定假设时写的一次性
-脚本（问题定位后不会再被用到），加上 1 个结论本来就是错的。**如果夹爪问题还要
-继续查（比如上 CAN），被删的那几个里只有 `gripper_ids.py` 和
-`dump_protocol.py` 可能还需要** —— 它们的用途在下面第 4 组里说明了替代做法。
+脚本（问题定位后不会再被用到），加上 1 个结论本来就是错的。**其中的结论都
+已经整理进 `docs/04` 与 `docs/05`，或者有更可靠的替代做法**（见下方各组的
+说明）。下面第 4 组的夹爪探测脚本**全部保留** —— 夹爪尚未结案。
 
 > **新增工具前先确认它不与现有工具重叠。** 保留多个职责相同的工具是本项目
 > 反复出错的来源之一。
@@ -94,7 +94,7 @@ pkill -f dummy_controller
 `probe_moveit_api.py` 的理由：MoveItConfigsBuilder 的参数名在不同发行版里不同，
 **猜错一次就要占用一轮 VM 启动**。这个脚本把"猜"换成"问"。
 
-> `probe_relation.py` 曾用于拟合 `raw = a·move_j + b`，2026-10-14 删除 ——
+> probe_relation 曾用于拟合 `raw = a·move_j + b`，2026-10-14 删除 ——
 > 它与 `probe_mapping.py` 职责重叠，而后者会同时打印下发值和读回值，更便于
 > 人工核对。
 
@@ -141,7 +141,6 @@ pkill -f dummy_controller
 | `final_test.py` | 驱动侧最终验收测试。**第 3、4 项 FAIL 不可采信**（`/joint_states` 滞后于实际运动，见 docs/04 B1） |
 | `test_motion.sh` | 让某个关节转一个增量并报告结果（带确认提示） |
 | `send_joint_delta.py` | `test_motion.sh` 的底层实现 |
-| `go_zero.py` | 命令到 7 姿态并报告实际停在哪 |
 | `debug_pose_chain.py` | 打印完整姿态链，用正运动学判断模型此刻显示的是哪种姿态 |
 | `print_joints.py` | 列出关节与 URDF 限位 |
 
@@ -157,7 +156,6 @@ pkill -f dummy_controller
 | `resolve_signs.py` | 三项要求联立求解标定：几何折叠 + 7 姿态读回全零 + 目标链复现实测命令 |
 | `fold_signs.py` | 输出**折叠几何表** —— 真正定符号的那个检查 |
 | `explore_signs.py` | 穷举 `joint_sign` 组合，按收缩姿态的末端位置排序 |
-| `find_fold.py` | 按"折叠程度"扫描姿态，区分"伸出去"和"折回来" |
 | `find_pose.py` | 按几何描述（如"大臂竖直小臂水平"）搜出匹配的关节角 |
 | `fk_dummy.py` | URDF 正运动学，可画 x-z 侧视 ASCII 图 |
 | `trace_control.py` | **用具体例子逐步打印整条控制链的每个数值及其来历** |
