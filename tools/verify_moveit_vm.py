@@ -139,18 +139,35 @@ class Check:
         return [r for r in self.results if not r[0]]
 
 
+def service_name_for(remote_node, suffix='get_parameters'):
+    """把节点名拼成参数服务的全名。
+
+    Remote node names are FULLY QUALIFIED and start with a slash:
+    get_node_names() returns '/move_group', not 'move_group'. Formatting that
+    straight into '{}/get_parameters' produces '//move_group/get_parameters',
+    which rclpy treats as an absolute name and keeps -- so the client waits on a
+    service that does not exist, wait_for_service() times out, and EVERY
+    parameter looks unset. That is a false alarm: the config is fine and only
+    the client is looking in the wrong place.
+
+    Stripping the leading slash and re-adding exactly one makes both
+    '/move_group' and 'move_group' produce '/move_group/get_parameters'.
+    """
+    return '/{}/{}'.format(remote_node.lstrip('/'), suffix)
+
+
 def get_param(node, remote_node, name, timeout=5.0):
     """读远端节点的参数。读不到返回 (False, None) 而不是抛异常。
 
     为什么不用 get_parameter：move_group 的参数在它自己的节点上，
     从客户端读要走参数服务；而且有些发行版里 robot_description 是
-    "未声明但可读"的，声明与否会影响结果。所以三条路都试。
+    "未声明但可读"的，声明与否会影响结果。
     """
     from rcl_interfaces.srv import GetParameters
     from rclpy.parameter import Parameter
 
     client = node.create_client(
-        GetParameters, '{}/get_parameters'.format(remote_node))
+        GetParameters, service_name_for(remote_node))
     if not client.wait_for_service(timeout_sec=timeout):
         return False, None
 
@@ -261,12 +278,37 @@ def main():
             return _finish(node, check)
         check.ok('move_action action server 可用')
 
-        remote = names[0] if names else 'move_group'
+        # 候选节点名。get_node_names() 给的是 '/move_group'，而参数服务在
+        # /move_group/get_parameters；这里把可能的写法都试一遍，避免因为
+        # 名字拼错而误报"参数没加载"。
+        candidates = names or ['/move_group']
+        if 'move_group' not in candidates:
+            candidates.append('move_group')
+        remote = candidates[0]
 
         # -- 2. 参数里真的有模型吗 ------------------------------------------
         print('\n' + '-' * 74)
         print('2. move_group 加载到的参数（这是"配置没生效"的判定处）')
         print('-' * 74)
+
+        # 先确认参数服务本身通不通。不通就说清楚是"读不到"而不是"没有"，
+        # 两者指向的问题完全不同：前者查脚本/节点名，后者才查配置。
+        probe = None
+        for cand in candidates:
+            ok_probe, val_probe = get_param(node, cand, 'robot_description')
+            if ok_probe:
+                probe, remote = ok_probe, cand
+                break
+        if probe is None:
+            print('  参数服务探测: {}'.format(
+                ', '.join(service_name_for(c) for c in candidates)))
+            print('  [!!] 三个候选名都读不到参数 —— 但 move_action 是通的')
+            print('       这说明【脚本读参数的方式】有问题，不代表配置没加载。')
+            print('       先用 ROS 自己的工具确认参数到底在不在:')
+            print('           ros2 param get {} robot_description | head -c 200'
+                  .format(remote))
+            print('       （能打印出 <robot ... 就说明配置是好的，是脚本的锅）')
+            print()
 
         ok, val = get_param(node, remote, 'robot_description')
         if ok:
@@ -280,7 +322,8 @@ def main():
                 print('        开头 200 字符: {}'.format(desc[:200].replace('\n', ' ')))
         else:
             check.fail('读不到 robot_description 参数',
-                       'move_group 参数没加载 —— 检查 .setup_assistant 指向的 URDF 路径')
+                       '不是"配置没加载"，而是参数服务没读到 —— 先跑 '
+                       '`ros2 param get {} robot_description` 对比'.format(remote))
 
         ok, val = get_param(node, remote, 'robot_description_semantic')
         if ok:
