@@ -1,0 +1,30 @@
+# Limits for the Pilz planner.
+#
+# This file exists because moveit_configs_utils loads it UNCONDITIONALLY:
+# `MoveItConfigsBuilder.to_moveit_configs()` pulls it in as one of the default
+# parameter files, whether or not any Pilz pipeline is configured. If the file
+# is absent the whole launch dies at load time with
+#
+#   ParameterBuilderFileNotFoundError:
+#     "File <share>/dummy_vc_moveit_config/config/pilz_cartesian_limits.yaml
+#      doesn't exist"
+#
+# which looks like a launch syntax error but is not.
+#
+# We do NOT use the Pilz planner -- planning_pipelines in ompl_planning.yaml is
+# `ompl` only. The values below are inert for us; the file is here to satisfy
+# the loader.
+#
+# They are NOT invented: this is the upstream default that ships with the
+# MoveIt 2 test configs, and the same four-key shape the Setup Assistant
+# generates. If Pilz is ever enabled, these become live and must be re-derived
+# for this arm -- the arm is small (roughly 0.35 m to the TCP), so 1.0 m/s
+# would be far faster than the joint speed limits in joint_limits.yaml allow.
+#
+# Keep the top-level `cartesian_limits` key: the Pilz planner reads this exact
+# parameter namespace from the node's parameters.
+cartesian_limits:
+  max_trans_vel: 1.0
+  max_trans_acc: 2.25
+  max_trans_dec: -5.0
+  max_rot_vel: 1.57
