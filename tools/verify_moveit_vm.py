@@ -252,7 +252,11 @@ def param_via_cli(node_name, name, timeout=20.0):
 
 
 def get_param_any(node, remote_node, name, timeout=5.0):
-    """先试参数服务，失败再用 `ros2 param get`。返回 (ok, value, via)。"""
+    """先试参数服务，失败再用 `ros2 param get`。返回 (ok, value, via)。
+
+    现在 main 走的是下面的 get_param_typed()（它多了类型检查）；这个函数保留
+    着是因为"读参数"这件事本身仍然需要一条服务+CLI 的兜底路径，将来别处要用。
+    """
     ok, val = get_param(node, remote_node, name, timeout=timeout)
     if ok:
         return True, param_to_python(val), 'service'
@@ -260,6 +264,44 @@ def get_param_any(node, remote_node, name, timeout=5.0):
     if ok:
         return True, py, 'ros2 param get'
     return False, None, ''
+
+
+def get_param_typed(node, remote_node, name, want, timeout=5.0):
+    """读一个参数，并检查它的 python 类型是不是 `want`。
+
+    为什么不能只判 None：实测在虚拟机上再走一次参数服务时，
+    `robot_description_semantic` 被转成了 `True`（bool），于是
+    `'<group name="..."' in srdf` 报 `TypeError: argument of type 'bool'
+    is not iterable` —— 一个纯字符串判定的地方冒出个 bool，很难看出是读取
+    环节的问题。走 `ros2 param get` 那一路类型是对的，所以类型不对就当这条
+    路失败，让调用方回退到 CLI。
+
+    返回 (ok, value, via, detail)；类型不对时 ok=False，detail 说明实际类型。
+    """
+    ok, val = get_param(node, remote_node, name, timeout=timeout)
+    if ok:
+        try:
+            py = param_to_python(val)
+        except Exception as exc:      # 服务返回了古怪东西，不该把脚本带走
+            py, ok = None, False
+            svc_detail = '参数服务读到的值转不了: {}'.format(exc)
+        else:
+            if isinstance(py, want):
+                return True, py, 'service', ''
+            # 类型不对就别要了 —— 换 CLI 再试一次，它给的类型是对的。
+            # 实测这台机器上 robot_description_semantic 走服务读回来是 bool。
+            svc_detail = '参数服务读到的类型是 {}，期望 {}'.format(
+                type(py).__name__, want.__name__)
+    else:
+        svc_detail = '参数服务读不到'
+
+    ok, py = param_via_cli(remote_node, name)
+    if ok and isinstance(py, want):
+        return True, py, 'ros2 param get', ''
+    if ok:
+        return False, None, 'ros2 param get', '{}；`ros2 param get` 读到 {}，期望 {}'.format(
+            svc_detail, type(py).__name__, want.__name__)
+    return False, None, '', '{}；`ros2 param get` 也读不到'.format(svc_detail)
 
 
 def param_to_python(val):
@@ -376,15 +418,17 @@ def main():
 
         # 先确认参数本身能不能读到。读不到就说清楚是"读不到"而不是"没有"，
         # 两者指向的问题完全不同：前者查脚本/节点名，后者才查配置。
-        desc, desc_via = None, ''
+        desc, desc_via, desc_detail = None, '', ''
         for cand in candidates:
-            ok_probe, py, via = get_param_any(node, cand, 'robot_description')
+            ok_probe, py, via, detail = get_param_typed(
+                node, cand, 'robot_description', str)
             if ok_probe:
                 desc, desc_via, remote = py, via, cand
                 break
+            desc_detail = detail
         if desc is None:
             print('  试过的节点名: {}'.format(', '.join(candidates)))
-            print('  [!!] 参数服务读不到，`ros2 param get` 也读不到')
+            print('  [!!] 读不到 robot_description：{}'.format(desc_detail))
             print('       先用 ROS 自带工具确认参数到底在不在:')
             print('           ros2 param get {} robot_description | head -c 200'
                   .format(remote))
@@ -407,20 +451,38 @@ def main():
                        '不是"配置没加载"，而是两种读法都读不到 —— 先跑 '
                        '`ros2 param get {} robot_description` 对比'.format(remote))
 
-        srdf, _, _ = get_param_any(node, remote, 'robot_description_semantic')
+        srdf, srdf_via, srdf_detail = None, '', ''
+        for cand in candidates:
+            ok_s, py, via, detail = get_param_typed(
+                node, cand, 'robot_description_semantic', str)
+            if ok_s:
+                srdf, srdf_via = py, via
+                break
+            srdf_detail = detail       # 记住最后一次失败的原因
         if srdf is not None:
+            if srdf_via != 'service':
+                print('  (SRDF 也是改用 `{}` 读到的)'.format(srdf_via))
             missing = [g for g in groups if '<group name="{}"'.format(g) not in srdf]
-            if srdf and not missing:
-                check.ok('robot_description_semantic 含目标规划组',
-                         '{} 字符'.format(len(srdf)))
-            else:
+            if missing:
                 check.fail('SRDF 里缺少规划组: {}'.format(missing),
                            'SRDF 加载了但组名不对 —— 检查 config/dummy2.srdf')
+            else:
+                check.ok('robot_description_semantic 含目标规划组',
+                         '{} 字符'.format(len(srdf)))
         else:
             check.fail('读不到 robot_description_semantic 参数',
-                       '两种读法都读不到，先对照 `ros2 param get` 的输出')
+                       srdf_detail or '两种读法都读不到，先对照 '
+                       '`ros2 param get` 的输出')
 
-        kin, _, _ = get_param_any(node, remote, 'robot_description_kinematics')
+        kin, kin_detail = None, ''
+        for cand in candidates:
+            ok_k, py, via, detail = get_param_typed(
+                node, cand, 'robot_description_kinematics', dict)
+            if ok_k:
+                kin = py
+                print('  (kinematics 是用 `{}` 读到的)'.format(via))
+                break
+            kin_detail = detail
         if kin is not None:
             solver_groups = sorted(kin.keys()) if hasattr(kin, 'keys') else []
             # 只有"链"组能有求解器：gripper 是并联手指的关节列表，没有 IK，
@@ -438,7 +500,8 @@ def main():
                            '关节空间目标，笛卡尔目标全部失败')
         else:
             check.fail('读不到 robot_description_kinematics 参数',
-                       '两种读法都读不到，先对照 `ros2 param get` 的输出')
+                       kin_detail or '两种读法都读不到，先对照 '
+                       '`ros2 param get` 的输出')
 
         # -- 3/4. 真的规划一次 ----------------------------------------------
         for group in groups:

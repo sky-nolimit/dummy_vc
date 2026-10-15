@@ -62,8 +62,9 @@ def arity_of_return_value(value, known):
 
 
 # --- 1. 元数 ---
-TRACKED = ('get_param_any', 'param_via_cli', 'parse_param_cli_output',
-           'param_to_python', 'get_param', 'service_name_for')
+TRACKED = ('get_param_typed', 'get_param_any', 'param_via_cli',
+           'parse_param_cli_output', 'param_to_python', 'get_param',
+           'service_name_for')
 arities = {}
 unresolved = {}
 # 先算一次粗略值，好让转调能解析到被调函数的元数
@@ -143,6 +144,58 @@ for node in tree.body:
             problems.append('顶层函数重名: %s (L%d 与 L%d)'
                             % (node.name, seen[node.name], node.lineno))
         seen[node.name] = node.lineno
+
+# --- 4. get_param_typed 的类型门 ---
+# 这条是这次真机上踩到的：参数服务把 robot_description_semantic 读成了 bool，
+# 于是 `'<group name="..."' in srdf` 报
+# `TypeError: argument of type 'bool' is not iterable`。
+# 静态检查看不出这个，所以真跑一遍逻辑：把三个依赖函数换成桩，
+# 确认"服务给了错的类型"时会退到 CLI，而 CLI 也不对时才判失败。
+try:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location('verify_moveit_vm', SRC)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)          # 这个模块顶层不导入 rclpy，能安全执行
+except Exception as exc:                  # pragma: no cover
+    print('  [skip] 类型门测试没能加载模块: %s' % exc)
+else:
+    def _probe(service_ok, service_val, cli_ok, cli_val, want, label):
+        mod.get_param = lambda *a, **k: (service_ok, service_val)
+        mod.param_to_python = lambda v: v
+        mod.param_via_cli = lambda *a, **k: (cli_ok, cli_val)
+        ok, val, via, detail = mod.get_param_typed(None, '/move_group', 'x', want)
+        print('    %-46s -> ok=%-5s via=%-15s val=%-9s %s'
+              % (label, ok, via or '-', repr(val)[:9], detail))
+        return ok, via, detail
+
+    print()
+    print('  类型门:')
+    # 服务给了 bool（就是真机上的情况）→ 必须退到 CLI，且用 CLI 的字符串
+    ok, via, _ = _probe(True, True, True, '<robot/>', str, '服务给 bool，CLI 给 str')
+    if not (ok and via == 'ros2 param get'):
+        problems.append('服务类型不对时没有退到 CLI（ok=%s via=%s）' % (ok, via))
+    # 两条路都给了错的类型 → 必须失败，而且 detail 要说清两种类型
+    ok, _, detail = _probe(True, True, True, 42, str, '两条路类型都不对')
+    if ok or 'bool' not in detail or 'int' not in detail:
+        problems.append('两条路类型都不对时判定有误: ok=%s detail=%s' % (ok, detail))
+    # 服务类型正确 → 直接用服务的，绝不调 CLI。这里把 CLI 设成"一被调用就抛"，
+    # 用异常来证明它没被走到；抛出来就说明我们的判定逻辑错了。
+    def _must_not_call(*a, **k):
+        raise AssertionError('服务类型正确时不该走 CLI')
+    mod.get_param = lambda *a, **k: (True, '<robot/>')
+    mod.param_to_python = lambda v: v
+    mod.param_via_cli = _must_not_call
+    try:
+        ok, val, via, _ = mod.get_param_typed(None, '/move_group', 'x', str)
+    except AssertionError as exc:
+        problems.append(str(exc))
+        ok, val, via = False, None, ''
+    print('    %-46s -> ok=%-5s via=%-15s val=%s'
+          % ('服务类型正确（不该走 CLI）', ok, via, repr(val)))
+    if not (ok and via == 'service' and val == '<robot/>'):
+        problems.append('服务类型正确时判定有误: ok=%s via=%s val=%s'
+                        % (ok, via, val))
 
 print()
 if problems:
