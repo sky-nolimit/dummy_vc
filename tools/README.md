@@ -3,7 +3,7 @@
 把"靠眼睛看、靠记忆猜"的事情变成可复现的检查。除标注"需要 ROS"或"需要硬件"
 的以外，都不依赖 ROS 环境，Windows 和 Ubuntu 上都可直接用 Python 执行。
 
-**目前 45 个工具 + 本文件。** 数量不少，所以下面按用途分组。
+**目前 46 个工具 + 本文件。** 数量不少，所以下面按用途分组。
 
 **曾经有 52 个。** 2026-10-14 清理掉了 9 个：8 个是排查特定假设时写的一次性
 脚本（问题定位后不会再被用到），加上 1 个结论本来就是错的。**其中的结论都
@@ -140,19 +140,27 @@ pkill -f dummy_controller
 |---|---|
 | `verify_moveit_vm.py` | ★ 向 `move_group` 真发一次规划请求，判定 MoveIt 配置是否可用。**不需要驱动、不需要硬件** —— 只规划不执行 |
 | `check_moveit_vm_paths.py` | ★ 在虚拟机上打印 builder 要加载的每个文件**解析到哪个绝对路径、存不存在**。`robot_description` 为空时先用它 |
+| `check_moveit_builder.py` | ★ 拿**真实的 `MoveItConfigsBuilder`** 跑一遍 launch 里那条链，原样打印三个返回值并判定。路径都对但仍为空时用它 |
 | `final_test.py` | 驱动侧最终验收测试。**第 3、4 项 FAIL 不可采信**（`/joint_states` 滞后于实际运动，见 docs/04 B1） |
 | `test_motion.sh` | 让某个关节转一个增量并报告结果（带确认提示） |
 | `send_joint_delta.py` | `test_motion.sh` 的底层实现 |
 | `debug_pose_chain.py` | 打印完整姿态链，用正运动学判断模型此刻显示的是哪种姿态 |
 | `print_joints.py` | 列出关节与 URDF 限位 |
 
-前五个需要驱动正在运行；**`verify_moveit_vm.py` 和 `check_moveit_vm_paths.py` 不需要**，
-后两个是给虚拟机/新机器第一次加载 MoveIt 配置用的（配套步骤见
-`docs/08-MoveIt虚拟机验证清单.md`）。
+前五个需要驱动正在运行；**`verify_moveit_vm.py`、`check_moveit_vm_paths.py`、
+`check_moveit_builder.py` 不需要**，后三个是给虚拟机/新机器第一次加载 MoveIt
+配置用的（配套步骤见 `docs/08-MoveIt虚拟机验证清单.md`）。
 
-**顺序是先用 `check_moveit_vm_paths.py`，再用 `verify_moveit_vm.py`。**
-前者回答"文件找得到吗"，后者回答"找到了之后配置对不对"。反过来的话，
-文件缺失会表现为规划失败，看起来像配置错误。
+**顺序是三个一层套一层，别跳步：**
+
+| 顺序 | 工具 | 回答的问题 |
+|---|---|---|
+| 1 | `check_moveit_vm_paths.py` | 文件**找得到吗**（解析成绝对路径、存不存在、xacro 能否展开） |
+| 2 | `check_moveit_builder.py` | 找到了之后，builder **返回的东西对不对**（三个返回值本身是否可用） |
+| 3 | `verify_moveit_vm.py` | 规划**真的能算出来吗**（向 `move_group` 发一次真请求） |
+
+**跳步会让下游工具报出误导性的失败**：文件缺失在 `verify_moveit_vm.py` 里表现为
+"规划失败"，看起来像配置写错。
 
 `check_moveit_vm_paths.py` 的理由：`MoveItConfigsBuilder` 要跨两个包找文件 ——
 自己（`dummy_vc_moveit_config`）和 URDF 所在的 `dummy2_urdf_description`，而后者
@@ -166,6 +174,21 @@ pkill -f dummy_controller
 它的第 4 节会真用 `xacro` 展开一次 URDF，并检查 `kinematics.yaml` 的顶层键是否
 正好是 `dummy_arm` / `gripper`：如果看到的是 `['robot_description_kinematics']`
 这种"以文件名命名"的单键，说明加载器把整个文件包了一层，那是另一类故障。
+
+`check_moveit_builder.py` 的理由：上一个工具**故意重实现了查找逻辑**，所以它
+证明不了真实 builder 返回了什么。本工具走 launch 里那条一模一样的链，打印
+`robot_description` / `robot_description_semantic` /
+`robot_description_kinematics` 三个值的**类型和原始内容**，并按三条判据给结论：
+
+1. `robot_description` 必须是非空的 URDF 字符串
+2. `robot_description_semantic` 必须含 `<group name="dummy_arm"`
+3. `robot_description_kinematics` 的**顶层键必须是规划组名**（`dummy_arm`、`gripper`）；
+   只有一个以属性名命名的键 = 加载器把文件包了一层，`move_group` 会找不到任何
+   规划组的运动学解算器
+
+它还会打印 `moveit_configs_utils` / `moveit_cpp` 的版本号 —— 文件解析方式在
+MoveIt 各发行版之间变过，**这是"同一份配置在一台机器上能跑、另一台上不能"的
+最常见原因**。
 
 `verify_moveit_vm.py` 的理由：RViz 里拖动能规划**不能证明配置是对的** —— 配置
 错了也可能偶尔规划成功，外行分辨不了。它直接向 `move_group` 发一个**已知可达**
