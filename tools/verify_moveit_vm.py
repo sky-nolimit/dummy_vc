@@ -190,6 +190,74 @@ def get_param(node, remote_node, name, timeout=5.0):
     return True, val
 
 
+def parse_param_cli_output(out, returncode):
+    """把 `ros2 param get` 的输出解析成 python 值。解析不了返回 (False, None)。
+
+    输出形如（值本身含换行，所以只能按第一个 ': ' 切一次）：
+        String value is: <robot ...>
+        Integer value is: 42
+        Parameter not set
+    """
+    if returncode != 0 or 'not set' in out or ': ' not in out:
+        return False, None
+
+    kind, body = out.split(': ', 1)
+    kind = kind.strip()
+    if body.endswith('\n'):
+        body = body[:-1]
+
+    if 'Integer' in kind:
+        try:
+            return True, int(body)
+        except ValueError:
+            return False, None
+    if 'Double' in kind:
+        try:
+            return True, float(body)
+        except ValueError:
+            return False, None
+    if 'Boolean' in kind:
+        return True, body.strip().lower() in ('true', '1')
+    # String / Array：原样返回字符串，调用方自己判断内容
+    if 'String' in kind or 'Array' in kind:
+        return True, body
+    return False, None
+
+
+def param_via_cli(node_name, name, timeout=20.0):
+    """用 `ros2 param get` 读参数。读不到返回 (False, None)。
+
+    为什么要有这条路：直接调参数服务在某些环境上读不到（服务名/发现时机/发行版
+    差异都可能），而 `ros2 param get` 走的是 CLI 自己那套，实测可靠。代价是要起
+    一个子进程，所以只在前一条路失败时才用。
+    """
+    import shutil
+    import subprocess
+
+    if shutil.which('ros2') is None:
+        return False, None
+    try:
+        proc = subprocess.run(
+            ['ros2', 'param', 'get', node_name, name],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            timeout=timeout, text=True, encoding='utf-8', errors='replace')
+    except Exception:
+        return False, None
+
+    return parse_param_cli_output(proc.stdout or '', proc.returncode)
+
+
+def get_param_any(node, remote_node, name, timeout=5.0):
+    """先试参数服务，失败再用 `ros2 param get`。返回 (ok, value, via)。"""
+    ok, val = get_param(node, remote_node, name, timeout=timeout)
+    if ok:
+        return True, param_to_python(val), 'service'
+    ok, py = param_via_cli(remote_node, name)
+    if ok:
+        return True, py, 'ros2 param get'
+    return False, None, ''
+
+
 def param_to_python(val):
     """把 rcl_interfaces ParameterValue 转成 python 值。"""
     from rclpy.parameter import Parameter
@@ -291,43 +359,41 @@ def main():
         print('2. move_group 加载到的参数（这是"配置没生效"的判定处）')
         print('-' * 74)
 
-        # 先确认参数服务本身通不通。不通就说清楚是"读不到"而不是"没有"，
+        # 先确认参数本身能不能读到。读不到就说清楚是"读不到"而不是"没有"，
         # 两者指向的问题完全不同：前者查脚本/节点名，后者才查配置。
-        probe = None
+        desc, desc_via = None, ''
         for cand in candidates:
-            ok_probe, val_probe = get_param(node, cand, 'robot_description')
+            ok_probe, py, via = get_param_any(node, cand, 'robot_description')
             if ok_probe:
-                probe, remote = ok_probe, cand
+                desc, desc_via, remote = py, via, cand
                 break
-        if probe is None:
-            print('  参数服务探测: {}'.format(
-                ', '.join(service_name_for(c) for c in candidates)))
-            print('  [!!] 三个候选名都读不到参数 —— 但 move_action 是通的')
-            print('       这说明【脚本读参数的方式】有问题，不代表配置没加载。')
-            print('       先用 ROS 自己的工具确认参数到底在不在:')
+        if desc is None:
+            print('  试过的节点名: {}'.format(', '.join(candidates)))
+            print('  [!!] 参数服务读不到，`ros2 param get` 也读不到')
+            print('       先用 ROS 自带工具确认参数到底在不在:')
             print('           ros2 param get {} robot_description | head -c 200'
                   .format(remote))
-            print('       （能打印出 <robot ... 就说明配置是好的，是脚本的锅）')
+            print('       （能打印出 <robot ... 就说明是脚本的锅，不是配置）')
             print()
 
-        ok, val = get_param(node, remote, 'robot_description')
-        if ok:
-            desc = param_to_python(val) or ''
+        if desc is not None:
+            if desc_via != 'service':
+                print('  (参数服务读不到，改用 `{}` 读到的)'.format(desc_via))
             if len(desc) > 1000:
                 check.ok('robot_description 非空', '{} 字符'.format(len(desc)))
             else:
                 check.fail('robot_description 太短',
                            '只有 {} 字符，URDF 基本没加载'.format(len(desc)))
             if args.verbose:
-                print('        开头 200 字符: {}'.format(desc[:200].replace('\n', ' ')))
+                print('        开头 200 字符: {}'.format(
+                    desc[:200].replace('\n', ' ')))
         else:
             check.fail('读不到 robot_description 参数',
-                       '不是"配置没加载"，而是参数服务没读到 —— 先跑 '
+                       '不是"配置没加载"，而是两种读法都读不到 —— 先跑 '
                        '`ros2 param get {} robot_description` 对比'.format(remote))
 
-        ok, val = get_param(node, remote, 'robot_description_semantic')
-        if ok:
-            srdf = param_to_python(val) or ''
+        srdf, _ = get_param_any(node, remote, 'robot_description_semantic')
+        if srdf is not None:
             missing = [g for g in groups if '<group name="{}"'.format(g) not in srdf]
             if srdf and not missing:
                 check.ok('robot_description_semantic 含目标规划组',
@@ -337,11 +403,10 @@ def main():
                            'SRDF 加载了但组名不对 —— 检查 config/dummy2.srdf')
         else:
             check.fail('读不到 robot_description_semantic 参数',
-                       'SRDF 没加载')
+                       '两种读法都读不到，先对照 `ros2 param get` 的输出')
 
-        ok, val = get_param(node, remote, 'robot_description_kinematics')
-        if ok:
-            kin = param_to_python(val)
+        kin, _ = get_param_any(node, remote, 'robot_description_kinematics')
+        if kin is not None:
             solver_groups = sorted(kin.keys()) if hasattr(kin, 'keys') else []
             if solver_groups:
                 check.ok('robot_description_kinematics 有求解器',
@@ -351,7 +416,7 @@ def main():
                            '没有 IK 求解器 —— 检查 config/kinematics.yaml')
         else:
             check.fail('读不到 robot_description_kinematics 参数',
-                       'kinematics.yaml 没加载')
+                       '两种读法都读不到，先对照 `ros2 param get` 的输出')
 
         # -- 3/4. 真的规划一次 ----------------------------------------------
         for group in groups:
