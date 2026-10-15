@@ -3,7 +3,7 @@
 把"靠眼睛看、靠记忆猜"的事情变成可复现的检查。除标注"需要 ROS"或"需要硬件"
 的以外，都不依赖 ROS 环境，Windows 和 Ubuntu 上都可直接用 Python 执行。
 
-**目前 45 个工具 + 本文件。** 数量不少，所以下面按用途分组。
+**目前 46 个工具 + 本文件。** 数量不少，所以下面按用途分组。
 
 **曾经有 52 个。** 2026-10-14 清理掉了 9 个：8 个是排查特定假设时写的一次性
 脚本（问题定位后不会再被用到），加上 1 个结论本来就是错的。**其中的结论都
@@ -21,7 +21,7 @@
 python tools/run_checks.py
 ```
 
-**11 项一次过**，不需要硬件也不需要 source ROS。它串起下面这些：
+**12 项一次过**，不需要硬件也不需要 source ROS。它串起下面这些：
 
 | 工具 | 作用 |
 |---|---|
@@ -38,6 +38,7 @@ python tools/run_checks.py
 | `check_downlink.py` | **下发链对实测 (move_j, raw) 配对**，抓"静默丢弃"那类故障 |
 | `selftest_conversion.py` | **标定自测**：锚点、收缩姿态折叠、往返恒等、三处默认值一致 |
 | `selftest_wait.py` | 等待逻辑对**模拟的**慢速设备（含起步延迟）是否可靠 |
+| `selftest_verify_moveit.py` | 静态自查 `verify_moveit_vm.py` 自己的调用点（解包元数、`check.xxx` 是否存在）。**它只能在虚拟机上跑，一个笔误要花一个来回**，所以在本地先查 |
 
 ### 三个最关键的检查，以及为什么
 
@@ -59,6 +60,23 @@ python tools/run_checks.py
 
 **`selftest_wait.py`** —— 手臂起步有约 1.3 秒延迟，用固定 sleep 会**在设备
 还没开始动的时候就判定"没动"**。这个自测用模拟设备覆盖四种情形。
+
+**`selftest_verify_moveit.py`** —— `verify_moveit_vm.py` 是唯一只能在虚拟机上
+跑的东西，而它已经因为**自己**的两个笔误白白花掉两个来回：一个是在同一个提交里
+把某个辅助函数的返回值从 2 个改成 3 个，却漏改了另外两处调用点，运行时
+`ValueError: too many values to unpack`；另一个是把"节点名列表里没有"直接判红，
+而 `get_node_names()` 本来就可能因为 DDS 发现延迟漏掉活着的节点。
+
+所以这个自测**用 AST 静态检查**，不需要 ROS：
+
+1. 六个辅助函数的 `return` 元数必须自洽，且每个调用点解包的个数要对得上
+   （返回 `f()` 的转调也算，否则 `param_via_cli` 会被误判成元数不一致）
+2. `check.<方法>()` 必须在 `Check` 类上真的存在，参数个数也要在允许区间内
+   —— 新增 `check.note` 而忘了定义方法就会在这里被抓住
+3. 顶层 `def` 不能重名
+
+它是**纯静态**的，所以不需要任何模拟对象就能跑；代价是它抓不到运行时才出现的
+问题（比如上面那条 DDS 误报）。
 
 ---
 
@@ -141,6 +159,7 @@ pkill -f dummy_controller
 | `verify_moveit_vm.py` | ★ 向 `move_group` 真发一次规划请求，判定 MoveIt 配置是否可用。**不需要驱动、不需要硬件** —— 只规划不执行 |
 | `check_moveit_vm_paths.py` | ★ 在虚拟机上打印 builder 要加载的每个文件**解析到哪个绝对路径、存不存在**。`robot_description` 为空时先用它 |
 | `check_moveit_builder.py` | ★ 拿**真实的 `MoveItConfigsBuilder`** 跑一遍 launch 里那条链，原样打印三个返回值并判定。路径都对但仍为空时用它 |
+| `selftest_verify_moveit.py` | 静态自查 `verify_moveit_vm.py`：调用点解包的元数、`check.<方法>` 是否存在（见第 1 组） |
 | `final_test.py` | 驱动侧最终验收测试。**第 3、4 项 FAIL 不可采信**（`/joint_states` 滞后于实际运动，见 docs/04 B1） |
 | `test_motion.sh` | 让某个关节转一个增量并报告结果（带确认提示） |
 | `send_joint_delta.py` | `test_motion.sh` 的底层实现 |
@@ -148,8 +167,9 @@ pkill -f dummy_controller
 | `print_joints.py` | 列出关节与 URDF 限位 |
 
 前五个需要驱动正在运行；**`verify_moveit_vm.py`、`check_moveit_vm_paths.py`、
-`check_moveit_builder.py` 不需要**，后三个是给虚拟机/新机器第一次加载 MoveIt
-配置用的（配套步骤见 `docs/08-MoveIt虚拟机验证清单.md`）。
+`check_moveit_builder.py`、`selftest_verify_moveit.py` 不需要**，后三个是给
+虚拟机/新机器第一次加载 MoveIt 配置用的（配套步骤见
+`docs/08-MoveIt虚拟机验证清单.md`）。
 
 **顺序是三个一层套一层，别跳步：**
 

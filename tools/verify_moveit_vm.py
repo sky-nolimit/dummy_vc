@@ -134,6 +134,10 @@ class Check:
     def skip(self, name, detail=''):
         print('  [skip] {}{}'.format(name, ('  — ' + detail) if detail else ''))
 
+    def note(self, name, detail=''):
+        """提示，不算失败。用于"不影响判据但值得记一笔"的情况。"""
+        print('  [note] {}{}'.format(name, ('  — ' + detail) if detail else ''))
+
     @property
     def failed(self):
         return [r for r in self.results if not r[0]]
@@ -235,7 +239,7 @@ def param_via_cli(node_name, name, timeout=20.0):
     import subprocess
 
     if shutil.which('ros2') is None:
-        return False, None
+        return False, None   # 恒返回二元组，调用点才敢直接解包
     try:
         proc = subprocess.run(
             ['ros2', 'param', 'get', node_name, name],
@@ -332,15 +336,26 @@ def main():
         print('1. move_group 是否在运行')
         print('-' * 74)
 
+        # 节点名和 action server 是两回事：get_node_names() 只列出"正在广播"
+        # 的节点，会因为发现机制/DDS 而漏掉活着的节点（实测就漏过一次，
+        # 报出"找不到 move_group"紧接着又说 action server 可用，自相矛盾）。
+        # 真正的硬判据是 move_action 能不能连上。
         names = [n for n in node.get_node_names() if 'move_group' in n]
+
+        client = ActionClient(node, MoveGroup, 'move_action')
+        action_ok = client.wait_for_server(timeout_sec=args.timeout)
+
         if names:
             check.ok('找到 move_group 节点', ', '.join(names))
+        elif action_ok:
+            check.note('节点名列表里没有 move_group',
+                       '但 action server 可用，说明它确实在运行 —— '
+                       '这多半是 DDS 发现延迟，不影响判据')
         else:
             check.fail('找不到 move_group 节点',
                        'demo.launch.py 没起来，或者起来后崩了')
 
-        client = ActionClient(node, MoveGroup, 'move_action')
-        if not client.wait_for_server(timeout_sec=args.timeout):
+        if not action_ok:
             check.fail('move_action action server 不可用',
                        '{} s 内没等到。看终端 1 有没有报错'.format(args.timeout))
             return _finish(node, check)
@@ -392,7 +407,7 @@ def main():
                        '不是"配置没加载"，而是两种读法都读不到 —— 先跑 '
                        '`ros2 param get {} robot_description` 对比'.format(remote))
 
-        srdf, _ = get_param_any(node, remote, 'robot_description_semantic')
+        srdf, _, _ = get_param_any(node, remote, 'robot_description_semantic')
         if srdf is not None:
             missing = [g for g in groups if '<group name="{}"'.format(g) not in srdf]
             if srdf and not missing:
@@ -405,7 +420,7 @@ def main():
             check.fail('读不到 robot_description_semantic 参数',
                        '两种读法都读不到，先对照 `ros2 param get` 的输出')
 
-        kin, _ = get_param_any(node, remote, 'robot_description_kinematics')
+        kin, _, _ = get_param_any(node, remote, 'robot_description_kinematics')
         if kin is not None:
             solver_groups = sorted(kin.keys()) if hasattr(kin, 'keys') else []
             # 只有"链"组能有求解器：gripper 是并联手指的关节列表，没有 IK，

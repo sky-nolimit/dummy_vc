@@ -16,6 +16,10 @@ this project's worst bugs:
     selftest_wait         the arm-waiting logic, against simulated devices.
                           Waiting bugs produce confident wrong answers, so this
                           runs without hardware on purpose.
+    selftest_verify_moveit the MoveIt verifier's own call sites: tuple arity,
+                          and that every `check.<method>` exists. That script
+                          only ever runs on the VM, where a typo costs a whole
+                          round trip and shows up as a meaningless ValueError.
 
 Usage:
     python tools/run_checks.py            # everything
@@ -87,6 +91,8 @@ CHECKS = [
      'the calibration holds: anchor, fold, round trips, defaults', False, []),
     ('selftest_wait.py',
      'the waiting logic behaves on simulated slow devices', False, []),
+    ('selftest_verify_moveit.py',
+     'the MoveIt verifier unpacks its own helpers correctly', True, []),
 ]
 
 
