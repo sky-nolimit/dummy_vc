@@ -38,9 +38,20 @@ from moveit_configs_utils import MoveItConfigsBuilder
 
 def generate_launch_description():
     share = get_package_share_directory('dummy_vc_moveit_config')
+    urdf_share = get_package_share_directory('dummy2_urdf_description')
+
+    # Explicit for the same reason as demo.launch.py: on Humble the builder only
+    # looks for `.setup_assistant` at the share ROOT, and when it cannot find it
+    # it silently falls back to a config/dummy2.urdf that does not exist --
+    # leaving robot_description empty and the real cause unmentioned.
+    urdf_path = os.path.join(urdf_share, 'urdf', 'dummy2_urdf.xacro')
+    if not os.path.isfile(urdf_path):
+        raise RuntimeError(
+            f'URDF 不在 {urdf_path}。先跑 python3 tools/check_moveit_vm_paths.py')
 
     moveit_config = (
         MoveItConfigsBuilder('dummy2', package_name='dummy_vc_moveit_config')
+        .robot_description(file_path=urdf_path)
         .robot_description_semantic(file_path='config/dummy2.srdf')
         .joint_limits(file_path='config/joint_limits.yaml')
         .trajectory_execution(file_path='config/moveit_controllers.yaml')
@@ -55,7 +66,7 @@ def generate_launch_description():
     print('dummy_vc_moveit_config: what was loaded')
     print('=' * 70)
     print(f'  robot_description        : {len(urdf)} chars'
-          f'{"  <-- EMPTY, check .setup_assistant" if len(urdf) < 100 else ""}')
+          f'{"  <-- EMPTY！URDF 没被读进来" if len(urdf) < 100 else ""}')
     print(f'  kinematics groups        : '
           f'{list(moveit_config.robot_description_kinematics.keys())}')
     print(f'  planning_pipelines       : '

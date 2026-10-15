@@ -323,14 +323,22 @@ def main():
                      'success and the arm does not move.')
 
     # ------------------------------------------------- setup assistant file --
+    #
+    # Two separate things are checked here, because getting the first right and
+    # the second wrong is exactly the bug that cost a long debugging session:
+    #   1. the file's CONTENT must point at the real URDF package/path;
+    #   2. the file must be INSTALLED to the share root, which is the only place
+    #      MoveItConfigsBuilder looks on Humble. `install(DIRECTORY config ...)`
+    #      puts it under share/config/, where the builder never looks, and it
+    #      then silently falls back to a config/dummy2.urdf that does not exist.
     print()
     print('=' * 74)
-    print('6. .setup_assistant points at a real URDF')
+    print('6. .setup_assistant: content AND installed location')
     print('=' * 74)
-    sa = os.path.join(PKG, '.setup_assistant')
+    sa = os.path.join(PKG, 'config', '.setup_assistant')
     if not os.path.exists(sa):
-        fail('.setup_assistant is missing; MoveItConfigsBuilder will infer the '
-             'URDF package from the package NAME and fail, because '
+        fail('config/.setup_assistant is missing; MoveItConfigsBuilder will '
+             'infer the URDF package from the package NAME and fail, because '
              '"dummy_vc_moveit_config" implies "dummy_vc_description"')
     else:
         text = open(sa, encoding='utf-8').read()
@@ -348,6 +356,28 @@ def main():
             if r.group(1) and not re.search(r'use_xacro:\s*true', text):
                 note('.setup_assistant does not set use_xacro: true, but the '
                      'description file is a .xacro')
+
+    # The install rule. Without it the file never reaches the share root.
+    cmake = os.path.join(PKG, 'CMakeLists.txt')
+    cmake_text = open(cmake, encoding='utf-8').read() if os.path.exists(cmake) else ''
+    if re.search(r'install\(\s*FILES\s+config/\.setup_assistant', cmake_text):
+        ok('CMakeLists.txt installs config/.setup_assistant to the share root')
+    else:
+        fail('CMakeLists.txt does not `install(FILES config/.setup_assistant '
+             'DESTINATION share/${PROJECT_NAME})`. Without it the file lands '
+             'at share/config/.setup_assistant, where MoveItConfigsBuilder '
+             'never looks on Humble, and robot_description ends up empty.')
+
+    # The launch file must not depend on that lookup at all any more.
+    launch = os.path.join(PKG, 'launch', 'demo.launch.py')
+    launch_text = (open(launch, encoding='utf-8').read()
+                   if os.path.exists(launch) else '')
+    if re.search(r'\.robot_description\(\s*\n?\s*file_path=', launch_text):
+        ok('demo.launch.py passes the URDF path explicitly')
+    else:
+        fail('demo.launch.py does not pass robot_description(file_path=...) '
+             'explicitly; it is relying on the .setup_assistant inference that '
+             'silently falls back to a non-existent config/dummy2.urdf')
 
     print()
     print('=' * 74)

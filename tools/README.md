@@ -3,7 +3,7 @@
 把"靠眼睛看、靠记忆猜"的事情变成可复现的检查。除标注"需要 ROS"或"需要硬件"
 的以外，都不依赖 ROS 环境，Windows 和 Ubuntu 上都可直接用 Python 执行。
 
-**目前 46 个工具 + 本文件。** 数量不少，所以下面按用途分组。
+**目前 45 个工具 + 本文件。** 数量不少，所以下面按用途分组。
 
 **曾经有 52 个。** 2026-10-14 清理掉了 9 个：8 个是排查特定假设时写的一次性
 脚本（问题定位后不会再被用到），加上 1 个结论本来就是错的。**其中的结论都
@@ -228,16 +228,27 @@ MoveIt 各发行版之间变过，**这是"同一份配置在一台机器上能�
 
 | 工具 | 作用 |
 |---|---|
-| `write_setup_assistant.py` | 生成 `.setup_assistant`（写到**包根和 config/ 两处**，见下） |
+| `write_setup_assistant.py` | 生成 `config/.setup_assistant`（**只写一处**，由 CMake 装到 share 根，见下） |
 | `yaml_min.py` | 一个够用的 YAML 读取器（本机没有 PyYAML 且装不上） |
 
 `yaml_min.py` 的理由：没有它，参数文件的错误就只能留到另一台机器上构建时才发现，
 **离线检查也就失去意义**。
 
-`write_setup_assistant.py` 写两处的原因：`MoveItConfigsBuilder` 靠这个文件推断
-URDF/SRDF 位置，找不到就退回 `config/<robot>.urdf`（不存在），于是
-`robot_description` 为空、**后续一切失败，而报错完全指不到原因**。Setup Assistant
-存在包根，但某些版本的加载器查 `config/`。
+`write_setup_assistant.py` **只写 `config/` 这一处**，理由是一条踩过的坑：
+
+`MoveItConfigsBuilder` 在 Humble 上**只去 `<share>/.setup_assistant` 找**这个文件，
+**不在 `<share>/config/` 下找**。而 `install(DIRECTORY config launch …)` 只会把它放到
+`<share>/config/.setup_assistant`。找不到时 builder 不报错，只打两条 warning 然后退回
+一个不存在的 `config/dummy2.urdf`，于是 `robot_description` 为空，报错在三个地方各出现
+一次、**没有一条提到 URDF**。
+
+所以：源文件留在 `config/`（Setup Assistant 自己的习惯），`CMakeLists.txt` 里用
+`install(FILES config/.setup_assistant DESTINATION share/${PROJECT_NAME})` 装到 share
+根目录。以前"写两处以防万一"的做法是错的 —— 有一处 builder 根本不看，而"源码里在、
+装进去的里面不在"正是这个 bug 最难查的地方。
+
+**改这个文件之后必须重新 `colcon build`**，并且删掉该包的 `build/` 和 `install/`：
+`install(DIRECTORY …)` 没有依赖跟踪。
 
 ---
 

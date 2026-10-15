@@ -38,7 +38,7 @@ import sys
 # name -> (package that owns it, path inside that package)
 # `None` as the package means "inside dummy_vc_moveit_config itself".
 CONFIG_FILES = [
-    ('.setup_assistant',              None,                         'config/.setup_assistant'),
+    ('.setup_assistant',              None,                         '.setup_assistant'),
     ('SRDF',                          None,                         'config/dummy2.srdf'),
     ('joint limits',                  None,                         'config/joint_limits.yaml'),
     ('kinematics',                    None,                         'config/kinematics.yaml'),
@@ -148,10 +148,18 @@ def check_files(get_share, PackageNotFoundError, found):
 
 
 def read_setup_assistant(share):
-    """Read the URDF/SRDF locations out of .setup_assistant without PyYAML."""
-    path = os.path.join(share, 'config', '.setup_assistant')
-    if not os.path.isfile(path):
-        return None, None, None
+    """Read the URDF/SRDF locations out of .setup_assistant without PyYAML.
+
+    Returns (urdf_pkg, urdf_rel, srdf_rel, where). `where` records WHICH copy was
+    read, because the builder only accepts one of them and a file in the wrong
+    place looks exactly like a working setup until the launch fails.
+    """
+    for where in ('.setup_assistant', os.path.join('config', '.setup_assistant')):
+        path = os.path.join(share, where)
+        if os.path.isfile(path):
+            break
+    else:
+        return None, None, None, None
     urdf_pkg = urdf_rel = srdf_rel = None
     section = None
     with open(path, encoding='utf-8') as handle:
@@ -178,7 +186,57 @@ def read_setup_assistant(share):
                 urdf_rel = value
             elif section == 'srdf' and key == 'relative_path':
                 srdf_rel = value
-    return urdf_pkg, urdf_rel, srdf_rel
+    return urdf_pkg, urdf_rel, srdf_rel, where
+
+
+def check_setup_assistant_location(found):
+    """The single check whose absence cost a whole debugging session.
+
+    MoveItConfigsBuilder on Humble looks for `<share>/.setup_assistant` and
+    nowhere else. `install(DIRECTORY config launch ...)` puts the file at
+    `<share>/config/.setup_assistant`, so the lookup misses, the builder falls
+    back to a `config/dummy2.urdf` that does not exist, and robot_description is
+    empty -- while the errors that appear mention neither the file nor the
+    lookup. Checking the exact path here turns that into one obvious line.
+    """
+    print()
+    print('=' * 70)
+    print('2b. builder 到底去哪找 .setup_assistant（Humble 只认 share 根目录）')
+    print('=' * 70)
+    share = found.get(MOVEIT_PACKAGE)
+    if not share:
+        _bad('dummy_vc_moveit_config 的 share 目录没找到，跳过')
+        return False
+
+    at_root = os.path.join(share, '.setup_assistant')
+    in_config = os.path.join(share, 'config', '.setup_assistant')
+    for label, path in (('share 根目录（builder 只会找这里）', at_root),
+                        ('config/（builder 不认）', in_config)):
+        if os.path.isfile(path):
+            _ok(f'{label}: {path}  ({os.path.getsize(path)} 字节)')
+        else:
+            print(f'  [--] {label}: 不存在')
+
+    try:
+        entries = sorted(os.listdir(share))
+    except OSError as exc:
+        _bad(f'列不出 share 目录: {exc}')
+        return False
+    print(f'       share 根目录实际内容: {entries}')
+
+    if os.path.isfile(at_root):
+        _ok('位置正确 —— builder 能读到它')
+        return True
+    _bad('share 根目录没有 .setup_assistant！')
+    print('       builder 会报 "Cannot infer URDF/SRDF ... using config/dummy2.urdf"，')
+    print('       而 config/dummy2.urdf 不存在 → robot_description 为空。')
+    if os.path.isfile(in_config):
+        print('       文件在 config/ 下 —— 那是 install(DIRECTORY config ...) 的结果。')
+        print('       修法：CMakeLists.txt 里加一条')
+        print('           install(FILES config/.setup_assistant')
+        print('                   DESTINATION share/${PROJECT_NAME})')
+        print('       然后删掉 install/ 和 build/ 里这个包，重新 colcon build。')
+    return False
 
 
 def check_urdf(found):
@@ -191,7 +249,7 @@ def check_urdf(found):
         _bad('dummy_vc_moveit_config 的 share 目录没找到，跳过')
         return False
 
-    urdf_pkg, urdf_rel, srdf_rel = read_setup_assistant(moveit_share)
+    urdf_pkg, urdf_rel, srdf_rel, where = read_setup_assistant(moveit_share)
     if urdf_pkg is None and urdf_rel is None:
         _bad('.setup_assistant 读不出内容（文件缺失或格式不对）')
         print('       builder 找不到它就会退回 config/dummy2.urdf —— 那个文件不存在，')
@@ -199,6 +257,11 @@ def check_urdf(found):
         return False
 
     _ok(f'.setup_assistant 声明: urdf 包={urdf_pkg!r} 路径={urdf_rel!r} srdf={srdf_rel!r}')
+    print(f'       读到的是: {where}')
+    if where != '.setup_assistant':
+        _bad(f'这份 .setup_assistant 在 {where}，但 Humble 的 builder 只看 share 根目录')
+        print('       build 时它会在 share 根下读不到，然后回退到 config/dummy2.urdf。')
+        return False
 
     if urdf_pkg != URDF_PACKAGE:
         _bad(f'.setup_assistant 里写的包是 {urdf_pkg!r}，但仓库里的包叫 {URDF_PACKAGE!r}')
@@ -250,8 +313,10 @@ def check_python_read(get_share, PackageNotFoundError, found):
         _bad('包目录不全，跳过')
         return
 
-    _urdf_pkg, urdf_rel, _srdf_rel = read_setup_assistant(moveit_share)
-    urdf_path = os.path.join(urdf_share, urdf_rel or 'urdf/dummy2_urdf.xacro')
+    _urdf_pkg, _urdf_rel, _srdf_rel, _where = read_setup_assistant(moveit_share)
+    # The launch files pass this path explicitly now, so check the same one they
+    # will pass -- not whatever .setup_assistant happens to say.
+    urdf_path = os.path.join(urdf_share, 'urdf', 'dummy2_urdf.xacro')
 
     raw = None
     if xacro is not None and os.path.isfile(urdf_path):
@@ -314,6 +379,7 @@ def main():
 
     found = check_packages(get_share, PackageNotFoundError)
     missing = check_files(get_share, PackageNotFoundError, found)
+    sa_ok = check_setup_assistant_location(found)
     urdf_ok = check_urdf(found)
     try:
         check_python_read(get_share, PackageNotFoundError, found)
@@ -330,11 +396,15 @@ def main():
         print('        colcon build --symlink-install --packages-select '
               'dummy2_urdf dummy_vc_moveit_config')
         return 1
+    if not sa_ok:
+        print('结论: .setup_assistant 没装在 share 根目录 —— 这就是 robot_description 为空的原因')
+        return 1
     if not urdf_ok:
         print('结论: 配置文件都在，但 URDF 找不到或读不出来 —— robot_description 会是空的')
         return 1
     print('结论: 所有路径都能解析。如果 launch 里 robot_description 仍为空，')
-    print('      把第 4 节的输出发回来 —— 说明问题在 xacro 展开或参数形状，不在路径。')
+    print('      接着跑 python3 tools/check_moveit_builder.py —— 那一步看的是真实 builder')
+    print('      返回了什么，而不是文件在不在。')
     return 0
 
 

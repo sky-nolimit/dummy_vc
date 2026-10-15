@@ -11,11 +11,16 @@ so it cannot see what the *real* builder produces.
 This script runs the real thing and dumps the answer:
 
     MoveItConfigsBuilder('dummy2', package_name='dummy_vc_moveit_config')
+        .robot_description(file_path=urdf_path)          # explicit, absolute
         .robot_description_semantic(file_path='config/dummy2.srdf')
         .joint_limits(file_path='config/joint_limits.yaml')
         .trajectory_execution(file_path='config/moveit_controllers.yaml')
 
--- byte for byte the same chain `launch/demo.launch.py` uses.
+-- the same chain `launch/demo.launch.py` uses, including the explicit URDF
+path. (The URDF is passed explicitly because on Humble the builder only finds
+`.setup_assistant` at the share ROOT; when it does not, it silently falls back
+to a `config/dummy2.urdf` that does not exist and robot_description ends up
+empty. See the `Cannot infer` diagnosis below.)
 
 It prints the RAW value of each attribute (its Python type and repr), then
 judges the three things the launch banner prints as counts:
@@ -41,11 +46,23 @@ import os
 import sys
 
 
+def urdf_path_for(package='dummy2_urdf_description',
+                  relative=os.path.join('urdf', 'dummy2_urdf.xacro')):
+    """Absolute path to the URDF, resolved the same way the launch files do.
+
+    Kept identical to demo.launch.py on purpose: a diagnostic that resolves a
+    different path than the launch proves nothing about the launch.
+    """
+    from ament_index_python.packages import get_package_share_directory
+    return os.path.join(get_package_share_directory(package), relative)
+
+
 # The exact chain from launch/demo.launch.py. Keep the two in step.
-def build():
+def build(urdf_path):
     from moveit_configs_utils import MoveItConfigsBuilder
     return (MoveItConfigsBuilder('dummy2',
                                  package_name='dummy_vc_moveit_config')
+            .robot_description(file_path=urdf_path)
             .robot_description_semantic(file_path='config/dummy2.srdf')
             .joint_limits(file_path='config/joint_limits.yaml')
             .trajectory_execution(file_path='config/moveit_controllers.yaml'))
@@ -158,9 +175,14 @@ def judge_robot_description(desc):
     urdf = desc.get('robot_description', '')
     if not isinstance(urdf, str) or len(urdf) < 100:
         print(f'  [!!] 里面没有可用的 URDF（拿到 {len(str(urdf))} 字符）')
-        print('       文件都在、xacro 也能展开，但 builder 没把 URDF 放进来。')
-        print('       下一步看上面打印的键名 —— 如果键名不是 robot_description，')
-        print('       而是以文件名/包名为名的键，那就是加载路径走错了。')
+        print('       注意上面那些 WARNING —— 如果出现')
+        print('           "File <share>/config/dummy2.urdf doesn\'t exist"')
+        print('       那 builder 根本没去读真正的 URDF：Humble 只在 share 根目录找')
+        print('       .setup_assistant，找不到就回退到不存在的 config/dummy2.urdf。')
+        print('       launch 现在已经显式传 URDF 绝对路径，所以这条只会在')
+        print('       install/ 里的 launch 还是旧版本时出现 —— 先重新 colcon build。')
+        print('       否则看上面打印的键名：键名不是 robot_description 而是别的，')
+        print('       就是加载路径走错了。')
         return False
     print(f'  [ok] URDF 有 {len(urdf)} 字符')
     for token in ('<robot', 'base_link', 'gripper_tcp'):
@@ -208,6 +230,8 @@ def judge_kinematics(kin, groups=('dummy_arm', 'gripper')):
     if len(keys) == 1:
         print(f'       只有一个键 {keys[0]!r} —— 加载器把整个文件包了一层。')
         print('       这会让 move_group 找不到任何规划组的运动学解算器。')
+        print('       注：robot_description 为空时，这一项是连带症状 —— 先修判定 1，')
+        print('       再回来看这里。两边都修好时，这一项应当直接是组名。')
     return False
 
 
@@ -260,7 +284,20 @@ def main():
     check_chain_matches_launch()
     print()
     try:
-        builder = build()
+        urdf_path = urdf_path_for()
+    except Exception as exc:                                  # noqa: BLE001
+        print(f'  [!!] 解析 URDF 路径失败: {type(exc).__name__}: {exc}')
+        print('       dummy2_urdf_description 没构建出来，或者没 source install/setup.bash。')
+        return 1
+    print(f'  显式传入的 URDF = {urdf_path}')
+    if not os.path.isfile(urdf_path):
+        print('  [!!] 这个文件不存在。launch 里现在也是显式传这条路径，会直接报错 ——')
+        print('       先跑 python3 tools/check_moveit_vm_paths.py 看是哪一层没装进去。')
+        return 1
+    print(f'  [ok] 文件存在（{os.path.getsize(urdf_path)} 字节）')
+    print()
+    try:
+        builder = build(urdf_path)
         print('  [ok] builder 构造成功')
     except Exception as exc:                                  # noqa: BLE001
         print(f'  [!!] builder 构造失败: {type(exc).__name__}: {exc}')

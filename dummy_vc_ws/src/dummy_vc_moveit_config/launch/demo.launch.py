@@ -48,10 +48,34 @@ from moveit_configs_utils import MoveItConfigsBuilder
 
 def generate_launch_description():
     share = get_package_share_directory('dummy_vc_moveit_config')
+    urdf_share = get_package_share_directory('dummy2_urdf_description')
+
+    # The URDF is named EXPLICITLY instead of being left to inference.
+    #
+    # MoveItConfigsBuilder otherwise has to work out where the URDF lives, and
+    # on Humble it only looks at `<share>/.setup_assistant` -- not at
+    # `config/.setup_assistant`. When that lookup fails it does NOT raise; it
+    # logs `Cannot infer URDF ... using config/dummy2.urdf`, that file does not
+    # exist either, and you get an empty robot_description. The three errors
+    # this produces (empty robot_description in robot_state_publisher, missing
+    # robot_description in move_group, empty document in rviz2) mention neither
+    # the URDF nor the lookup.
+    #
+    # Passing the path removes the guess. The check below turns the remaining
+    # silent fallback into a loud failure.
+    urdf_path = os.path.join(urdf_share, 'urdf', 'dummy2_urdf.xacro')
+    if not os.path.isfile(urdf_path):
+        raise RuntimeError(
+            f'URDF 不在 {urdf_path}。dummy2_urdf_description 没构建出来，'
+            f'或者它的 urdf/ 没有装进 share/。先跑：\n'
+            f'    python3 tools/check_moveit_vm_paths.py\n'
+            f'（不在这里静默回退，是因为回退的后果是一串指向别处的报错）')
 
     builder = MoveItConfigsBuilder(
         'dummy2',
         package_name='dummy_vc_moveit_config',
+    ).robot_description(
+        file_path=urdf_path,
     ).robot_description_semantic(
         file_path='config/dummy2.srdf',
     ).joint_limits(
@@ -71,7 +95,7 @@ def generate_launch_description():
     print('=' * 70)
     urdf = robot_description.get('robot_description', '')
     print(f'  robot_description        : {len(urdf)} chars'
-          f'{"  <-- EMPTY, check .setup_assistant" if len(urdf) < 100 else ""}')
+          f'{"  <-- EMPTY！URDF 没被读进来" if len(urdf) < 100 else ""}')
     print(f'  robot_description_semantic: {len(str(semantic))} chars')
     print(f'  robot_description_kinematics groups: '
           f'{list(moveit_config.robot_description_kinematics.keys())}')
