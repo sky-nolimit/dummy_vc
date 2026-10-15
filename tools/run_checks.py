@@ -20,6 +20,12 @@ this project's worst bugs:
                           and that every `check.<method>` exists. That script
                           only ever runs on the VM, where a typo costs a whole
                           round trip and shows up as a meaningless ValueError.
+    selftest_check_rviz_plugin
+                          the RViz plugin diagnostic against four fake ROS
+                          prefixes, because it too only ever runs on the VM --
+                          and when it is wrong it reports "zero panel plugins",
+                          which is indistinguishable from the fault it is there
+                          to diagnose.
 
 Usage:
     python tools/run_checks.py            # everything
@@ -93,6 +99,8 @@ CHECKS = [
      'the waiting logic behaves on simulated slow devices', False, []),
     ('selftest_verify_moveit.py',
      'the MoveIt verifier unpacks its own helpers correctly', True, []),
+    ('selftest_check_rviz_plugin.py',
+     'the RViz plugin diagnostic reads the ament plugin index right', True, []),
 ]
 
 

@@ -3,7 +3,8 @@
 把"靠眼睛看、靠记忆猜"的事情变成可复现的检查。除标注"需要 ROS"或"需要硬件"
 的以外，都不依赖 ROS 环境，Windows 和 Ubuntu 上都可直接用 Python 执行。
 
-**目前 46 个工具 + 本文件。** 数量不少，所以下面按用途分组。
+**目前 48 个工具 + 本文件**（数的是 `tools/` 下的文件，去掉本文件和
+`ssh_config_for_github` 那个配置模板）。数量不少，所以下面按用途分组。
 
 **曾经有 52 个。** 2026-10-14 清理掉了 9 个：8 个是排查特定假设时写的一次性
 脚本（问题定位后不会再被用到），加上 1 个结论本来就是错的。**其中的结论都
@@ -21,7 +22,7 @@
 python tools/run_checks.py
 ```
 
-**12 项一次过**，不需要硬件也不需要 source ROS。它串起下面这些：
+**13 项一次过**，不需要硬件也不需要 source ROS。它串起下面这些：
 
 | 工具 | 作用 |
 |---|---|
@@ -39,6 +40,7 @@ python tools/run_checks.py
 | `selftest_conversion.py` | **标定自测**：锚点、收缩姿态折叠、往返恒等、三处默认值一致 |
 | `selftest_wait.py` | 等待逻辑对**模拟的**慢速设备（含起步延迟）是否可靠 |
 | `selftest_verify_moveit.py` | 静态自查 `verify_moveit_vm.py` 自己的调用点（解包元数、`check.xxx` 是否存在、有没有"在 A 函数里 import 却给 B 函数用"）。**它只能在虚拟机上跑，一个笔误要花一个来回**，所以在本地先查 |
+| `selftest_check_rviz_plugin.py` | 用**假 ROS 前缀**把 `check_rviz_plugin.py` 的四种情形在本地跑一遍（索引标记齐全 / 缺标记 / 标记指向不存在的文件 / XML 根本没装）。它同样只在虚拟机上跑，**而它出错时报的是"一个 panel 都没装"，跟它要诊断的故障一模一样** |
 
 ### 三个最关键的检查，以及为什么
 
@@ -177,17 +179,21 @@ pkill -f dummy_controller
 | `verify_moveit_vm.py` | ★ 向 `move_group` 真发一次规划请求，判定 MoveIt 配置是否可用。**不需要驱动、不需要硬件** —— 只规划不执行 |
 | `check_moveit_vm_paths.py` | ★ 在虚拟机上打印 builder 要加载的每个文件**解析到哪个绝对路径、存不存在**。`robot_description` 为空时先用它 |
 | `check_moveit_builder.py` | ★ 拿**真实的 `MoveItConfigsBuilder`** 跑一遍 launch 里那条链，原样打印三个返回值并判定。路径都对但仍为空时用它 |
+| `check_rviz_plugin.py` | ★ RViz 报 `Declared types are <EMPTY>` 时用它：逐步打印插件 XML 声明了什么、**ament 插件索引**里有没有对应标记、那条标记指向的 XML 在不在、`.so` 能不能 `dlopen`。**不改系统，也不需要 rviz2 正在跑** |
 | `selftest_verify_moveit.py` | 静态自查 `verify_moveit_vm.py`：调用点解包的元数、`check.<方法>` 是否存在（见第 1 组） |
+| `selftest_check_rviz_plugin.py` | 用假 ROS 前缀离线自测 `check_rviz_plugin.py`（见第 1 组） |
 | `final_test.py` | 驱动侧最终验收测试。**第 3、4 项 FAIL 不可采信**（`/joint_states` 滞后于实际运动，见 docs/04 B1） |
 | `test_motion.sh` | 让某个关节转一个增量并报告结果（带确认提示） |
 | `send_joint_delta.py` | `test_motion.sh` 的底层实现 |
 | `debug_pose_chain.py` | 打印完整姿态链，用正运动学判断模型此刻显示的是哪种姿态 |
 | `print_joints.py` | 列出关节与 URDF 限位 |
 
-前五个需要驱动正在运行；**`verify_moveit_vm.py`、`check_moveit_vm_paths.py`、
-`check_moveit_builder.py`、`selftest_verify_moveit.py` 不需要**，后三个是给
-虚拟机/新机器第一次加载 MoveIt 配置用的（配套步骤见
-`docs/08-MoveIt虚拟机验证清单.md`）。
+上表中需要驱动正在运行的是 `final_test.py`、`test_motion.sh`、
+`send_joint_delta.py`、`debug_pose_chain.py`、`print_joints.py`；
+**`verify_moveit_vm.py`、`check_moveit_vm_paths.py`、`check_moveit_builder.py`、
+`check_rviz_plugin.py`、`selftest_verify_moveit.py`、
+`selftest_check_rviz_plugin.py` 不需要**，这几个是给虚拟机/新机器第一次加载
+MoveIt 配置用的（配套步骤见 `docs/08-MoveIt虚拟机验证清单.md`）。
 
 **顺序是三个一层套一层，别跳步：**
 
@@ -237,6 +243,39 @@ MoveIt 各发行版之间变过，**这是"同一份配置在一台机器上能�
 看起来像配置坏了，实际是脚本填错了数。填目标时用真机 `move_j` 口径还是 URDF
 口径差一个绕圈（`move_j j3=90` 对应 URDF `j3=-90`，而 URDF 上限只有 45），极易
 搞混，所以脚本先按实测限位自检一遍再启动 ROS。
+
+`check_rviz_plugin.py` 的理由：RViz 那句报错里**真正有信息量的是
+`Declared types are <EMPTY>`** —— 空列表说明 pluginlib **一个 panel 都没读出来**，
+而不是"MoveIt 的插件没装"。这两件事看的地方根本不同：**装没装**看磁盘上有没有
+XML，**读没读到**看 ament 插件索引里那条标记
+
+```
+<prefix>/share/ament_index/resource_index/rviz_common__pluginlib__plugin/<包名>
+```
+
+指向哪个 XML。两者可以不一致 —— XML 好好躺在 `share/` 里、索引里却没有，
+症状就是这句空列表。所以脚本按 0~6 段逐段判定并给出结论：
+
+0. 环境（`ROS_DISTRO`、两条 PATH、`rviz2` 在不在）
+1. 包在不在 ament 索引里、`share/` 目录在哪
+2. XML 声明了哪些类、`base_class_type` 是不是 `rviz_common::Panel`
+   （**XML 的根元素就是 `<library>`**，两种形状都处理）
+2b. **索引标记 ↔ 磁盘 XML 是否互相印证**，并列出
+   `rviz_common` / `rviz_default_plugins` / `moveit_ros_visualization` 三家的
+   标记各在不在 —— 用来区分"只有 MoveIt 的索引入了坑"和"索引整个没被读到"
+3. `.so` 在不在、能不能 `dlopen`（失败时跟一条 `ldd`，把缺的依赖点出来）
+4. `rviz_common` 自己声明了几个 panel —— 它也是 0，就说明问题不在 MoveIt
+5. `LD_PRELOAD`、运行中 `rviz2` 的 `/proc/<pid>/environ`（**RViz 是在装包之前
+   启动的话，看到的就是旧环境**）
+
+**它自己犯过一次很难发现的错**：插件的 XML **根元素就是 `<library>`**
+（`moveit_ros_visualization` 与 `rviz_default_plugins` 都是这个形状），而最初写的是
+`root.findall('library')` —— 在根元素底下找 `<library>` 子节点当然找不到，于是
+"声明的类"永远是空的。**这个 bug 在虚拟机上会伪装成"MoveIt 的 panel 一个都没装"**，
+也就是伪装成它本来要诊断的那个故障，而且看起来像是查到了证据。这就是
+`selftest_check_rviz_plugin.py` 存在的原因：用假 ROS 前缀把四种情形（标记齐全 /
+缺标记 / 标记指向不存在的文件 / XML 根本没装）在本地跑一遍，假前缀建在系统临时
+目录里，**不会往 `tools/` 里留 `.tmp_*` 垃圾**。
 
 `test_motion.sh` 把增量施加在 **URDF 空间**，由驱动自己的逆变换处理设备侧换算，
 所以脚本不需要知道 move_j/angle 的偏置 —— **只有一个地方懂换算**。
