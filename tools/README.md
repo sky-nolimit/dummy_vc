@@ -3,7 +3,7 @@
 把"靠眼睛看、靠记忆猜"的事情变成可复现的检查。除标注"需要 ROS"或"需要硬件"
 的以外，都不依赖 ROS 环境，Windows 和 Ubuntu 上都可直接用 Python 执行。
 
-**目前 44 个工具 + 本文件。** 数量不少，所以下面按用途分组。
+**目前 45 个工具 + 本文件。** 数量不少，所以下面按用途分组。
 
 **曾经有 52 个。** 2026-10-14 清理掉了 9 个：8 个是排查特定假设时写的一次性
 脚本（问题定位后不会再被用到），加上 1 个结论本来就是错的。**其中的结论都
@@ -139,14 +139,33 @@ pkill -f dummy_controller
 | 工具 | 作用 |
 |---|---|
 | `verify_moveit_vm.py` | ★ 向 `move_group` 真发一次规划请求，判定 MoveIt 配置是否可用。**不需要驱动、不需要硬件** —— 只规划不执行 |
+| `check_moveit_vm_paths.py` | ★ 在虚拟机上打印 builder 要加载的每个文件**解析到哪个绝对路径、存不存在**。`robot_description` 为空时先用它 |
 | `final_test.py` | 驱动侧最终验收测试。**第 3、4 项 FAIL 不可采信**（`/joint_states` 滞后于实际运动，见 docs/04 B1） |
 | `test_motion.sh` | 让某个关节转一个增量并报告结果（带确认提示） |
 | `send_joint_delta.py` | `test_motion.sh` 的底层实现 |
 | `debug_pose_chain.py` | 打印完整姿态链，用正运动学判断模型此刻显示的是哪种姿态 |
 | `print_joints.py` | 列出关节与 URDF 限位 |
 
-前五个需要驱动正在运行；**`verify_moveit_vm.py` 不需要**，它是给虚拟机/新机器
-第一次加载 MoveIt 配置用的（配套步骤见 `docs/08-MoveIt虚拟机验证清单.md`）。
+前五个需要驱动正在运行；**`verify_moveit_vm.py` 和 `check_moveit_vm_paths.py` 不需要**，
+后两个是给虚拟机/新机器第一次加载 MoveIt 配置用的（配套步骤见
+`docs/08-MoveIt虚拟机验证清单.md`）。
+
+**顺序是先用 `check_moveit_vm_paths.py`，再用 `verify_moveit_vm.py`。**
+前者回答"文件找得到吗"，后者回答"找到了之后配置对不对"。反过来的话，
+文件缺失会表现为规划失败，看起来像配置错误。
+
+`check_moveit_vm_paths.py` 的理由：`MoveItConfigsBuilder` 要跨两个包找文件 ——
+自己（`dummy_vc_moveit_config`）和 URDF 所在的 `dummy2_urdf_description`，而后者
+**所在的目录名和包名不一样**（`src/dummy2_urdf/` 里装的是
+`dummy2_urdf_description`），这种不一致在不同机器上解析结果可能不同。任何一处
+找不到，症状都是同一句 `robot_description` 为空，然后 `robot_state_publisher`
+报 `robot_description parameter must not be empty`、`move_group` 报
+`Could not find parameter robot_description`、`rviz2` 报 `Error document empty` ——
+**三句都没说是哪个文件**。这个脚本把那条链路一次列清楚，并且只报 `[ok]` / `[!!]`。
+
+它的第 4 节会真用 `xacro` 展开一次 URDF，并检查 `kinematics.yaml` 的顶层键是否
+正好是 `dummy_arm` / `gripper`：如果看到的是 `['robot_description_kinematics']`
+这种"以文件名命名"的单键，说明加载器把整个文件包了一层，那是另一类故障。
 
 `verify_moveit_vm.py` 的理由：RViz 里拖动能规划**不能证明配置是对的** —— 配置
 错了也可能偶尔规划成功，外行分辨不了。它直接向 `move_group` 发一个**已知可达**
