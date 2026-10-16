@@ -179,7 +179,7 @@ pkill -f dummy_controller
 | `verify_moveit_vm.py` | ★ 向 `move_group` 真发一次规划请求，判定 MoveIt 配置是否可用。**不需要驱动、不需要硬件** —— 只规划不执行 |
 | `check_moveit_vm_paths.py` | ★ 在虚拟机上打印 builder 要加载的每个文件**解析到哪个绝对路径、存不存在**。`robot_description` 为空时先用它 |
 | `check_moveit_builder.py` | ★ 拿**真实的 `MoveItConfigsBuilder`** 跑一遍 launch 里那条链，原样打印三个返回值并判定。路径都对但仍为空时用它 |
-| `check_rviz_plugin.py` | ★ RViz 报 `Declared types are <EMPTY>` 时用它：逐步打印插件 XML 声明了什么、**ament 插件索引**里有没有对应标记、那条标记指向的 XML 在不在、`.so` 能不能 `dlopen`。**不改系统，也不需要 rviz2 正在跑** |
+| `check_rviz_plugin.py` | 查 RViz 插件**链路真的断了**的故障：插件 XML 声明了什么、**ament 插件索引**里有没有对应标记、那条标记指向的 XML 在不在、`.so` 能不能 `dlopen`。**先确认不是 `moveit.rviz` 把 Display 写进了 `Panels:` 段**（见第 5 组说明）。不改系统，也不需要 rviz2 正在跑 |
 | `selftest_verify_moveit.py` | 静态自查 `verify_moveit_vm.py`：调用点解包的元数、`check.<方法>` 是否存在（见第 1 组） |
 | `selftest_check_rviz_plugin.py` | 用假 ROS 前缀离线自测 `check_rviz_plugin.py`（见第 1 组） |
 | `final_test.py` | 驱动侧最终验收测试。**第 3、4 项 FAIL 不可采信**（`/joint_states` 滞后于实际运动，见 docs/04 B1） |
@@ -244,17 +244,27 @@ MoveIt 各发行版之间变过，**这是"同一份配置在一台机器上能�
 口径差一个绕圈（`move_j j3=90` 对应 URDF `j3=-90`，而 URDF 上限只有 45），极易
 搞混，所以脚本先按实测限位自检一遍再启动 ROS。
 
-`check_rviz_plugin.py` 的理由：RViz 那句报错里**真正有信息量的是
-`Declared types are <EMPTY>`** —— 空列表说明 pluginlib **一个 panel 都没读出来**，
-而不是"MoveIt 的插件没装"。这两件事看的地方根本不同：**装没装**看磁盘上有没有
-XML，**读没读到**看 ament 插件索引里那条标记
+`check_rviz_plugin.py` 的理由：它查的是**插件链路真的断了**这一类故障 —— 包没装、
+ament 索引里缺标记、或者 XML 指向的 `.so` `dlopen` 不起来。
+
+**先说清楚一个已经踩过的坑，免得下次又走错**：RViz 报
+`... with base class type 'rviz_common::Panel' does not exist. Declared types are <EMPTY>`
+时，**这个空列表本身通常不是索引问题**。报错里的 `rviz_common::Panel` 是 rviz2
+**去查的时候用的名字**（出错的是 Panels 工厂），不是插件声明的基类。MoveIt 的插件
+XML 里写的是：
 
 ```
-<prefix>/share/ament_index/resource_index/rviz_common__pluginlib__plugin/<包名>
+<class name="moveit_rviz_plugin/MotionPlanning"
+       type="moveit_rviz_plugin::MotionPlanningDisplay"
+       base_class_type="rviz_common::Display">
 ```
 
-指向哪个 XML。两者可以不一致 —— XML 好好躺在 `share/` 里、索引里却没有，
-症状就是这句空列表。所以脚本按 0~6 段逐段判定并给出结论：
+是 **Display**。rviz2 按基类各建一个工厂，Panel 工厂里全是 Display 派生类，于是
+一个都没有 —— 空列表是**配置把这一块写进了 `Panels:` 段**的正常结果。正确做法是把
+它搬到 `Visualization Manager: Displays:` 段（`dummy_vc_ws/src/dummy_vc_moveit_config/
+config/moveit.rviz` 已改）。**先查这个，再来跑本脚本。**
+
+真需要跑本脚本时，它按 0~6 段逐段判定并给出结论：
 
 0. 环境（`ROS_DISTRO`、两条 PATH、`rviz2` 在不在）
 1. 包在不在 ament 索引里、`share/` 目录在哪
