@@ -131,7 +131,14 @@ Visualization Manager:
         Goal State Color: 250; 128; 0
         Planning Group: dummy_arm
         Query Goal State: true
-        Query Start State: false
+        # 真机上必须是 true。false 时 MotionPlanningDisplay::updateQueryStates()
+        # 不会用当前机器人状态刷新 start state —— 面板只在建立时取一次姿态，
+        # 之后就冻在那里。计划于是从"某个早就过时的姿态"出发，而执行前的自检
+        # （trajectory_execution_manager，allowed_start_tolerance 0.05 rad）拿的是
+        # 真机当前姿态，两者差多少就报多少：
+        #   Invalid Trajectory: start point deviates from current robot state
+        # 2026-10 在真机上正好卡在这一条。
+        Query Start State: true
         Show Workspace: false
         Start State Alpha: 1
         Start State Color: 0; 255; 0
