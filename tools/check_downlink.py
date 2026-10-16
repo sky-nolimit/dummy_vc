@@ -53,6 +53,23 @@ joint_2 escaped notice because +74.572 still lands inside its accepted interval
 such a command SILENTLY, taking the whole command with it. That is the
 "sent ok, arm did not move" symptom this project chased for a long time.
 
+## What this check cannot see (know its blind spot)
+
+SIGN / JOFF / MJOFF below are a COPY of the driver's algebra, not a read of the
+config. So this file proves "the driver code and these constants agree with the
+measured pairs"; it cannot see the CONFIG drifting away from the DEVICE.
+
+That is not hypothetical. `joint_offset_deg` in config/dummy_controller.yaml is
+still the old hand-anchored value, while the measured home readback is
+[0, 75.032, -90.016, -0.002, 0, -0.007] -- off by j1 +0.215 / j2 -0.460 /
+j3 -1.458 / j4 +0.908 degrees. Section 3 MEASURES exactly that residual and
+prints it (worst 1.458 deg), but its tolerance is 2.0, so it still reports [ok].
+
+"config vs measured" is only verifiable ON HARDWARE, with tools/probe_pairs.py
+and tools/probe_mapping.py. A green run here is not proof that the calibration is
+self-consistent -- it is proof that the down-link does not contradict the two
+measured poses.
+
 Usage:
     python tools/check_downlink.py
 """

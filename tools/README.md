@@ -3,7 +3,7 @@
 把"靠眼睛看、靠记忆猜"的事情变成可复现的检查。除标注"需要 ROS"或"需要硬件"
 的以外，都不依赖 ROS 环境，Windows 和 Ubuntu 上都可直接用 Python 执行。
 
-**目前 48 个工具 + 本文件**（数的是 `tools/` 下的文件，去掉本文件和
+**目前 49 个工具 + 本文件**（数的是 `tools/` 下的文件，去掉本文件和
 `ssh_config_for_github` 那个配置模板）。数量不少，所以下面按用途分组。
 
 **曾经有 52 个。** 2026-10-14 清理掉了 9 个：8 个是排查特定假设时写的一次性
@@ -22,7 +22,8 @@
 python tools/run_checks.py
 ```
 
-**13 项一次过**，不需要硬件也不需要 source ROS。它串起下面这些：
+**14 项一次过**，不需要硬件也不需要 source ROS。它串起下面这些（表的顺序就是
+`run_checks.py` 里 `CHECKS` 的顺序）：
 
 | 工具 | 作用 |
 |---|---|
@@ -30,7 +31,6 @@ python tools/run_checks.py
 | `check_syntax.py` | 全仓库 Python 语法检查（Windows 上改代码后必跑） |
 | `check_encoding.py` | 编码 / BOM / mojibake 检查（BOM 会让 Linux 上的 shebang 失效） |
 | `check_line_endings.py` | **从 git 对象里**检查换行符（Linux 收到的是 blob，不是工作区） |
-| `fix_line_endings.ps1` | 把工作区的 CRLF 批量转回 LF（PowerShell）。**排除 `reference/`** —— 那是上游原文 |
 | `check_urdf.py` | URDF 结构：XML 合法性、父子引用、树连通性、必需坐标系 |
 | `check_urdf_limits.py` | URDF 关节限位**不超过**设备实测行程 |
 | `check_moveit_config.py` | MoveIt 配置 vs URDF vs 设备实测，三处交叉校验（含规划组类型、控制器类型、robot name 一致性） |
@@ -41,13 +41,33 @@ python tools/run_checks.py
 | `selftest_wait.py` | 等待逻辑对**模拟的**慢速设备（含起步延迟）是否可靠 |
 | `selftest_verify_moveit.py` | 静态自查 `verify_moveit_vm.py` 自己的调用点（解包元数、`check.xxx` 是否存在、有没有"在 A 函数里 import 却给 B 函数用"）。**它只能在虚拟机上跑，一个笔误要花一个来回**，所以在本地先查 |
 | `selftest_check_rviz_plugin.py` | 用**假 ROS 前缀**把 `check_rviz_plugin.py` 的四种情形在本地跑一遍（索引标记齐全 / 缺标记 / 标记指向不存在的文件 / XML 根本没装）。它同样只在虚拟机上跑，**而它出错时报的是"一个 panel 都没装"，跟它要诊断的故障一模一样** |
+| `selftest_follow_joint_trajectory.py` | 离线核对 MoveIt 执行接口：action 名与 `moveit_controllers.yaml` **逐字相等**（只有两段 `/<controller_name>/<action_ns>`，重复一段单独判红）、`ActionServer` 真在 `on_activate` 里建起来、execute 回调是普通函数而不是协程、`_execute_trajectory` 每条路径都返回错误码、`_traj_executing` 一定在 `try/finally` 里清掉、执行器线程数够在运动时继续发 `/joint_states` |
 
-### 三个最关键的检查，以及为什么
+**`fix_line_endings.ps1` 不在上表里** —— 它不检查、只**修复**，也不由 `run_checks.py`
+调用，Windows 上改过文件后按 `AGENTS.md` 手动跑：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/fix_line_endings.ps1 -Check
+```
+
+`-NoProfile -ExecutionPolicy Bypass` 不能省：默认执行策略会以
+`... is not digitally signed` 直接拒绝这个脚本（**这不是脚本坏了**）。它把工作区的
+CRLF 批量转回 LF，并**排除 `reference/`** —— 那是上游原文。
+
+### 四个最关键的检查，以及为什么
 
 **`check_downlink.py`** —— 拿实测配对去验下发链。**这是唯一能抓"两个错误正好
 互相抵消"的检查**：`movej_to_angle` / `angle_to_movej` / `movej_to_urdf` 必须
 一起改，而互逆测试抓不到两个匹配的错误。它曾经抓到 j3 目标算成 −1.474、
 超出设备区间 `[45,180]`，导致**整条命令被静默丢弃**。
+
+**但它有一个盲点，别把它当成"标定自洽"的证明**：它把驱动的代数抄成了自己的常量
+（`SIGN` / `JOFF` / `MJOFF`），所以它证的是"驱动代码与这些常量彼此一致"。当**配置里的
+数字与设备实测不符**时它照样报绿 —— `joint_offset_deg` 就是这样：配置里还是旧的
+手工锚定值，与 `probe_pairs.py` 实测的 home 回读差 j1 +0.215 / j2 −0.460 /
+j3 **−1.458** / j4 +0.908 / j5 −0.035 / j6 −0.033 度（2026-10-16 的精度核对，
+决定暂不修），而 `check_downlink.py` 一直 `[ok]`。**"配置 ↔ 实测"这一段只有硬件上的
+`probe_pairs.py` / `probe_mapping.py` 能验**，离线检查覆盖不到。
 
 **`selftest_conversion.py`** 独立复算整套标定（不读驱动代码，只读配置）：
 
@@ -373,10 +393,54 @@ config/moveit.rviz` 已改）。**先查这个，再来跑本脚本。**
    发现**只是 docstring 与打印文本里的文件名**，不是 import。
    **靠 grep 名字判断依赖会出错**，必须看是不是真的 `import`。
 
-**保留的共用模块**（删任何东西前先确认它们在用）：
-`rig_common.py`（`final_test`、`selftest_wait` 用）、`device_session.py`
-（夹爪探测组用）、`yaml_min.py`（`check_moveit_config` 用）、
-`selftest_wait.py`（`final_test`、`run_checks` 用）。
+**保留的共用模块**（删任何东西前先确认它们在用；下表是 2026-10-16 用 AST 解出的
+真实 `import` 图，不是 grep 文件名）：
+
+| 模块 | 谁 import 它 |
+|---|---|
+| `fk_dummy.py` | `check_moveit_config.py`、`check_urdf_limits.py`、`debug_pose_chain.py`、`explore_signs.py`、`find_pose.py`、`fold_signs.py`、`resolve_signs.py`、`selftest_conversion.py`（**8 个，删不得**） |
+| `device_session.py` | `probe_can_wedge.py`、`probe_scan_after_hand.py` |
+| `rig_common.py` | `final_test.py`、`selftest_wait.py` |
+| `yaml_min.py` | `check_moveit_config.py` |
+
+`selftest_wait.py` **不是**被别人 import 的模块：它是被 `run_checks.py` 当脚本执行的
+一项检查（它自己 import `rig_common`）。
+
+---
+
+## 2026-10-16 复查：一个都没删，以及为什么
+
+用户要求清掉"过时无用"的脚本，于是把**全部 49 个**又审了一遍。判据和 10-14 那次
+一样：**先看"还有没有人 import 它"，再看"它守护的问题是否已结案"**。结论是
+**没有满足删除条件的** —— 每个文件都还有一个**活引用**（不是"看起来还有用"）：
+
+| 看起来可以删的 | 活引用在哪 | 结论 |
+|---|---|---|
+| `probe_moveit_api.py` | `dummy_vc_ws/src/dummy_vc_moveit_config/config/planning_scene_monitor_parameters.yaml` 里写着"在目标机上跑它"来接线 | 保留（接线还没做） |
+| `resolve_signs.py` | `fold_signs.py` 的正文点名它做"三项要求联立" | 保留（删了会留下悬空指引） |
+| `print_joints.py` | `test_motion.sh --list` 直接调用它 | 保留 |
+| `explore_signs.py` | 缺独立证据的 j1/j4/j5/j6 符号（`docs/04` 的 C1 未结案）正是它要穷举的 | 保留 |
+| `probe_mapping.py`、`probe_range.py`、`analyse_range.py` | 精度问题 2026-10-16 决定缓一缓，而"配置 ↔ 实测"只有它们能验 | 保留 |
+| 第 4 组夹爪那 8 个 | A2 未结案（`hand.*` 会卡死整机、要断电重启） | 保留 |
+| `check_*` 12 个 + `selftest_*` 5 个 | 都在 `run_checks.py` 里 | 保留 |
+
+**"老旧程度"在本仓库不构成判据**：git 里所有工具的日期都落在 2026-10-10 ~ 10-16，
+整个目录只存在了一周。10-14 那次已经把那批一次性脚本清干净了，**剩下的都在守
+未结案的问题**。
+
+**唯一"使命已完成"的是第 8 组那两个 GitHub 环境脚本**（`setup_github_remote.ps1`
++ `ssh_config_for_github`）：远端、身份、`~/.ssh/config` 都已经配好，而它们的产物
+不在仓库里，除本文件外没有别的引用。**要删得人来定** —— 删掉就等于放弃"换台机器
+重新配一遍"的现成步骤，所以本文件保留它们并在此说明。
+
+这次复查顺带修掉了**索引本身的四处错**（都是"数字对不上现实"这一类）：
+
+1. 工具数 48 → **49**（`tools/` 下 51 个文件，去掉本文件和 `ssh_config_for_github`）
+2. `run_checks.py` 的项数 13 → **14**
+3. 第一组的表**漏了 `selftest_follow_joint_trajectory.py`**，却列着**并不由
+   `run_checks.py` 执行**的 `fix_line_endings.ps1`（已挪到表外单独说明）
+4. 共用模块表**漏了被 8 个文件 import 的 `fk_dummy.py`**，并且写错了
+   `selftest_wait.py` 的角色
 
 ---
 
