@@ -22,7 +22,7 @@
 | `docs/` | ❌ | 设计文档、标定手册、缺陷记录、咨询材料 |
 | `reference/` | ❌ | 外部参考资料：Dummy 固件源码、参考 MoveIt 工作空间、上游 diff |
 
-**❌ 的两项目前只在本机磁盘上**（`docs/` 6 个文件，`reference/` 约 3900 个
+**❌ 的两项目前只在本机磁盘上**（`docs/` 8 个文件，`reference/` 约 3900 个
 文件）。`.gitignore` 已按路径忽略，所以 `git add -A` 不会再带上它们；
 要用 `git add -f` 才能强制入库。**同样的目录名在本机仍然存在且可读可改。**
 
@@ -43,6 +43,7 @@ Dummy_vc/
 │       ├── dummy2_urdf/           机械臂模型（URDF/Xacro + STL）—— 唯一模型来源
 │       ├── dummy_controller/      ROS 2 控制器（lifecycle 节点 + fibre 驱动）—— 唯一硬件通道
 │       ├── dummy_vc_calibration/  阶段 0 硬件标定节点（预览-确认-执行）
+│       ├── dummy_vc_perception/   视觉感知（几何层已落地，节点待写）
 │       └── dummy_vc_moveit_config/ MoveIt 2 配置（SRDF、限位、规划器、RViz）
 │
 ├── tools/                 不依赖 ROS 的独立工具（索引见 tools/README.md）
@@ -57,7 +58,9 @@ Dummy_vc/
 │   ├── 03-进展与问题报告.md        历史快照（问题已解决，部分结论已过时）
 │   ├── 04-已知缺陷与未决问题.md     ★ 动 URDF 几何或排查"不动"之前先看
 │   ├── 05-固件源码事实.md          固件源码摘录与行号（权威依据）
-│   └── 06-夹爪问题咨询材料.md       可直接发给商家/原作者的说明
+│   ├── 06-夹爪问题咨询材料.md       可直接发给商家/原作者的说明
+│   ├── 07-夹爪协议逆向.md          夹爪 CAN 协议逆向记录
+│   └── 08-MoveIt虚拟机验证清单.md   ★ 在虚拟机上验证 MoveIt 的逐步清单
 │
 └── reference/             ❌ 本地：只读参考资料，永不参与构建
     ├── Firmware/                  Dummy 固件源码（含带注释的核心 7 个文件）
@@ -114,7 +117,7 @@ source install/setup.bash
 
 ### 离线检查（不需要硬件，也不需要 ROS）
 
-改完代码先跑这个，**11 项一次过**：
+改完代码先跑这个，**15 项一次过**：
 
 ```bash
 python tools/run_checks.py
@@ -122,7 +125,8 @@ python tools/run_checks.py
 
 它覆盖：Python 语法、编码/BOM、换行符、URDF 结构与限位、MoveIt 配置与 URDF
 及设备实测行程的一致性、坐标换算恒等式、下发链对实测配对、标定自洽
-（锚点/收缩折叠/往返/三处默认值一致）、等待逻辑（对模拟的慢速设备）。
+（锚点/收缩折叠/往返/三处默认值一致）、等待逻辑（对模拟的慢速设备）、
+MoveIt 的 action 接口、视觉几何层（顶抓轴向/畸变/桌面反投影/夹爪映射）。
 
 ### 起驱动
 
@@ -164,9 +168,9 @@ ros2 topic pub --once /joint_trajectory_controller/joint_trajectory \
 | **1** | **修驱动**：关节名、单位、TF、轨迹、坐标换算 | ✅ 完成 |
 | 1b | 逐个关节验证方向（几何折叠 + 实测命令双重校验） | ✅ 完成 |
 | 1c | 夹爪实测 | ⛔ **阻塞** —— 见下方 |
-| **2** | **MoveIt 配置** | ✅ 配置包已建，⏳ 待在 VM 上验证 demo |
-| 3 | 驱动补强（限速、急停、GripperCommand 动作） | 部分完成 |
-| 4 | 视觉感知 | 待开始（相机未到货） |
+| **2** | **MoveIt 配置** | ✅ 真机 Plan & Execute 已连续可用（含安全退出）；配置见 `docs/08` |
+| 3 | 驱动补强（限速、急停、GripperCommand 动作） | 部分完成（FollowJointTrajectory 动作已完成） |
+| 4 | 视觉感知 | 🔸 几何层已落地并离线自测；节点待写（相机未到货） |
 | 5 | 抓取规划 + 任务状态机 | 待开始 |
 | 6 | 深度相机接入 + 手眼标定 | 待开始 |
 

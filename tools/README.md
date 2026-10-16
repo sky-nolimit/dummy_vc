@@ -3,7 +3,7 @@
 把"靠眼睛看、靠记忆猜"的事情变成可复现的检查。除标注"需要 ROS"或"需要硬件"
 的以外，都不依赖 ROS 环境，Windows 和 Ubuntu 上都可直接用 Python 执行。
 
-**目前 49 个工具 + 本文件**（数的是 `tools/` 下的文件，去掉本文件和
+**目前 50 个工具 + 本文件**（数的是 `tools/` 下的文件，去掉本文件和
 `ssh_config_for_github` 那个配置模板）。数量不少，所以下面按用途分组。
 
 **曾经有 52 个。** 2026-10-14 清理掉了 9 个：8 个是排查特定假设时写的一次性
@@ -22,7 +22,7 @@
 python tools/run_checks.py
 ```
 
-**14 项一次过**，不需要硬件也不需要 source ROS。它串起下面这些（表的顺序就是
+**15 项一次过**，不需要硬件也不需要 source ROS。它串起下面这些（表的顺序就是
 `run_checks.py` 里 `CHECKS` 的顺序）：
 
 | 工具 | 作用 |
@@ -42,6 +42,7 @@ python tools/run_checks.py
 | `selftest_verify_moveit.py` | 静态自查 `verify_moveit_vm.py` 自己的调用点（解包元数、`check.xxx` 是否存在、有没有"在 A 函数里 import 却给 B 函数用"）。**它只能在虚拟机上跑，一个笔误要花一个来回**，所以在本地先查 |
 | `selftest_check_rviz_plugin.py` | 用**假 ROS 前缀**把 `check_rviz_plugin.py` 的四种情形在本地跑一遍（索引标记齐全 / 缺标记 / 标记指向不存在的文件 / XML 根本没装）。它同样只在虚拟机上跑，**而它出错时报的是"一个 panel 都没装"，跟它要诊断的故障一模一样** |
 | `selftest_follow_joint_trajectory.py` | 离线核对 MoveIt 执行接口：action 名与 `moveit_controllers.yaml` **逐字相等**（只有两段 `/<controller_name>/<action_ns>`，重复一段单独判红）、`ActionServer` 真在 `on_activate` 里建起来、execute 回调是普通函数而不是协程、`_execute_trajectory` 每条路径都返回错误码、`_traj_executing` 一定在 `try/finally` 里清掉、执行器线程数够在运动时继续发 `/joint_states` |
+| `selftest_vision_geometry.py` | 离线核对视觉几何层（`dummy_vc_perception/geometry.py` 与 `gripper.py`）：顶抓时 TCP 三轴的朝向、针孔+畸变的投影往返、桌面反投影、单目兜底在有高度时的固有偏差、夹爪映射在未实测时必须拒绝生成指令。**它同时强制这一层不许 import ROS / OpenCV**（AST 检查），这是它能离线跑的前提 |
 
 **`fix_line_endings.ps1` 不在上表里** —— 它不检查、只**修复**，也不由 `run_checks.py`
 调用，Windows 上改过文件后按 `AGENTS.md` 手动跑：
@@ -441,6 +442,37 @@ config/moveit.rviz` 已改）。**先查这个，再来跑本脚本。**
    `run_checks.py` 执行**的 `fix_line_endings.ps1`（已挪到表外单独说明）
 4. 共用模块表**漏了被 8 个文件 import 的 `fk_dummy.py`**，并且写错了
    `selftest_wait.py` 的角色
+
+---
+
+## 2026-10-16 新增：视觉几何层，以及为什么它必须能离线自测
+
+相机还没到、夹爪 A2 还阻塞，但视觉那条链里有一层**既不碰相机也不碰夹爪**：
+把"像素 + 深度"变成 `base_link` 下的抓取点、再变成一串 TCP 位姿。这一层错了，
+后面拿真相机去调是查不出来的（三种错的外观一模一样：抓取点偏几毫米）。所以先
+把它单独落地并在这里钉住：
+
+- 新包 `dummy_vc_ws/src/dummy_vc_perception/`：`geometry.py`（针孔/畸变、光学系
+  与 URDF 的变换、桌面反投影、顶抓位姿与路点）与 `gripper.py`（开合宽度 ↔ 角度
+  的映射）。**两个文件都不 import ROS，也不 import OpenCV**（只有 numpy）。
+  `vision_node.py` 还没写。
+- `tools/selftest_vision_geometry.py` 用合成数据跑 9 组检查。它守的三类故障
+  外观完全相同，但成因分别是：**轴向约定**（顶抓时 `gripper_tcp` 的 +y 该朝下）、
+  **畸变**（不做去畸变）、**单目尺度**（有高度的物体被当成贴在桌面上的平面）。
+
+当场量出来的三个数（0.6 m 工作距离，内参取自 `fingerprinter_camera.yaml`）：
+
+| 量 | 值 | 意味着 |
+|---|---|---|
+| 1 像素 | **1.212 mm**（x）/ 1.213 mm（y） | `docs/01` 里估的"1 mm"偏乐观 |
+| 角落像素 (639, 479) 去畸变前后 | 差 **3.22 px**（≈3.9 mm） | 不做去畸变的代价和单目误差同量级 |
+| 40 mm 方块，单目把它当平面图形 | 中心被算远 **7.1 mm**（放大 1.0714 倍） | 阶段 4 的验收线是 10 mm ⇒ 只够把框架跑起来 |
+
+顺带一个发现：`dummy2_urdf.xacro` 里 `camera_link` 的**占位**姿态算出来，
+镜头方向指向 `base_link` 的 **+x**，并不是朝下 —— 所以那个兜底关节在标定之前
+不能拿来做反投影（自测里只报 note，不判红，因为它是占位值）。
+
+数字更新：工具 **49 → 50**，`run_checks.py` **14 项 → 15 项**。
 
 ---
 

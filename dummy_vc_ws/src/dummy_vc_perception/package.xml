@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>dummy_vc_perception</name>
+  <version>0.1.0</version>
+  <description>
+    视觉感知：把相机图像变成 base_link 下的抓取目标
+    （vision_msgs/Detection3DArray）。
+
+    分两层：geometry.py / gripper.py 是纯 numpy 的几何与夹爪模型，没有 ROS
+    依赖，所以能在没有 ROS 的机器上离线自测；节点只负责 ROS 接口与 TF。
+    相机到位前先用 driver 里现成的 USB 相机，接口按深度相机标准设计。
+  </description>
+  <maintainer email="dummy-vc@localhost">Dummy VC</maintainer>
+  <license>MIT</license>
+
+  <!-- 下面这两条是 geometry.py 真正用到的。
+       视觉节点落地时还要加：vision_msgs、cv_bridge、tf2_ros、
+       visualization_msgs、sensor_msgs —— 现在没写、也没用，就不声明，
+       免得 rosdep 去装一个用不上的东西。 -->
+  <depend>rclpy</depend>
+  <depend>python3-numpy</depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

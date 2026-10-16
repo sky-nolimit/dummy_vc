@@ -34,6 +34,17 @@ this project's worst bugs:
                           has enough threads to keep publishing /joint_states
                           while the arm moves. All of it offline, from the AST
                           and the config.
+    selftest_vision_geometry
+                          the vision geometry: the axis conventions of a
+                          top-down grasp, the pinhole/distortion round trip,
+                          the table back-projection, and how far the monocular
+                          fallback is off when the object has height. All three
+                          failures look identical from the outside ("the grasp
+                          point is a few millimetres off"), and all three are
+                          cheap to pin down with synthetic data -- so they are
+                          pinned down here rather than on the arm. It also
+                          enforces that the geometry layer imports no ROS and
+                          no OpenCV, which is why it can run at all.
 
 Usage:
     python tools/run_checks.py            # everything
@@ -111,6 +122,9 @@ CHECKS = [
      'the RViz plugin diagnostic reads the ament plugin index right', True, []),
     ('selftest_follow_joint_trajectory.py',
      'the MoveIt action contract: name, server, execute, executor', True, []),
+    ('selftest_vision_geometry.py',
+     'the vision geometry: axis conventions, distortion, table projection', True,
+     []),
 ]
 
 
