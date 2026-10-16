@@ -26,6 +26,14 @@ this project's worst bugs:
                           and when it is wrong it reports "zero panel plugins",
                           which is indistinguishable from the fault it is there
                           to diagnose.
+    selftest_follow_joint_trajectory
+                          the FollowJointTrajectory contract MoveIt executes
+                          through: the action name, that the server is really
+                          constructed in on_activate, that the execute callback
+                          returns instead of yielding, and that the executor
+                          has enough threads to keep publishing /joint_states
+                          while the arm moves. All of it offline, from the AST
+                          and the config.
 
 Usage:
     python tools/run_checks.py            # everything
@@ -101,6 +109,8 @@ CHECKS = [
      'the MoveIt verifier unpacks its own helpers correctly', True, []),
     ('selftest_check_rviz_plugin.py',
      'the RViz plugin diagnostic reads the ament plugin index right', True, []),
+    ('selftest_follow_joint_trajectory.py',
+     'the MoveIt action contract: name, server, execute, executor', True, []),
 ]
 
 

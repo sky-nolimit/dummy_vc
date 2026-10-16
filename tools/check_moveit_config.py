@@ -370,7 +370,7 @@ def main():
         # ACTION, so a driver that only subscribes to a topic cannot be driven
         # by MoveIt, however the names are set. Report that as a TODO rather
         # than a failure: the demo plans fine without an action server, and the
-        # fix belongs to the driver (docs/01 stage 3.1), not to this config.
+        # fix belongs to the driver, not to this config.
         drv_py = os.path.join(REPO, 'dummy_vc_ws', 'src', 'dummy_controller',
                               'dummy_controller', 'dummy_controller.py')
         src = open(drv_py, encoding='utf-8').read()
@@ -393,11 +393,42 @@ def main():
                      'server the two would not meet.')
             has_action = 'FollowJointTrajectory' in [
                 (scm.get(n) or {}).get('type') for n in names]
-            if has_action and 'ActionServer' not in src and \
-                    'follow_joint_trajectory' not in src:
+            if has_action and 'ActionServer' not in src:
                 note('driver has no FollowJointTrajectory action server yet; '
-                     'planning works, EXECUTION will not move the arm. '
-                     'See docs/01 stage 3.1.')
+                     'planning works, EXECUTION will not move the arm. The '
+                     'action name only has to match /<controller>/<action_ns>.')
+            elif has_action:
+                # The action name is the one failure mode the driver cannot
+                # report clearly: MoveIt just says "client not connected", the
+                # same sentence for every kind of mismatch. So compare the
+                # driver's configured name with what this file implies.
+                #
+                # The prefix is not guessed: the string MoveIt looks for is
+                # "<controller_name>/<action_ns>", and writing
+                # follow_joint_trajectory a second time is the mistake this
+                # catches (action_ns already carries that name).
+                drv_cfg = os.path.join(REPO, 'dummy_vc_ws', 'src',
+                                       'dummy_controller', 'config',
+                                       'dummy_controller.yaml')
+                cfg_text = open(drv_cfg, encoding='utf-8').read()
+                am = re.search(r'^\s*trajectory_action_name\s*:\s*(\S+)',
+                               cfg_text, re.M)
+                if not am:
+                    note('the driver creates an action server but its config '
+                         'has no trajectory_action_name, so the name could not '
+                         'be compared')
+                elif (scm.get(names[0]) or {}).get('action_ns'):
+                    ns0 = (scm.get(names[0]) or {}).get('action_ns')
+                    expected = f'/{names[0]}/{ns0}'
+                    if am.group(1) == expected:
+                        ok(f'driver action name {am.group(1)} matches what '
+                           f'MoveIt looks for ({expected})')
+                    else:
+                        fail(f'driver serves the action on {am.group(1)}, but '
+                             f'MoveIt looks for {expected} '
+                             f'(controller_names[0] + action_ns). Both '
+                             'mistakes print the same "Action client not '
+                             'connected" line, so check this first.')
 
     # ------------------------------------------------- setup assistant file --
     #

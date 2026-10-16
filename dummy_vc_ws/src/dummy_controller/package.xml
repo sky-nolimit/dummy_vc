@@ -15,6 +15,13 @@
   <depend>trajectory_msgs</depend>
   <depend>std_srvs</depend>
 
+  <!-- MoveIt 执行接口。缺 control_msgs 时 `from control_msgs.action import
+       FollowJointTrajectory` 直接 ImportError，节点起不来；缺 action_msgs
+       时它不报错，但 Result 里的错误码常量找不到，于是 execute 的失败原因
+       只能写成一个猜的数字。两个都是硬依赖，不是可选依赖。 -->
+  <depend>control_msgs</depend>
+  <depend>action_msgs</depend>
+
   <!-- launch 文件用到 -->
   <exec_depend>xacro</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>

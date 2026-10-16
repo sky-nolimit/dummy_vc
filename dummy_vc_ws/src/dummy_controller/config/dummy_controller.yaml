@@ -323,3 +323,50 @@ dummy_controller:
     # on_configure 里同步等待就会冻死整个节点，连 /joint_states 都不发。
     # 超时后放弃夹爪、继续启动，机械臂本体仍可用。
     gripper_init_timeout_sec: 5.0
+
+    # =====================================================================
+    # MoveIt 执行接口（FollowJointTrajectory action server）
+    #
+    # ★ 这一段回答的是"规划成功、Execute 不动"那个问题。
+    #
+    # MoveIt 的控制器插件（moveit_simple_controller_manager）**只会通过
+    # action 下发轨迹**，没有任何"只发 topic"的内置类型。所以一个只订阅
+    # /joint_trajectory_controller/joint_trajectory 的驱动，无论配置怎么写，
+    # MoveIt 都推不动它。规划是纯计算的，所以一路绿灯；只有 Execute 会报
+    #
+    #     Action client not connected to action server:
+    #     joint_trajectory_controller/follow_joint_trajectory
+    #
+    # 修复方向是"驱动长出一个 action server"，不是"给 MoveIt 写插件"：
+    # 轨迹执行的逻辑（重排、整圈折算、按 time_from_start 节拍下发）已经在
+    # 驱动里了，只是门口的形状不对。
+    # =====================================================================
+
+    # 是否创建 action server。
+    #
+    # 默认 true。设为 false 时驱动退回"只有 topic 入口"的状态：规划照旧
+    # 能用，Execute 会报上面那条错。留这个开关是为了在**没有 MoveIt 的环境**
+    # 里调试驱动本身 —— 那时一个多余的 action server 只会让日志变吵。
+    trajectory_action_enable: true
+
+    # action server 名。**必须与 moveit_controllers.yaml 逐字对上**：
+    #
+    #     /<controller_name>/<action_ns>
+    #     controller_name = joint_trajectory_controller
+    #     action_ns       = follow_joint_trajectory
+    #
+    # **只有两段。** `action_ns` 本身就写成 follow_joint_trajectory，所以名字
+    # 看起来像"controller + 动作类型"。顺势再补一个 follow_joint_trajectory
+    # 是错的，而且"少一段"和"重复一段"报的错一模一样 —— 都是上面那句
+    # Action client not connected，看起来像"MoveIt 没启动"，很容易查错方向。
+    #
+    # 交叉核对：python3 tools/selftest_follow_joint_trajectory.py
+    # （它会单独判一次"同一段重复了两次"）
+    trajectory_action_name: /joint_trajectory_controller/follow_joint_trajectory
+
+    # 进度日志节奏，Hz。0 或负数 = 只打关键点（第一个 / 每 10 个 / 最后一个）。
+    #
+    # MoveIt 等的是 **result**，不是 feedback，所以这个值不影响 Execute 能否
+    # 成功。轨迹执行中它用来决定"多密地告诉人它在动"；反馈（feedback）本身
+    # 没有实现，见 dummy_controller.py 里 declare 那段的说明。
+    trajectory_feedback_hz: 5.0

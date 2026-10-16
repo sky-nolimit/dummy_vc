@@ -1,20 +1,21 @@
 # How MoveIt sends a planned trajectory to the driver.
 #
 # ★ 重要：MoveIt 的控制器插件只会通过 **action** 下发轨迹（FollowJointTrajectory
-# 或 GripperCommand），没有"只发 topic"的内置类型。而现在的驱动是一个
-# trajectory_msgs/JointTrajectory 的**订阅者**：
+# 或 GripperCommand），没有"只发 topic"的内置类型。驱动原来只有一条
+# trajectory_msgs/JointTrajectory **订阅**：
 #
 #     topic     /joint_trajectory_controller/joint_trajectory
 #     type      trajectory_msgs/JointTrajectory
 #     timing    it sleeps until each waypoint's time_from_start is due, then
 #               sends that waypoint
 #
-# 所以**规划（demo）没问题，执行（真机）现在走不通**：MoveIt 会去找
+# 所以**规划（demo）没问题、执行（真机）走不通**：MoveIt 会去找
 # /joint_trajectory_controller/follow_joint_trajectory 这个 action server，
-# 驱动没有，于是不会真正动。这不是配置错误，是接口形态不匹配。
+# 驱动原来没有，于是不会真正动。这不是配置错误，是接口形态不匹配。
 #
-# 真机阶段要改成：驱动实现 FollowJointTrajectory action server（内部复用现有的
-# 轨迹执行逻辑即可），而不是给 MoveIt 写插件。这属于 docs/01 的阶段 3.1。
+# **驱动侧已补上**：dummy_controller 现在创建 FollowJointTrajectory action
+# server（trajectory_action_enable 默认 true），内部复用上面那条轨迹执行
+# 逻辑，原来那条 topic 入口也保留。不是给 MoveIt 写插件。
 #
 # 这里仍然要写对 type，否则 move_group 会当作"没有控制器"（见下面的注释），
 # 连规划组和控制器都关联不上。
@@ -40,16 +41,26 @@ trajectory_execution:
 # 控制器名字与驱动的关系。
 #
 # FollowJointTrajectory handle 用的是
-#     /<controller_name>/<action_ns>/follow_joint_trajectory
-# 而驱动订阅的是
+#     /<controller_name>/<action_ns>
+# 也就是 /joint_trajectory_controller/follow_joint_trajectory —— **只有两段**。
+# action_ns 的值本身就叫 follow_joint_trajectory，不要再补一段（重复一段和
+# 少一段报的错一模一样）。参考：
+# https://moveit.picknik.ai/main/doc/examples/controller_configuration/controller_configuration_tutorial.html
+#
+# 而驱动原来订阅的是
 #     /joint_trajectory_controller/joint_trajectory
 #
-# 两者**目前对不上**，这是上面那段说明的"接口形态不匹配"，不是名字写错：
-# 驱动是 topic，插件要 action。等驱动补上 action server（阶段 3.1）之后，
-# 名字保持 `joint_trajectory_controller` 即可，不需要再改名。
+# 两者**对不上**，这是"接口形态不匹配"，不是名字写错：驱动是 topic，插件要
+# action。**驱动侧已经补上 FollowJointTrajectory action server**（默认开，
+# 名字就是上面那个，见 dummy_controller.yaml 的 trajectory_action_* 参数），
+# 所以这一项不再是待办。
 #
-# tools/check_moveit_config.py 会把这个不匹配当作"待办"报出来，而不是让它
-# 悄悄过去 —— 这正是当年"MoveIt 说成功、机械臂不动"那一类问题。
+# 注意：驱动**同时**保留原来的 topic 入口（tools/ 下的脚本依赖它），所以
+# `ros2 topic list` 里那条 joint_trajectory 话题还在，那是正常的。
+#
+# tools/check_moveit_config.py 会检查"驱动源码里有没有 action server"，并据此
+# 决定要不要报这条待办；tools/selftest_follow_joint_trajectory.py 则进一步核对
+# 名字是否逐字相等。
 
 moveit_controller_manager: moveit_simple_controller_manager/MoveItSimpleControllerManager
 

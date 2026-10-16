@@ -182,6 +182,7 @@ pkill -f dummy_controller
 | `check_rviz_plugin.py` | 查 RViz 插件**链路真的断了**的故障：插件 XML 声明了什么、**ament 插件索引**里有没有对应标记、那条标记指向的 XML 在不在、`.so` 能不能 `dlopen`。**先确认不是 `moveit.rviz` 把 Display 写进了 `Panels:` 段**（见第 5 组说明）。不改系统，也不需要 rviz2 正在跑 |
 | `selftest_verify_moveit.py` | 静态自查 `verify_moveit_vm.py`：调用点解包的元数、`check.<方法>` 是否存在（见第 1 组） |
 | `selftest_check_rviz_plugin.py` | 用假 ROS 前缀离线自测 `check_rviz_plugin.py`（见第 1 组） |
+| `selftest_follow_joint_trajectory.py` | 离线核对 MoveIt 执行接口：action 名是否与 `moveit_controllers.yaml` 逐字相等（**只有两段** `/<controller_name>/<action_ns>`，重复一段会单独判）、`ActionServer` 是否真的在 `on_activate` 里建起来、execute 回调是普通函数而不是协程、`_execute_trajectory` 每条路径都返回错误码、以及执行器线程数够不够在机械臂运动时继续发 `/joint_states`。**一句话对应"规划成功、Execute 不动"那个故障** |
 | `final_test.py` | 驱动侧最终验收测试。**第 3、4 项 FAIL 不可采信**（`/joint_states` 滞后于实际运动，见 docs/04 B1） |
 | `test_motion.sh` | 让某个关节转一个增量并报告结果（带确认提示） |
 | `send_joint_delta.py` | `test_motion.sh` 的底层实现 |

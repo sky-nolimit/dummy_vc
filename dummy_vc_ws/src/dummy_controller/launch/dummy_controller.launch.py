@@ -130,6 +130,22 @@ DESCRIPTIONS = {
     'connect_timeout_sec':
         'Seconds to wait for the device. Must be > 0: a non-positive value '
         'makes fibre block forever instead of failing.',
+    'trajectory_action_enable':
+        'Create the FollowJointTrajectory action server that MoveIt executes '
+        'through. Without it planning still works but Execute fails with '
+        '"Action client not connected". Turn it off only when debugging the '
+        'driver without MoveIt.',
+    'trajectory_action_name':
+        'Name of that action server. Must equal /<controller_name>/<action_ns> '
+        'from dummy_vc_moveit_config/config/moveit_controllers.yaml, i.e. '
+        '/joint_trajectory_controller/follow_joint_trajectory. Do NOT append '
+        'follow_joint_trajectory a second time: action_ns already IS that '
+        'name, and both mistakes produce the same unhelpful error.',
+    'trajectory_feedback_hz':
+        'Rate (Hz) at which execution progress is logged to the driver log; '
+        '0 or negative logs only the first, every tenth and the last '
+        'waypoint. Feedback is NOT published on the action (MoveIt waits for '
+        'the RESULT), so this does not affect whether Execute succeeds.',
 }
 
 

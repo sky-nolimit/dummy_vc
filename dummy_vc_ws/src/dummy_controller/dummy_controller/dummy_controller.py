@@ -14,6 +14,16 @@ from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64
 
+# MoveIt 的控制器插件只通过 **action** 下发轨迹，所以驱动必须自己当 server。
+# 两个 import 都不能少：control_msgs 给 action 定义，action_msgs 给 GoalStatus
+# 和错误码常量。缺 action_msgs 时 `from control_msgs.action import
+# FollowJointTrajectory` 不会报错，但在模块里引用 GoalStatus 时会 NameError。
+from control_msgs.action import FollowJointTrajectory
+from action_msgs.msg import GoalStatus
+
+from rclpy.action import ActionServer, CancelResponse, GoalResponse
+from rclpy.callback_groups import ReentrantCallbackGroup
+
 import numpy as np
 import dummy_cli_tool.ref_tool
 
@@ -90,8 +100,34 @@ class dummy_controller(LifecycleNode):
         # 用这个命令值，而不是测量值。
         self._last_gripper_angle = None
 
+        # ------------------------------------------------------------------
         # 轨迹执行
+        #
+        # `_traj_executing` 是"机械臂正忙"的单一事实来源，**两条入口共用**：
+        #   - 旧的话题订阅 /joint_trajectory_controller/joint_trajectory
+        #     （上游驱动留下来的用法，tools/ 里的脚本还在用，不能删）
+        #   - MoveIt 用的 action server（见 init_trajectory_action_server）
+        #
+        # `_traj_lock` 保护这件事，因为它有两个线程会碰：执行器线程（两条入口
+        # 的回调都在这里）和 `_traj_thread`（真正下发 waypoint 的线程）。
+        # 没有这把锁时，"检查忙不忙"和"置忙"之间会被另一个回调插进来，
+        # 两条轨迹就会同时在动 —— 而设备的 move_j 是无状态的，结果就是
+        # 两个来源交替下发，机械臂走出一条谁都没规划过的路。
+        #
+        # 为什么执行要放到线程里：`_execute_trajectory` 按 time_from_start
+        # 逐点 sleep，一条 MoveIt 轨迹动辄几十秒。默认的单线程执行器里，
+        # 它在回调里睡多久，pub_timer（/joint_states）就停多久 —— MoveIt 和
+        # RViz 会看到机器人"消失"，而 execute 的成功判据恰恰依赖 /joint_states。
+        # fibre 协议层自己带锁（protocol.py 的 remote_endpoint_operation），
+        # 所以从别的线程调 move_j / 读关节是安全的。
+        # ------------------------------------------------------------------
         self._traj_executing = False
+        self._traj_lock = threading.Lock()
+        self._traj_thread = None
+        self._traj_action_server = None
+        # 进度日志的上一次打印时刻。这里给个初值，免得将来有人在
+        # _execute_trajectory 之外调用 _progress_log_due() 时 AttributeError。
+        self._last_progress_log = 0.0
 
         self.get_logger().info("dummy_controller_node Lifecycle node constructor called")
         self.get_logger().info(
@@ -191,6 +227,39 @@ class dummy_controller(LifecycleNode):
         # 夹爪是否初始化成功。失败、超时或被禁用后为 False。
         self.gripper_ready = False
 
+        # ------------------------------------------------------------------
+        # MoveIt 执行接口。这一段是整个"规划成功但不动"问题的正面回答。
+        # ------------------------------------------------------------------
+        self.declare_parameter('trajectory_action_enable', True)
+        # action server 名必须与 dummy_vc_moveit_config/config/moveit_controllers.yaml
+        # 里的组合**逐字相等**：
+        #     /<controller_name>/<action_ns>
+        # controller_name = joint_trajectory_controller
+        # action_ns       = follow_joint_trajectory
+        # 也就是 /joint_trajectory_controller/follow_joint_trajectory。
+        #
+        # **只有两段。** action_ns 本身就叫 follow_joint_trajectory，所以名字
+        # 看起来像"controller + 动作类型"，很容易顺势再补一个
+        # follow_joint_trajectory —— 那是错的，而且报错文本和"名字少一段"
+        # 完全一样：
+        #     Action client not connected to action server: ...
+        # 然后放弃执行 —— 规划一路是绿的，所以这个错误很容易被当成规划问题。
+        # tools/selftest_follow_joint_trajectory.py 会拿 YAML 和这里做交叉核对，
+        # 并把"同一段重复了两次"单独判一次。
+        self.declare_parameter(
+            'trajectory_action_name',
+            '/joint_trajectory_controller/follow_joint_trajectory')
+        # 发给客户端的反馈频率（Hz）。**不能太高**：反馈要和 joint_states
+        # 抢同一个执行器线程，而且它不发也能让 MoveIt 正常收尾（它等的是
+        # result）。0 或负数 = 不发反馈，这条路径最省事。
+        #
+        # 目前这个值只用来决定**执行进度日志**打多密（见 _execute_trajectory
+        # 里的 _progress_log_due）。真正的 goal_handle.publish_feedback()
+        # 没有实现：MoveIt 等的是 result，feedback 只影响 RViz 里那条进度条，
+        # 而在设备线程上发布反馈的线程安全性我无法在本机验证（本机没有 ROS）。
+        # 要么在虚拟机上验证后补上，要么接受"没有进度条"。
+        self.declare_parameter('trajectory_feedback_hz', 5.0)
+
         self.joint_sign = list(self.get_parameter('joint_sign').value)
         self.joint_offset_deg = list(
             self.get_parameter('joint_offset_deg').value)
@@ -215,6 +284,25 @@ class dummy_controller(LifecycleNode):
                 '1', 'true', 'yes', 'on')
         else:
             self.gripper_enable = bool(raw_enable)
+        # 与 gripper_enable 同样的理由：launch 传进来的布尔值可能是字符串。
+        raw_act = self.get_parameter('trajectory_action_enable').value
+        if isinstance(raw_act, str):
+            self.trajectory_action_enable = raw_act.strip().lower() in (
+                '1', 'true', 'yes', 'on')
+        else:
+            self.trajectory_action_enable = bool(raw_act)
+        self.trajectory_action_name = str(
+            self.get_parameter('trajectory_action_name').value)
+        if not self.trajectory_action_name.startswith('/'):
+            # rclpy 会把它解析成 "<节点命名空间>/<这个名字>"。加不加都能连上，
+            # 但日志里显示的名字会不一样，排查时白费时间，所以统一成绝对名。
+            self.get_logger().warn(
+                f'trajectory_action_name="{self.trajectory_action_name}" is '
+                'not absolute; prefixing "/" so the name in the logs matches '
+                'the one MoveIt looks for')
+            self.trajectory_action_name = '/' + self.trajectory_action_name
+        self.trajectory_feedback_hz = float(
+            self.get_parameter('trajectory_feedback_hz').value)
         self.connect_timeout_sec = float(
             self.get_parameter('connect_timeout_sec').value)
         self.movej_current_trim_deg = list(
@@ -608,9 +696,13 @@ class dummy_controller(LifecycleNode):
     def on_activate(self, state: State) -> TransitionCallbackReturn:
         # self.home_dummy()
         try:
-            self.get_logger().info('ACTIVATE 1/2: creating pubs/subs')
+            self.get_logger().info('ACTIVATE 1/3: creating pubs/subs')
             self.init_pub_sub()
-            self.get_logger().info('ACTIVATE 1/2: done')
+            self.get_logger().info('ACTIVATE 1/3: done')
+            self.get_logger().info(
+                'ACTIVATE 2/3: creating the FollowJointTrajectory action server')
+            self.init_trajectory_action_server()
+            self.get_logger().info('ACTIVATE 2/3: done')
             #0 RGB跑马灯  1白光快闪  2白光慢闪  3红光常亮  4绿光常亮  5蓝光常亮
             self.dummy_driver.robot.set_rgb_mode(4)
         except Exception as exc:  # noqa: BLE001
@@ -861,6 +953,204 @@ class dummy_controller(LifecycleNode):
             f'state read {read_hz:.1f} Hz (device I/O), '
             f'joint_states publish {pub_hz:.1f} Hz (cached)')
 
+    # ======================================================================
+    # MoveIt 执行接口：FollowJointTrajectory action server
+    # ======================================================================
+    def init_trajectory_action_server(self):
+        """创建 MoveIt 用来下发轨迹的 action server。
+
+        名字必须是 /<controller_name>/<action_ns>，也就是
+        moveit_controllers.yaml 里 controller_names 那条加上 action_ns
+        （默认就是 follow_joint_trajectory）。**不要再补一段
+        follow_joint_trajectory**：action_ns 本身已经叫这个名字了。对不上时
+        MoveIt 只会在 execute 时报
+        `Action client not connected to action server: ...`，
+        规划一路是绿的 —— 这正是当前"规划成功、执行不动"的原因。
+
+        与话题订阅共用 _execute_trajectory，所以两条入口的下发行为完全一致。
+
+        为什么回调组要 Reentrant：轨迹执行动辄几十秒，默认的互斥回调组会
+        在 execute 回调运行期间挡住这个节点上的其它回调。Reentrant 只是让
+        executor 能继续转；真正的串行化由 _traj_lock + _traj_executing 负责，
+        不是靠回调组。
+        """
+        if not self.trajectory_action_enable:
+            self.get_logger().warn(
+                'trajectory_action_enable is false: no FollowJointTrajectory '
+                'action server will be created, so MoveIt planning will work '
+                'but EXECUTE will fail with "Action client not connected"')
+            return
+
+        self._traj_cb_group = ReentrantCallbackGroup()
+        self._traj_action_server = ActionServer(
+            self,
+            FollowJointTrajectory,
+            self.trajectory_action_name,
+            execute_callback=self._on_traj_execute,
+            goal_callback=self._on_traj_goal,
+            cancel_callback=self._on_traj_cancel,
+            callback_group=self._traj_cb_group,
+        )
+        self.get_logger().info(
+            f'FollowJointTrajectory action server ready on '
+            f'{self.trajectory_action_name} (this is what move_group looks '
+            'for when you press Execute)')
+
+    def _on_traj_goal(self, goal_request):
+        """收到 execute 请求时决定接不接受。
+
+        返回 ACCEPT 之后 goal_handle 才有效，所以这里只做"格式对不对"的
+        静态检查；占用检测放在 _on_traj_execute 里，因为 goal 回调可能被
+        调用多次（客户端重复发同一个 goal），在那里改状态会漏。
+        """
+        traj = goal_request.trajectory
+        if not traj.joint_names:
+            self.get_logger().error(
+                'trajectory goal rejected: joint_names is empty, so the '
+                'waypoints cannot be mapped onto our joints')
+            return GoalResponse.REJECT
+        if not traj.points:
+            self.get_logger().error(
+                'trajectory goal rejected: 0 waypoints (nothing to do)')
+            return GoalResponse.REJECT
+        self.get_logger().info(
+            f'trajectory goal accepted: {len(traj.points)} waypoint(s), '
+            f'joint_names={list(traj.joint_names)}')
+        return GoalResponse.ACCEPT
+
+    def _on_traj_cancel(self, goal_handle):
+        """cancel 请求：接受请求，但**不**在这里停机械臂。
+
+        MoveIt 只有在用户点 Stop 或超时才 cancel。设备侧的急停走的是
+        stop_dummy()，而轨迹线程正卡在 waypoint 之间的 sleep 里，实际效果是
+        "最多再走完当前 waypoint 就停"。接受 cancel 而不是拒绝，是因为拒绝
+        会让客户端一直等到超时；接受之后尽快 abort 更干净。
+        """
+        self.get_logger().warn(
+            'trajectory cancel requested: the driver will stop at the next '
+            'waypoint boundary (the device has no instant stop)')
+        return CancelResponse.ACCEPT
+
+    @staticmethod
+    def _traj_goal_was_cancelled(goal_handle):
+        """goal_handle 上有没有"已被取消"这个状态。
+
+        不直接写 goal_handle.is_cancel_requested：rclpy 各版本的属性名不完全
+        一样，而这只是一条守卫，读不到就当没被取消 —— 比 AttributeError
+        把整条轨迹打掉要好。
+        """
+        try:
+            return bool(getattr(goal_handle, 'is_cancel_requested', False))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _traj_busy(self):
+        """当前是否已有轨迹在执行。锁保护，因为问它的线程不止一个。"""
+        with self._traj_lock:
+            return self._traj_executing
+
+    def _progress_log_due(self):
+        """进度日志现在该不该打一条。
+
+        节拍就是 trajectory_feedback_hz：既然没发 feedback，那这个参数唯一
+        合理的用途就是决定"多密地告诉人它在动"。<= 0 表示只保留关键点日志。
+
+        每次判定都会推进时间基准 —— 包括"暂不打"的那次。不推进的话，判定
+        会一直为真，于是每个 waypoint 都打一条，正好是这段代码要避免的事。
+        """
+        now = time.monotonic()
+        period = (1.0 / self.trajectory_feedback_hz
+                  if self.trajectory_feedback_hz > 0 else None)
+        due = period is not None and (now - self._last_progress_log) >= period
+        self._last_progress_log = now
+        return due
+
+    def _on_traj_execute(self, goal_handle):
+        """action 的执行回调。
+
+        这里的唯一职责是校验、占位、起执行线程，然后**等线程结束**。
+        绝不能在本线程里 sleep 着下发 waypoint：这个回调由执行器线程调用，
+        一睡下去 pub_timer（/joint_states）就停了，MoveIt 和 RViz 会以为
+        机器人不见了 —— 而 execute 的成功判据恰恰用得到 /joint_states。
+
+        等线程结束用 join 而不是轮询。rclpy 的 execute_callback 可以直接返回
+        一个 rclpy Future，但那条路要额外引入 Future + 另一个线程来回填，
+        在拿不到 ROS 环境实测的情况下不划算；join 的语义是确定的。
+        """
+        result = FollowJointTrajectory.Result()
+        traj = goal_handle.request.trajectory
+
+        if self._traj_goal_was_cancelled(goal_handle):
+            self.get_logger().warn(
+                'trajectory goal was already cancelled before it started')
+            result.error_code = FollowJointTrajectory.Result.INVALID_GOAL
+            result.error_string = 'goal was cancelled before execution started'
+            goal_handle.abort()
+            return result
+
+        with self._traj_lock:
+            if self._traj_executing:
+                busy = True
+            else:
+                busy = False
+                self._traj_executing = True
+        if busy:
+            # 同一时刻只允许一条轨迹。两条同时下发时设备的 move_j 会交替
+            # 收到两套目标，机械臂走出一条谁都没规划过的路。
+            self.get_logger().error(
+                'rejecting trajectory: another trajectory is already '
+                'executing (only one at a time; the device has no notion of '
+                'two controllers)')
+            result.error_code = FollowJointTrajectory.Result.INVALID_GOAL
+            result.error_string = (
+                'another trajectory is already executing; refusing to '
+                'interleave two command sources')
+            goal_handle.abort()
+            return result
+
+        # 关节顺序在起线程之前算好：名字对不上时要立刻拒绝，而不是让线程
+        # 起来之后再空转一圈。失败即清掉占位，否则这条轨迹会永久锁住这个
+        # 节点（后面每条轨迹都会被当成"正忙"）。
+        order = self._trajectory_joint_order(traj.joint_names)
+        if order is None:
+            with self._traj_lock:
+                self._traj_executing = False
+            result.error_code = FollowJointTrajectory.Result.INVALID_JOINTS
+            result.error_string = (
+                'the trajectory does not name our joints '
+                f'({list(self.joint_names)}); nothing was commanded')
+            self.get_logger().error(result.error_string)
+            goal_handle.abort()
+            return result
+
+        # 这个容器由工作线程填、由本线程读。线程启动前建立 happens-before，
+        # join 之后读是安全的。
+        outcome = {}
+
+        def _work():
+            outcome['value'] = self._execute_trajectory(traj, order)
+
+        self._traj_thread = threading.Thread(
+            target=_work, name='traj_exec', daemon=True)
+        self._traj_thread.start()
+        self._traj_thread.join()
+
+        ok, code, text = outcome.get('value', (
+            False, FollowJointTrajectory.Result.INVALID_GOAL,
+            'the execution thread did not report a result'))
+        result.error_code = code
+        result.error_string = text
+        if ok:
+            self.get_logger().info(
+                'action: trajectory complete, reporting SUCCESSFUL to '
+                'move_group')
+            goal_handle.succeed()
+        else:
+            self.get_logger().error(
+                f'action: trajectory failed (code={code}): {text}')
+            goal_handle.abort()
+        return result
+
     def call_poll_position(self):
         """低频：读一次硬件，刷新缓存的当前姿态。
 
@@ -1110,6 +1400,30 @@ class dummy_controller(LifecycleNode):
             self.destroy_timer(self.pub_timer)
             self.get_logger().info("Destroyed pub_timer")
 
+        # action server 必须一起销毁。只销毁 pub/sub 而留着它，deactivate 之后
+        # move_group 依然能看到这个名字、依然能连上，于是"节点已停"和"还能执行"
+        # 同时成立 —— 下一次 activate 还会再创建一个同名 server，两个 server
+        # 抢同一个名字，客户端连到哪个不确定。
+        #
+        # 先等正在跑的轨迹结束再拆：执行线程还在下发 waypoint，此时销毁 server
+        # 会让它的 goal_handle 变成悬空引用。等不住就照拆，但要留下日志。
+        if self._traj_thread is not None and self._traj_thread.is_alive():
+            self.get_logger().warn(
+                'a trajectory is still executing; waiting for it to finish '
+                'before destroying the action server')
+            self._traj_thread.join(timeout=30.0)
+            if self._traj_thread.is_alive():
+                self.get_logger().error(
+                    'the trajectory thread did not finish within 30 s; '
+                    'destroying the action server anyway. It will finish on '
+                    'its own, but its result no longer reaches move_group.')
+        self._traj_thread = None
+
+        if self._traj_action_server is not None:
+            self._traj_action_server.destroy()
+            self._traj_action_server = None
+            self.get_logger().info("Destroyed trajectory action server")
+
     def _send_named_pose(self, movej_deg, label):
         """把命名位姿下发到硬件。
 
@@ -1124,6 +1438,16 @@ class dummy_controller(LifecycleNode):
         日志同时打印回读侧换算出的 URDF 角度，方便与 RViz 对照。
         """
         movej_deg = np.asarray(movej_deg, dtype=float)
+
+        # 有一条轨迹正在跑时不能插队。home/reset/急停都会走这里，而轨迹线程
+        # 正按节拍下发 waypoint —— 两条命令流交替发给设备，机械臂就会走出一条
+        # 谁都没规划过的路。急停是例外：宁可不规矩也要停下，所以 label 里带
+        # "emergency" 时照发，但留下日志说明重叠了。
+        if self._traj_busy() and 'emergency' not in label:
+            self.get_logger().warn(
+                f'{label}: refused because a trajectory is executing. Wait for '
+                'it to finish (or cancel it from RViz) and try again.')
+            return
 
         # 每一步都记日志。此前这段是"发指令 -> 回读 -> 打印"一口气走完，
         # 一旦 move_j 或回读阻塞，日志就停在上一行不动，无法判断卡在哪一个。
@@ -1224,6 +1548,15 @@ class dummy_controller(LifecycleNode):
 
         joint_names 的顺序可能与我们的关节顺序不同，必须按名字重排，
         不能假设它们已经是 dummy2_joint1..6 的顺序。
+
+        **这里仍然在本线程里阻塞**（与 action 那条入口不同）。这是刻意保留的：
+        topics 的用法是 tools/ 下的脚本在压测和标定，它们要的是"回调结束 =
+        这条轨迹走完了"这个简单语义，放进线程反而让脚本变复杂。代价是执行
+        期间 /joint_states 会停 —— 那条入口不接 MoveIt，所以这个代价可以接受。
+        action 那条入口必须让出线程，原因见 _on_traj_execute 的 docstring。
+
+        占用标记是加了锁再判再置的：`if self._traj_executing` 之后再置位，
+        中间可能被 action 那条入口插进来，两条轨迹就会同时下发。
         """
         # 收到轨迹先记一条日志。缺少这一行会导致「实物没动」时无法判断
         # 是回调没触发、还是被拒绝、还是执行了但没效果。
@@ -1231,24 +1564,36 @@ class dummy_controller(LifecycleNode):
             f'RECEIVED JointTrajectory: {len(msg.points)} point(s), '
             f'joint_names={list(msg.joint_names)}')
 
-        if self._traj_executing:
-            self.get_logger().warn(
-                'A trajectory is already executing, ignoring the new one')
-            return
         if not msg.points:
             self.get_logger().warn('Received JointTrajectory with no points')
             return
 
-        # 按名字重排到我们的关节顺序
+        # 按名字重排到我们的关节顺序。**要在占位之前做**：名字对不上时
+        # 直接返回，绝不能留下一个永远的"正忙"标记。
         order = self._trajectory_joint_order(msg.joint_names)
         if order is None:
             return
 
-        self._traj_executing = True
+        with self._traj_lock:
+            if self._traj_executing:
+                busy = True
+            else:
+                busy = False
+                self._traj_executing = True
+        if busy:
+            self.get_logger().warn(
+                'A trajectory is already executing, ignoring the new one')
+            return
+
         try:
-            self._execute_trajectory(msg, order)
+            ok, code, text = self._execute_trajectory(msg, order)
+            if not ok:
+                self.get_logger().error(
+                    f'trajectory from the topic entry point failed '
+                    f'(code={code}): {text}')
         finally:
-            self._traj_executing = False
+            with self._traj_lock:
+                self._traj_executing = False
 
     def _trajectory_joint_order(self, traj_names):
         """把轨迹的关节顺序映射到本节点的顺序。
@@ -1282,10 +1627,27 @@ class dummy_controller(LifecycleNode):
         return order
 
     def _execute_trajectory(self, msg, order):
+        """把一条轨迹按节拍下发到设备。返回 (ok, error_code, error_string)。
+
+        返回值这三个东西是给 action 用的：MoveIt 的 execute 结果里
+        error_code 非 0 就判定执行失败，并且会把 error_string 打进日志。
+        **不能失败也返回成功** —— 那会让 MoveIt 认为手臂到了目标位姿，
+        后面所有规划都建立在一个错误的状态上。
+
+        错误码取自 control_msgs/action/FollowJointTrajectory 里的常量，
+        不自己编数字：那几个值是客户端按名字解释的。
+        """
         total = len(msg.points)
         self.get_logger().info(
             f'Executing trajectory: {total} waypoints, '
             f'joint order map {order}')
+
+        # 进度日志的节拍基准。原来只有"每 10 个 waypoint 打一次"，而一条
+        # MoveIt 轨迹的 waypoint 是按时间均匀铺开的：300 个点、每个 0.1 秒，
+        # 就是每 1 秒一条，几十秒的执行里日志会淹掉别的东西。改由
+        # trajectory_feedback_hz 决定节奏（默认 5 Hz 上限），并在关键点
+        # （第一个 / 每 10 个 / 最后一个）强制打印。
+        self._last_progress_log = time.monotonic()
 
         # 当前命令位置（move_j 空间），作为"就近整圈等价"的参考。
         #
@@ -1295,12 +1657,12 @@ class dummy_controller(LifecycleNode):
         # 那才是权威来源。只有在本节点还没发过任何命令时才回退到回读。
         cur_movej = self.guess_current_movej()
         if cur_movej is None:
-            self.get_logger().error(
-                'cannot determine the current command pose (no command sent '
-                'yet and the readback is unavailable); refusing to execute a '
-                'trajectory because the nearest-equivalent conversion would be '
-                'guessing.')
-            return
+            text = ('cannot determine the current command pose (no command sent '
+                    'yet and the readback is unavailable); refusing to execute '
+                    'a trajectory because the nearest-equivalent conversion '
+                    'would be guessing')
+            self.get_logger().error(text)
+            return (False, FollowJointTrajectory.Result.INVALID_GOAL, text)
         src = ('command history' if self.commanded_movej() is not None
                else 'readback fallback (no command sent yet)')
         self.get_logger().info(
@@ -1310,10 +1672,10 @@ class dummy_controller(LifecycleNode):
         t_start = time.monotonic()
         for idx, point in enumerate(msg.points):
             if len(point.positions) < len(order):
-                self.get_logger().error(
-                    f'Waypoint {idx} has {len(point.positions)} positions, '
-                    f'need at least {len(order)}; aborting')
-                return
+                text = (f'waypoint {idx} has {len(point.positions)} positions, '
+                        f'need at least {len(order)}')
+                self.get_logger().error(text + '; aborting')
+                return (False, FollowJointTrajectory.Result.INVALID_GOAL, text)
 
             # 轨迹顺序 -> 本节点顺序
             urdf_rad = np.array([point.positions[order[i]] for i in range(6)])
@@ -1331,10 +1693,10 @@ class dummy_controller(LifecycleNode):
             movej_deg = self.urdf_to_movej(urdf_rad, current_deg=cur_movej)
             try:
                 self.move_joints(movej_deg)
-            except Exception as exc:
-                self.get_logger().error(
-                    f'Waypoint {idx} command failed: {exc}; aborting trajectory')
-                return
+            except Exception as exc:  # noqa: BLE001
+                text = f'waypoint {idx} command failed: {exc}'
+                self.get_logger().error(text + '; aborting trajectory')
+                return (False, FollowJointTrajectory.Result.INVALID_GOAL, text)
             # 下一个 waypoint 以本 waypoint 为参考，保证轨迹连续
             cur_movej = [float(v) for v in movej_deg]
 
@@ -1342,8 +1704,14 @@ class dummy_controller(LifecycleNode):
                 self.get_logger().info(
                     f'  waypoint {idx + 1}/{total} '
                     f't={target_t:.2f}s deg={np.round(movej_deg, 2).tolist()}')
+                self._last_progress_log = time.monotonic()
+            elif self._progress_log_due():
+                self.get_logger().info(
+                    f'  waypoint {idx + 1}/{total} '
+                    f't={target_t:.2f}s deg={np.round(movej_deg, 2).tolist()}')
 
         self.get_logger().info('Trajectory execution complete')
+        return (True, FollowJointTrajectory.Result.SUCCESSFUL, '')
 
     def move_joints(self, joints_deg):
         """下发关节角度（度）。
@@ -1364,9 +1732,26 @@ class dummy_controller(LifecycleNode):
 def main(args=None):
     rclpy.init(args=args)
     node = dummy_controller()
+
+    # ------------------------------------------------------------------
+    # 多线程执行器，**这是 MoveIt 执行能工作的前提之一**。
+    #
+    # 轨迹执行时执行器里有两件事要同时进行：
+    #   - action 的 execute 回调：等 _traj_thread 把 waypoint 走完（几十秒）
+    #   - pub_timer：按 50 Hz 发 /joint_states
+    # 单线程执行器只能干一件。execute 回调占着线程的那几十秒里，
+    # /joint_states 一条都不发，MoveIt 与 RViz 会认为机器人不见了 ——
+    # 而判断 execute 是否成功恰恰要用到它。
+    #
+    # 2 个线程就够（实测无需更多）：一个跑那个长回调，其余回调在另一个上
+    # 排队。线程再多只是多几个线程等同一把 fibre 锁。默认的互斥回调组会
+    # 让"同一个组里的回调不并发"，所以 pub_timer 不会被别的回调挤掉。
+    # ------------------------------------------------------------------
+    executor = rclpy.executors.MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
     shutdown_done = False
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         node.get_logger().info("Ctrl+C received. Executing custom shutdown.")
         node.on_sigint_shutdown()
@@ -1377,6 +1762,7 @@ def main(args=None):
             node.on_sigint_shutdown()
             shutdown_done = True
     finally:
+        executor.shutdown()
         rclpy.shutdown()
 
 if __name__ == '__main__':
