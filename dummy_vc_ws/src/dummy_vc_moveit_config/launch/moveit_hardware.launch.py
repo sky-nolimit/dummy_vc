@@ -16,8 +16,10 @@ MoveIt configuration problem can be debugged while the arm is idle.
 
 What this starts:
   * a second robot_state_publisher, fed by the DRIVER's /joint_states
-  * move_group, with the controller interface pointing at the topic the driver
-    subscribes to
+  * move_group, whose controller interface talks to the driver's
+    FollowJointTrajectory ACTION server (config/moveit_controllers.yaml).
+    MoveIt's controller plugin only ever sends actions -- the JointTrajectory
+    topic the driver also subscribes to is for hand-run scripts, not for MoveIt
 
 Deliberately NOT started: joint_state_publisher. The driver owns /joint_states,
 and a second publisher on that topic is exactly the kind of silent conflict that
