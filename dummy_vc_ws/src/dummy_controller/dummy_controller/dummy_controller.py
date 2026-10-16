@@ -1,4 +1,5 @@
 import time
+import signal
 import threading
 import rclpy
 import asyncio
@@ -26,6 +27,18 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 
 import numpy as np
 import dummy_cli_tool.ref_tool
+
+# 关机时最多等多久让手臂回到收缩姿态（秒）。见 _retract_and_power_off()。
+#
+# 为什么写死常量而不是加一个参数：这是安全兜底，不是需要标定的值；而且新增
+# 参数必须同时改 config/dummy_controller.yaml 与 launch 里的 DESCRIPTIONS，
+# 否则 launch 直接 RuntimeError（那是刻意的自检，见 launch 文件）。
+#
+# 6 秒的来由：`ros2 launch` 在 sigterm_timeout（默认 5 秒）之后会给子进程发
+# SIGTERM、再 sigkill_timeout（默认 5 秒）之后发 SIGKILL。也就是说"回收缩 +
+# 等它到位 + 断使能"必须在 10 秒内做完，否则会被 SIGKILL 打死在半路 —— 那
+# 正好是我们要避免的"手臂还在动，使能已经掉了"。
+SHUTDOWN_RETRACT_TIMEOUT_SEC = 6.0
 
 class dummy_controller(LifecycleNode):
     def __init__(self):
@@ -128,6 +141,24 @@ class dummy_controller(LifecycleNode):
         # 进度日志的上一次打印时刻。这里给个初值，免得将来有人在
         # _execute_trajectory 之外调用 _progress_log_due() 时 AttributeError。
         self._last_progress_log = 0.0
+
+        # ------------------------------------------------------------------
+        # 关机（安全相关）
+        #
+        # `_shutdown_lock` + `_shutdown_done` 保证"回收缩姿态、等它到位、再断
+        # 使能"这件事**只做一次**。退出路径不止一条：launch 触发 lifecycle
+        # shutdown 转换、Ctrl+C 的 KeyboardInterrupt、rclpy 关掉 context 之后
+        # spin() 正常返回。它们可能先后甚至并发地进来。后进来的那个会阻塞在
+        # 锁上，等第一个做完、看到 done 再直接返回 —— 这样 main() 的 finally
+        # 不会在手臂还在动的时候就把节点拆掉。
+        #
+        # `_shutting_down` 是给轨迹线程看的：关机时必须先把正在下发的
+        # waypoint 停掉，否则收缩姿态的命令会和轨迹的 waypoint 交替发给设备，
+        # 机械臂走出一条谁都没规划过的路。
+        # ------------------------------------------------------------------
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_done = False
+        self._shutting_down = False
 
         self.get_logger().info("dummy_controller_node Lifecycle node constructor called")
         self.get_logger().info(
@@ -734,24 +765,138 @@ class dummy_controller(LifecycleNode):
         return TransitionCallbackReturn.SUCCESS
 
     def on_shutdown(self, state: State) -> TransitionCallbackReturn:
-        # 先设置 RGB，再关闭驱动（off_dummy 会将 driver 置 None）
-        self.dummy_driver.robot.set_rgb_mode(0)
-        self.off_dummy()
-        self.get_logger().info("on_shutdown() called")
+        """lifecycle shutdown 转换：回收缩姿态、等它到位，再断使能。
+
+        这里以前只有 "RGB 0 + off_dummy"，**完全没有回收缩姿态** —— 与
+        dummy_controller/README.md 里写的 shutdown 契约（"手臂回到收回位置、
+        電機關閉、關閉發佈器和接收器、關閉串口"）不符。这正是"用 ros2 launch
+        退出时手臂不回收缩、使能直接掉，单独跑节点却没事"的原因：两条退出
+        路径各写了一遍，只有 Ctrl+C 那条（on_sigint_shutdown）会回收缩，
+        走 launch 时执行的是这个转换。
+        """
+        self._retract_and_power_off('on_shutdown')
         return TransitionCallbackReturn.SUCCESS
     # ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑ Lifecycle node callback ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑
 
     def on_sigint_shutdown(self):
-        self.get_logger().info("Ctrl+C received. Executing custom shutdown.")
-        self.reset_dummy()
+        """进程退出前的收尾，现在只是 _retract_and_power_off 的别名。
+
+        保留这个名字：main() 与文档都按它找关机日志，而且它曾经是**唯一**会
+        回收缩姿态的路径。真正的实现只有一份，两条路径不再各写一遍。
+        """
+        self._retract_and_power_off('shutdown')
+
+    def shutdown_in_progress(self):
+        """关机序列是否已经开始（给 main() 里的 SIGTERM 处理器用）。"""
+        return self._shutting_down
+
+    def _retract_and_power_off(self, reason):
+        """把手臂收回收缩姿态、**等它真的到位**，然后才切断电机使能。
+
+        为什么必须"等"：reset_dummy() 只负责把命令发出去（_send_named_pose
+        发完就返回，不等到位；它那 2/2 步的回读只用来打日志）。紧接着
+        off_dummy() 就把使能关掉，手臂还在走的时候断使能，它会停在半路、
+        甚至直接掉下来。以前 on_sigint_shutdown 里那个"忙等 5 秒"就是在粗糙
+        地替代这件事：5 秒通常够，但既不看有没有到位，也会被 launch 的
+        SIGTERM 打断。现在改成读回读、看有没有真到位，上限
+        SHUTDOWN_RETRACT_TIMEOUT_SEC。
+
+        reason 只用于日志（on_shutdown / shutdown）。
+        """
+        with self._shutdown_lock:
+            if self._shutdown_done:
+                self.get_logger().info(
+                    f'{reason}: the shutdown sequence already ran; nothing to do')
+                return
+            self._shutdown_done = True
+
+            if self.dummy_driver is None:
+                self.get_logger().warn(
+                    f'{reason}: the device is already disconnected; cannot '
+                    'retract the arm or cut power')
+                return
+
+            self._shutting_down = True
+
+            # 让正在执行的轨迹先停下来。它可能正卡在 waypoint 之间的 sleep 里，
+            # 所以只等一小会儿；等不到也要接着回收缩（宁可日志里两次命令重叠，
+            # 也不能不收缩）。
+            if self._traj_thread is not None and self._traj_thread.is_alive():
+                self.get_logger().warn(
+                    f'{reason}: asking the running trajectory to stop before '
+                    'retracting the arm')
+                self._traj_thread.join(timeout=1.0)
+
+            self.get_logger().warn(
+                f'{reason}: retracting the arm to the folded pose '
+                f'(move_j_deg={self.reset_joints.tolist()}) before cutting '
+                'motor power')
+            # force=True：关机时必须发得出去，不能被"有轨迹在执行"挡回来。
+            self._send_named_pose(self.reset_joints, 'reset (shutdown)', force=True)
+            self._wait_until_pose(self.reset_joints, SHUTDOWN_RETRACT_TIMEOUT_SEC)
+
+            # 顺序不能反：off_dummy() 会把 driver 置 None，之后就没得发 RGB 了。
+            # 整段兜异常：关机例程**绝不能抛**出去 —— 它是在 main() 的 finally
+            # 里被调的，抛出去会把后面的 executor.shutdown()/rclpy.shutdown()
+            # 一起跳过，日志里只剩一个 traceback。
+            try:
+                self.dummy_driver.robot.set_rgb_mode(0)
+                self.off_dummy()
+            except Exception as exc:  # noqa: BLE001
+                self.get_logger().error(
+                    f'{reason}: cutting motor power FAILED: {exc}. The arm has '
+                    'been sent to the folded pose, but the motors may still be '
+                    'enabled -- cut power with the switch if it keeps holding')
+
+            # 拆 pub/sub 与 action server 只是"体面退出"，与安全无关，所以放在
+            # 断电**之后**，而且单独兜异常：它里面有最长 30 秒的线程 join，
+            # 万一卡住也不能影响前面已经做完的两步。
+            try:
+                self.reset_pub_sub()
+            except Exception as exc:  # noqa: BLE001
+                self.get_logger().warn(f'{reason}: teardown failed: {exc}')
+
+    def _wait_until_pose(self, movej_deg, timeout):
+        """等手臂到达目标位姿（move_j 空间，度），最多等 timeout 秒。
+
+        返回是否到位。用**设备回读**判断，不用 self.current_urdf_rad 的缓存：
+        Ctrl+C 路径下 spin() 已经返回，读状态的定时器不再触发，缓存会冻在最后
+        一个值上 —— 拿它判"到位"要么立刻为真、要么永远不为真，两种都是假结论。
+        check_joints_place() 是 async 的，那条路这里走不了，所以自己读。
+        """
+        try:
+            target_rad = np.asarray(self.movej_to_urdf(movej_deg), dtype=float)
+        except Exception as exc:  # noqa: BLE001
+            # 还没 configure（参数没声明）就退出时，movej_to_urdf 读不到
+            # movej_urdf_zero_deg。算不出目标就只能给一段固定时间。
+            self.get_logger().warn(
+                f'cannot compute the folded pose in URDF space ({exc}); '
+                'waiting a fixed 2 s instead of checking the readback')
+            time.sleep(2.0)
+            return False
+
         t1 = time.time()
-        while True:
-            if time.time() - t1 > 5:
-                break
-        self.dummy_driver.robot.set_rgb_mode(0)
-        self.reset_pub_sub()
-        self.off_dummy()
-        
+        while time.time() - t1 < timeout:
+            try:
+                self.read_device()
+            except Exception as exc:  # noqa: BLE001
+                self.get_logger().warn(f'readback failed while retracting: {exc}')
+                return False
+            if np.allclose(self.current_urdf_rad, target_rad, atol=0.02):
+                self.get_logger().info(
+                    f'the arm reached the folded pose in {time.time() - t1:.1f}s')
+                return True
+            time.sleep(0.1)
+
+        self.get_logger().error(
+            f'the arm did not reach the folded pose within {timeout}s '
+            f'(readback urdf_deg='
+            f'{np.round(np.degrees(self.current_urdf_rad), 2).tolist()}, target '
+            f'urdf_deg={np.round(np.degrees(target_rad), 2).tolist()}). Cutting '
+            'motor power anyway: holding the arm under torque forever is worse, '
+            'and launch would SIGKILL us shortly (SHUTDOWN_RETRACT_TIMEOUT_SEC)')
+        return False
+
     def init_dummy(self):
         """连接设备并使能电机。
 
@@ -1424,7 +1569,7 @@ class dummy_controller(LifecycleNode):
             self._traj_action_server = None
             self.get_logger().info("Destroyed trajectory action server")
 
-    def _send_named_pose(self, movej_deg, label):
+    def _send_named_pose(self, movej_deg, label, force=False):
         """把命名位姿下发到硬件。
 
         输入是 **move_j 空间**的角度（度），也就是 home_joints /
@@ -1443,7 +1588,10 @@ class dummy_controller(LifecycleNode):
         # 正按节拍下发 waypoint —— 两条命令流交替发给设备，机械臂就会走出一条
         # 谁都没规划过的路。急停是例外：宁可不规矩也要停下，所以 label 里带
         # "emergency" 时照发，但留下日志说明重叠了。
-        if self._traj_busy() and 'emergency' not in label:
+        #
+        # force 是关机的例外（见 _retract_and_power_off）：那时必须把手臂收回
+        # 收缩姿态，被挡回来的后果是"继续带着使能停在原地"或"直接断使能掉下来"。
+        if self._traj_busy() and not force and 'emergency' not in label:
             self.get_logger().warn(
                 f'{label}: refused because a trajectory is executing. Wait for '
                 'it to finish (or cancel it from RViz) and try again.')
@@ -1687,6 +1835,16 @@ class dummy_controller(LifecycleNode):
             if wait > 0:
                 time.sleep(wait)
 
+            # 关机（Ctrl+C / lifecycle shutdown）时立刻停止下发。关机序列马上
+            # 要把手臂收回收缩姿态，这里再发一个 waypoint 就是两条命令流交替
+            # 发给设备，机械臂会走出一条谁都没规划过的路。放在 sleep 之后：
+            # sleep 期间收到的关机请求，至少能在下发前被发现。
+            if self._shutting_down:
+                text = ('trajectory aborted: the node is shutting down and the '
+                        'arm is being retracted to the folded pose')
+                self.get_logger().warn(text)
+                return (False, FollowJointTrajectory.Result.INVALID_GOAL, text)
+
             # URDF 弧度 -> 设备角度（含 sign/offset 逆变换），单位是度。
             # 传入当前位置，结果会被折算成离它最近的整圈等价角 —— 不这样做
             # 就会重演"下发 340 度、设备够不着、静默不动"那个 bug。
@@ -1749,19 +1907,44 @@ def main(args=None):
     # ------------------------------------------------------------------
     executor = rclpy.executors.MultiThreadedExecutor(num_threads=2)
     executor.add_node(node)
-    shutdown_done = False
+
+    # ------------------------------------------------------------------
+    # SIGTERM：`ros2 launch` 在 sigterm_timeout（默认 5 秒）之后会给子进程发
+    # SIGTERM，而 SIGTERM 的默认动作是**立即终止** —— 正好会打断正在回收缩
+    # 姿态的那几秒：手臂停在半路，使能直接掉。所以这里自己接管：
+    #
+    #   * 关机序列还没开始 → 抛 KeyboardInterrupt，走和 Ctrl+C 完全一样的路；
+    #   * 已经在跑 → 只记一条日志，**绝不打断**。回收缩这件事必须一次做完，
+    #     半路被杀比不回收缩更危险。
+    #
+    # 真的卡住不返回，还有 launch 的 SIGKILL 兜底（再 sigkill_timeout，默认
+    # 5 秒），所以这里不会把进程变成"杀不死"。
+    # ------------------------------------------------------------------
+    def _on_sigterm(signum, frame):
+        if node.shutdown_in_progress():
+            node.get_logger().warn(
+                'SIGTERM received while the shutdown sequence is running; '
+                'ignoring it so the arm can finish retracting')
+            return
+        node.get_logger().warn(
+            'SIGTERM received (ros2 launch escalates to it); shutting down '
+            'like Ctrl+C')
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
     try:
         executor.spin()
     except KeyboardInterrupt:
         node.get_logger().info("Ctrl+C received. Executing custom shutdown.")
-        node.on_sigint_shutdown()
-        shutdown_done = True
     except Exception as e:
         node.get_logger().error(f"Unhandled exception: {e}")
-        if not shutdown_done:
-            node.on_sigint_shutdown()
-            shutdown_done = True
     finally:
+        # 兜底，而且是**唯一**的执行点：不管 spin() 是因为 Ctrl+C、SIGTERM、
+        # rclpy 自己关掉 context 而正常返回，还是因为异常退出，都必须先回收缩
+        # 姿态、等它到位，再断使能。on_sigint_shutdown 是幂等且带锁的，重复
+        # 调用（比如 on_shutdown 已经做过）只会打一行日志。
+        node.on_sigint_shutdown()
         executor.shutdown()
         rclpy.shutdown()
 
