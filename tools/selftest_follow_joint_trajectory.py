@@ -132,6 +132,34 @@ def calls_named(func, name):
     return False
 
 
+def clears_flag_in_finally(func, flag):
+    """True if `try: ... finally:` inside func assigns `self.<flag> = False`.
+
+    Looks for a flag that is *set* but only cleared on the happy path. That is
+    not a style question: a guard like
+
+        if self._traj_executing: reject
+        self._traj_executing = True
+
+    latches on forever when the path that set it never clears it, and the only
+    symptom is that unrelated later code starts refusing to work.
+    """
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Try):
+            continue
+        for stmt in node.finalbody:
+            for sub in ast.walk(stmt):
+                if not isinstance(sub, ast.Assign):
+                    continue
+                if not (isinstance(sub.value, ast.Constant)
+                        and sub.value.value is False):
+                    continue
+                for tgt in sub.targets:
+                    if isinstance(tgt, ast.Attribute) and tgt.attr == flag:
+                        return True
+    return False
+
+
 def yaml_scalar(text, key):
     """Value of a top-level `key: scalar` line, or None.
 
@@ -323,6 +351,26 @@ def check_execute_path(funcs):
              'is then reported before the motion is finished')
     else:
         ok('_on_traj_execute() joins the worker thread')
+
+    # The busy flag has to be cleared on EVERY exit, not only on the happy path.
+    # This exact omission shipped: the action entry point set _traj_executing
+    # and never cleared it, so after the first Execute the node was "busy"
+    # forever -- later goals were rejected, and home/reset were silently
+    # refused, which is what stopped the arm retracting at shutdown before the
+    # motors were switched off.
+    for fn_name, fn in (('_on_traj_execute', exec_fn),
+                        ('joints_callback', funcs.get('joints_callback'))):
+        if fn is None:
+            continue
+        if clears_flag_in_finally(fn, '_traj_executing'):
+            ok(f'{fn_name}() clears _traj_executing in a `finally`')
+        else:
+            fail(f'{fn_name}() sets _traj_executing but never clears it in a '
+                 '`finally`. The flag then latches on after the first '
+                 'trajectory: every later goal is rejected as "already '
+                 'executing", and home/reset/named poses are silently refused '
+                 'by _send_named_pose -- which is what stops the arm from '
+                 'retracting at shutdown before the motors are switched off.')
 
     # --- _execute_trajectory: every exit must carry an error code ---------
     ex = funcs.get('_execute_trajectory')

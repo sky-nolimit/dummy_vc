@@ -1275,26 +1275,39 @@ class dummy_controller(LifecycleNode):
         def _work():
             outcome['value'] = self._execute_trajectory(traj, order)
 
-        self._traj_thread = threading.Thread(
-            target=_work, name='traj_exec', daemon=True)
-        self._traj_thread.start()
-        self._traj_thread.join()
+        # try/finally 是必须的，而且这里以前漏了：_traj_executing 在上面置了
+        # True，如果这条路径不负责把它清掉，这个标记就**永远是 True** ——
+        # _traj_busy() 从此恒为真，于是
+        #   * 之后每一条 action 轨迹都被当成"已有轨迹在执行"而拒绝；
+        #   * home/reset/命名位姿全被 _send_named_pose 静默拒绝（只打一行警告），
+        #     退出时的"回收缩姿态"正是被这一条挡掉的 —— 手臂还停在 MoveIt
+        #     最后放它的位置，接着就断使能。
+        # topic 那条入口（_on_joint_trajectory_cb）一直有 finally，只有 action
+        # 这条漏了。这也是"单独跑驱动没事，一旦用过 MoveIt 退出就危险"的原因。
+        try:
+            self._traj_thread = threading.Thread(
+                target=_work, name='traj_exec', daemon=True)
+            self._traj_thread.start()
+            self._traj_thread.join()
 
-        ok, code, text = outcome.get('value', (
-            False, FollowJointTrajectory.Result.INVALID_GOAL,
-            'the execution thread did not report a result'))
-        result.error_code = code
-        result.error_string = text
-        if ok:
-            self.get_logger().info(
-                'action: trajectory complete, reporting SUCCESSFUL to '
-                'move_group')
-            goal_handle.succeed()
-        else:
-            self.get_logger().error(
-                f'action: trajectory failed (code={code}): {text}')
-            goal_handle.abort()
-        return result
+            ok, code, text = outcome.get('value', (
+                False, FollowJointTrajectory.Result.INVALID_GOAL,
+                'the execution thread did not report a result'))
+            result.error_code = code
+            result.error_string = text
+            if ok:
+                self.get_logger().info(
+                    'action: trajectory complete, reporting SUCCESSFUL to '
+                    'move_group')
+                goal_handle.succeed()
+            else:
+                self.get_logger().error(
+                    f'action: trajectory failed (code={code}): {text}')
+                goal_handle.abort()
+            return result
+        finally:
+            with self._traj_lock:
+                self._traj_executing = False
 
     def call_poll_position(self):
         """低频：读一次硬件，刷新缓存的当前姿态。
