@@ -10,13 +10,45 @@
 | --- | --- | --- |
 | `dummy_vc_perception/geometry.py` | 相机模型（针孔 + plumb_bob 畸变）、去畸变、桌面反投影、顶抓位姿、测量值来源 | 能，纯 numpy |
 | `dummy_vc_perception/gripper.py` | 开口宽度 ↔ `hand.set_angle` 的映射，未实测就拒绝下发 | 能 |
-| `dummy_vc_perception/vision_node.py` | 还没写 | 不能（要 ROS） |
+| `dummy_vc_perception/detection.py` | blob → 平面质心 → 边长/朝向 → `SceneDetection`（最小面积外接矩形，不用二阶矩） | 能 |
+| `dummy_vc_perception/vision_node.py` | ROS 层：取图、查 TF、HSV 分割、发 `/detected_objects` + RViz 标记 | 不能（要 ROS） |
+| `config/vision.yaml` | 节点参数（话题、工作面、边长、HSV 范围、合格判据） | — |
 
 分层不是洁癖：这一层将来要在真机上调坐标轴约定，而真机调试一轮很贵。
 把它写成纯 numpy，本机（没有 ROS）就能用
 `python tools/selftest_vision_geometry.py` 把约定钉死；
 `tools/selftest_vision_geometry.py` 里还有一条检查专门盯着这一层
-**不许 import ROS / OpenCV**，免得以后有人顺手 import 进来。
+**不许 import ROS / OpenCV**，免得以后有人顺手 import 进来
+（`vision_node.py` 是唯一允许碰 cv2 / rclpy 的文件，它不在那道检查的名单里）。
+
+## 跑起来（在 VM 上）
+
+```bash
+# 终端 1：驱动 + USB 相机（driver 会自己 configure/activate）
+ros2 launch dummy_controller dummy_fingerprint.launch.py
+
+# 终端 2：视觉节点
+ros2 run dummy_vc_perception vision_node --ros-args \
+  --params-file $(ros2 pkg prefix dummy_vc_perception)/share/dummy_vc_perception/config/vision.yaml
+
+# 终端 3：看输出（先在相机前面举一块纯色方块）
+ros2 topic echo /detected_objects --once
+ros2 run rviz2 rviz2      # 加 MarkerArray -> /detected_objects/markers
+```
+
+成功判据（由弱到强）：
+
+1. 节点日志有 `listening on ...` 和 `工作面 z = +0.0000 m ...`；
+2. 举起方块时 `/detected_objects` 有东西，位置随方块移动而移动；
+3. RViz 里绿色方块**贴在**真方块上、橙色箭头与方块一条边平行（45° 摆放时
+   箭头也要转 45°，这是朝向有没有算对的判据）；
+4. 拿尺子量：`position` 的 xy 与真值差 < 10 mm（单目只够到这个量级，
+   见下面第 4 条），`z` 应恒等于 `object_edge / 2 = 12 mm`。
+
+`/detected_objects` 里每个元素：`bbox.center` = `gripper_tcp` 的位姿
+（位置 + 顶抓四元数），`bbox.size` = 方块边长，`results[0].hypothesis.class_id`
+= `block`，`score` 随边长误差下降。它没有时间戳上的花招：`header` 直接抄、
+只有 `frame_id` 改成 `base_link`。
 
 ## 坐标轴约定（改之前先读这段）
 
@@ -37,18 +69,24 @@ tool0 / gripper_tcp           +y 是接近方向（手腕 -> 两指夹持中心�
 
 ## 还差什么（放真机上之前必须知道）
 
-1. **`vision_node.py` 还没写。** 它要订阅 `/dummy/visual/fingerprint_camera`
-   与 `/dummy/visual/fingerprint_camera/camera_info`（driver 里现成的 USB 相机），
-   用 `tf2_ros` 查 `base_link -> camera_color_optical_frame`，把
-   `geometry.backproject_pixel_to_plane` 的结果发成 `Detection3DArray`。
-   落地时 `package.xml` 要补 `vision_msgs` / `cv_bridge` / `tf2_ros` /
-   `visualization_msgs`，`setup.py` 要补 `console_scripts` 那一行。
+1. **`vision_node.py` 只在本机做过静态检查，没在 ROS 里跑过。**
+   它订阅 `image_topic` 与 `camera_info_topic`（默认是 driver 里现成的 USB 相机），
+   用 `tf2_ros` 查 `base_link -> <图像的 frame_id>`，把
+   `detection.detections_from_blobs` 的结果发成 `Detection3DArray`。
+   查 TF 时先用图像时间戳，查不到再退回最新一帧（eye-to-hand 下这条链不随
+   关节变化，物理上等价，只是少了对标定时序的检验）。
+   节点自己会检查三件事并打警告：参数里的 `table_z` / `object_edge` 与代码里
+   记的实测值不一致、相机光轴不朝下、相机高度不高于工作面。
 
-2. **相机的 `camera_frame_id` 现在是 `fingerprint_camera`，不在 URDF 里。**
-   必须改成 `camera_link`（`dummy_controller/config/fingerprinter_camera.yaml`
-   的 `camera_frame_id`），否则 TF 树是断的 —— 这是 docs/01 里点名的坑。
-   另外 `fingerprint_camera.py` 里 `cv2.VideoCapture(6)` 的设备号是硬编码的，
-   要参数化（docs/01 的 3.8）。
+2. **相机的 `camera_frame_id` 与设备号已经改好**（`dummy_controller` 包里）：
+   `fingerprinter_camera.yaml` 的 `camera_frame_id` 从 `fingerprint_camera`
+   改成 `camera_color_optical_frame`（`camera_link` 的子帧，rpy -90 0 -90），
+   `fingerprint_camera.py` 加了 `device_index` 参数（默认 6），打不开时日志会
+   直接告诉你去 `ls /dev/video*` 改参数。
+
+   为什么不是 `camera_link`：图像是光学系约定（x 右、y 下、z 朝前），把 frame
+   写成 `camera_link` 等于声称这些像素在机身坐标系里，针孔模型的 z 会指到侧面，
+   而且**照样出数字**，不报错。这类错只能靠 RViz 里看标记歪没歪发现。
 
 3. **三个数**（`geometry.project_scene_measurements()` 里是这台机器的实测值，
    `default_scene_measurements()` 保持全占位，好让占位那条路径一直被测到）：
@@ -86,6 +124,10 @@ tool0 / gripper_tcp           +y 是接近方向（手腕 -> 两指夹持中心�
    彩色在 `/camera/color/image_raw`，点云在 `/camera/depth/points`，
    服务 `/camera/set_image_registration_mode` 可在运行时切 `OFF`/`HW_D2C`/`SW_D2C`。
    接进来之前先在 Windows 上用 Orbbec Viewer 确认相机本身是好的。
+   **接进来时只需要改 `config/vision.yaml` 的两个话题名**（文件里有注释好的
+   那两行），节点其余部分不用动；但那时应该把 `_on_image()` 里那次
+   `detections_from_blobs`（平面反投影）
+   换成"取掩膜内的深度中值"，单目那套假设就可以扔了。
 
 6. **夹爪的映射是占位值，而且代码拒绝用它下发指令。**
    `gripper.unverified_placeholder_model().command_for_width()` 一定抛

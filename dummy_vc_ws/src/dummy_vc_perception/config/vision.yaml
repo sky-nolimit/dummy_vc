@@ -1,0 +1,45 @@
+# vision_node 的参数。
+#
+# 用法（不需要 launch）：
+#   ros2 run dummy_vc_perception vision_node --ros-args \
+#     --params-file $(ros2 pkg prefix dummy_vc_perception)/share/dummy_vc_perception/config/vision.yaml
+#
+# 相机现在还是 driver 里那个 USB 相机（dummy_fingerprint.launch.py），
+# 它把图发到 /dummy/visual/fingerprint_camera，frame 是 camera_color_optical_frame。
+vision_node:
+  ros__parameters:
+
+    # ---- 数据源 ---------------------------------------------------------
+    image_topic: /dummy/visual/fingerprint_camera
+    camera_info_topic: /dummy/visual/fingerprint_camera/camera_info
+    # Orbbec Gemini 335L 接进来之后改成这两行（frame 由图像 header 自带）：
+    #   image_topic: /camera/color/image_raw
+    #   camera_info_topic: /camera/color/camera_info
+
+    # ---- 输出 -----------------------------------------------------------
+    output_topic: /detected_objects
+    marker_topic: /detected_objects/markers
+    publish_markers: true          # RViz 里那个绿色方块 + 橙色箭头
+
+    # ---- 工作面与目标尺寸（本机实测，见 README） -------------------------
+    base_frame: base_link
+    table_z: 0.0                   # 没有桌子：工件与底座同平面
+    object_edge: 0.024             # 方形方块 24 mm
+
+    # ---- 分割 -----------------------------------------------------------
+    # 一条 6 个数：H_lo, S_lo, V_lo, H_hi, S_hi, V_hi（OpenCV 的 H 是 0~180）。
+    # 多条就顺着往后接；这里用扁平数组是因为 ROS 2 的参数不支持数组套数组。
+    # 默认绿色块。红色块跨 H 的 0 点，要写两条：
+    #   hsv_ranges: [0, 120, 70, 10, 255, 255, 170, 120, 70, 180, 255, 255]
+    hsv_ranges: [40, 80, 60, 80, 255, 255]
+    min_area_px: 40                # 小于这个面积的算噪点
+    max_area_fraction: 0.2         # 大于画面 20% 的算背景/桌面
+
+    # ---- 合格判据 -------------------------------------------------------
+    max_edge_error: 0.010          # 量出来的边长与 24 mm 差超过 10 mm 就丢掉
+    max_distance: 1.5              # 超过这个距离的不发（多半是误分割）
+    max_rate_hz: 10.0              # 处理上限；高了就丢帧，不排队
+
+    # 注意：改 table_z / object_edge 时，代码里记的实测值
+    # （dummy_vc_perception/geometry.py 的 project_scene_measurements）也要一起改，
+    # 两者不一致时节点启动会打警告 —— 那是故意的。

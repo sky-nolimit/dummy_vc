@@ -105,11 +105,11 @@ def load_modules():
     if PKG_ROOT not in sys.path:
         sys.path.insert(0, PKG_ROOT)
     try:
-        from dummy_vc_perception import geometry, gripper
+        from dummy_vc_perception import detection, geometry, gripper
     except ImportError as exc:
         fail(f'import dummy_vc_perception 失败：{exc}（几何层只依赖 numpy）')
-        return None, None
-    return geometry, gripper
+        return None, None, None
+    return geometry, gripper, detection
 
 
 # --------------------------------------------------------------------------
@@ -121,7 +121,7 @@ ALLOWED_IMPORTS = {'math', 'dataclasses', 'typing', 'numpy'}
 
 def check_offline_imports():
     print('--- 0. 几何层不许 import ROS / OpenCV')
-    for name in ('geometry.py', 'gripper.py'):
+    for name in ('geometry.py', 'gripper.py', 'detection.py'):
         path = os.path.join(PKG_ROOT, 'dummy_vc_perception', name)
         with open(path, encoding='utf-8') as fh:
             tree = ast.parse(fh.read(), filename=path)
@@ -139,6 +139,49 @@ def check_offline_imports():
                  f'否则离线自测跑不起来')
         else:
             ok(f'{name} 只 import 了 {sorted(found)}')
+
+
+# --------------------------------------------------------------------------
+# 0b. 节点用到的接口必须真的存在
+# --------------------------------------------------------------------------
+
+NODE_PATH = os.path.join(PKG_ROOT, 'dummy_vc_perception', 'vision_node.py')
+
+
+def check_node_api(geometry, gripper, detection):
+    """节点不能离线跑，所以至少盯着它别把接口名写错。
+
+    这是这一层能做的"最接近集成测试"的检查：`geometry.foo` / `detection.bar`
+    里的属性名是唯一能在没有 ROS 的机器上验的东西，而写错属性名正是这类代码
+    最常见的翻车方式（要到 VM 上 import 才炸）。
+    """
+    print('--- 0b. vision_node 引用的 geometry / detection 接口都真的存在')
+    if not os.path.exists(NODE_PATH):
+        fail(f'{os.path.relpath(NODE_PATH, REPO)} 不在了')
+        return
+    with open(NODE_PATH, encoding='utf-8') as fh:
+        tree = ast.parse(fh.read(), filename=NODE_PATH)
+    modules = {'geometry': geometry, 'gripper': gripper, 'detection': detection}
+    referenced = set()
+    unknown = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute):
+            continue
+        if not isinstance(node.value, ast.Name):
+            continue
+        module = modules.get(node.value.id)
+        if module is None:
+            continue
+        name = f'{node.value.id}.{node.attr}'
+        referenced.add(name)
+        if not hasattr(module, node.attr):
+            unknown.append(f'{name}（第 {node.lineno} 行）')
+    for item in unknown:
+        fail(f'vision_node.py 用了不存在的接口 {item}')
+    if not unknown:
+        ok(f'引用的 {len(referenced)} 个接口都在：{sorted(referenced)}')
+    if not referenced:
+        fail('一个 geometry/detection 接口都没引用？节点大概没在干正事')
 
 
 # --------------------------------------------------------------------------
@@ -444,14 +487,120 @@ def check_measurements(geometry, gripper):
           f'需要的开口 {need * 1000:.1f} mm（实机最大开口还没量过）')
 
 
+def yaw_error_deg(got, want):
+    """朝向差多少度（正方形是 90 度对称的，所以按 mod 90 比）。"""
+    quarter = math.pi / 2.0
+    diff = (got - want) % quarter
+    return math.degrees(min(diff, quarter - diff))
+
+
+def check_detection(geometry, gripper, detection):
+    print('--- 10. 掩膜 -> 抓取点（合成数据，端到端）')
+    camera = geometry.PinholeCamera(FX, FY, CX, CY, width=640, height=480,
+                                    distortion=DISTORTION)
+    table_z = 0.0
+    edge = 0.024
+    # 相机在 base_link 正上方 0.6 m、垂直朝下，图像上方是 base 的 +y：
+    #   x_opt = +x、y_opt = -y（图像 y 朝下）、z_opt = -z（朝下看）
+    T = np.eye(4)
+    T[:3, :3] = np.array([[1.0, 0.0, 0.0],
+                          [0.0, -1.0, 0.0],
+                          [0.0, 0.0, -1.0]])
+    T[:3, 3] = (0.0, 0.0, 0.6)
+    T_optical_base = geometry.invert_transform(T)
+
+    def pixel_of(point_base):
+        p = T_optical_base @ np.append(np.asarray(point_base, float), 1.0)
+        return camera.project(p[:3])
+
+    def mask_of_square(centre, yaw_rad, half_px=18):
+        """画出 base 平面上一个 24 mm 正方形所占的像素（含畸变、含透视）。"""
+        c, s = math.cos(yaw_rad), math.sin(yaw_rad)
+        mask = np.zeros((480, 640), bool)
+        cu, cv = pixel_of((centre[0], centre[1], table_z))
+        for v in range(int(round(cv)) - half_px, int(round(cv)) + half_px + 1):
+            for u in range(int(round(cu)) - half_px, int(round(cu)) + half_px + 1):
+                if not (0 <= u < 640 and 0 <= v < 480):
+                    continue
+                hit = geometry.backproject_pixel_to_plane(
+                    camera, u + 0.5, v + 0.5, T, table_z)
+                dx = hit[0] - centre[0]
+                dy = hit[1] - centre[1]
+                if abs(c * dx + s * dy) <= edge / 2.0 and \
+                        abs(-s * dx + c * dy) <= edge / 2.0:
+                    mask[v, u] = True
+        return mask
+
+    for centre, yaw_deg in (((0.05, -0.02), 0.0), ((0.05, -0.02), 30.0),
+                            ((-0.03, 0.04), 45.0)):
+        yaw_rad = math.radians(yaw_deg)
+        mask = mask_of_square(centre, yaw_rad)
+        if int(mask.sum()) < 100:
+            fail('合成掩膜只有 {} 个像素 —— 测试本身写错了'.format(int(mask.sum())))
+            continue
+        blobs = detection.blobs_from_labels(mask.astype(np.int32))
+        if len(blobs) != 1:
+            fail('标签图里应该只有一个 blob，拿到 {} 个'.format(len(blobs)))
+            continue
+        det = detection.detection_from_blob(blobs[0], camera, T, table_z, edge)
+        tag = '{:.0f} 度'.format(yaw_deg)
+        # 1.5 mm 的容差 = 一个像素多一点（0.6 m 处 1 px = 1.212 mm），
+        # 因为掩膜本身就是按像素量化出来的。
+        close('{}：抓取点 xy'.format(tag), det.position[:2], centre, 0.0015)
+        close('{}：抓取点 z = 边长一半'.format(tag), det.position[2],
+              table_z + edge / 2.0, 1e-12)
+        err = yaw_error_deg(det.yaw_rad, yaw_rad)
+        if err <= 2.0:
+            ok('{}：拟合出的朝向差 {:.2f} 度'.format(tag, err))
+        else:
+            fail('{}：拟合出的朝向差了 {:.2f} 度（> 2.0）'.format(tag, err))
+        # 3 mm 容差：掩膜是按像素量化出来的，一条 20 px 的边本来就允许差
+        # 1~2 个像素（0.6 m 处 1 px = 1.212 mm）。
+        close('{}：拟合出的两条边长与 24 mm 的差'.format(tag),
+              det.extent_m, (edge, edge), 0.0030)
+        close('{}：四元数与顶抓姿态一致'.format(tag), det.quaternion,
+              geometry.top_down_grasp_quaternion(det.yaw_rad), 1e-12)
+    print('    相机距离 {:.3f} m，该深度 1 像素 = {:.3f} mm'.format(
+        det.distance_m, det.metres_per_pixel[0] * 1000.0))
+
+    # 朝向为什么必须拟合：顶抓时两指要贴着方块的一条边进去。偏 45 度时
+    # 需要的开口是边长 × sqrt(2)，24 mm 方块就是 34 mm —— 而实测手爪能
+    # 给出的是 26 mm 开口，夹不住。
+    diagonal = edge * math.sqrt(2.0)
+    note('方块转 45 度时需要的开口是 {:.1f} mm，比 26 mm 大 —— '
+         '所以朝向不能糊弄，偏了就是夹不住'.format(diagonal * 1000.0))
+
+    # 反向：相机在平面下方 / 工作面在相机上方，都必须拒绝而不是算个假点
+    below = T.copy()
+    below[2, 3] = -0.6
+    blob = detection.Blob.from_points(
+        np.array([[u, v] for u in range(310, 330) for v in range(230, 250)],
+                 float))
+    expect_error('相机在平面下方时拒绝给出抓取点', geometry.GeometryError,
+                 detection.detection_from_blob, blob, camera, below, table_z, edge)
+    expect_error('工作面在相机上方时拒绝', geometry.GeometryError,
+                 detection.detection_from_blob, blob, camera, T, 1.0, edge)
+
+    # 小噪点要被门限挡掉；点数太少时不许硬凑出一个朝向
+    tiny = np.zeros((480, 640), np.int32)
+    tiny[100:103, 100:103] = 1
+    if detection.blobs_from_labels(tiny):
+        fail('9 个像素的噪点没被门限挡住')
+    else:
+        ok('小于面积门限的 blob 被丢掉')
+    expect_error('点数太少时拒绝拟合朝向', geometry.GeometryError,
+                 detection.fit_edge_yaw, np.zeros((5, 2)))
+
+
 def main():
     print(f'reading {os.path.relpath(PKG_ROOT, REPO)}')
-    geometry, gripper = load_modules()
+    geometry, gripper, detection = load_modules()
     if geometry is None:
         print('\nFAILED (geometry layer not importable)')
         return 1
 
     check_offline_imports()
+    check_node_api(geometry, gripper, detection)
     check_camera_model(geometry)
     check_project_roundtrip(geometry)
     check_plane_and_backproject(geometry)
@@ -461,6 +610,7 @@ def main():
     check_xacro_camera_note(geometry)
     check_gripper(gripper, geometry)
     check_measurements(geometry, gripper)
+    check_detection(geometry, gripper, detection)
 
     print()
     if FAILURES:

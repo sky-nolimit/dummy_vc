@@ -14,12 +14,17 @@
   <maintainer email="dummy-vc@localhost">Dummy VC</maintainer>
   <license>MIT</license>
 
-  <!-- 下面这两条是 geometry.py 真正用到的。
-       视觉节点落地时还要加：vision_msgs、cv_bridge、tf2_ros、
-       visualization_msgs、sensor_msgs —— 现在没写、也没用，就不声明，
-       免得 rosdep 去装一个用不上的东西。 -->
+  <!-- geometry.py / gripper.py / detection.py 只要 numpy；
+       vision_node.py 才需要 ROS 的那几个包。 -->
   <depend>rclpy</depend>
   <depend>python3-numpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>vision_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_ros_py</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

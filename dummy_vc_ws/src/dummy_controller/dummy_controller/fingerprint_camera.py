@@ -25,17 +25,23 @@ class DummyUSBCameraPublisher(Node):
                 ('image_width', 640),
                 ('image_height', 480),
                 ('fps', 30),
-                ('camera_frame_id', 'camera'),
+                ('device_index', 6),
+                ('camera_frame_id', 'camera_color_optical_frame'),
                 ('camera_topic', '/camera/image_raw'),
             ]
         )
 
         self.bridge = CvBridge()
 
-        # 打开相机
-        self.cap = cv2.VideoCapture(6)
+        # 打开相机。设备号走参数：插拔顺序一变 /dev/videoN 就换号，
+        # 写死在代码里的话换台机器就得改代码（docs/01 的 3.8）。
+        device_index = int(self.get_parameter('device_index').value)
+        self.get_logger().info('opening USB camera /dev/video%d' % device_index)
+        self.cap = cv2.VideoCapture(device_index)
         if not self.cap.isOpened():
-            self.get_logger().error("Cannot open USB camera")
+            self.get_logger().error(
+                'Cannot open USB camera /dev/video%d -- 用 ls /dev/video* 看设备号，'
+                '改 device_index 参数' % device_index)
             exit(1)
 
         # 图像发布器

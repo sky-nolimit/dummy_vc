@@ -43,7 +43,7 @@ Dummy_vc/
 │       ├── dummy2_urdf/           机械臂模型（URDF/Xacro + STL）—— 唯一模型来源
 │       ├── dummy_controller/      ROS 2 控制器（lifecycle 节点 + fibre 驱动）—— 唯一硬件通道
 │       ├── dummy_vc_calibration/  阶段 0 硬件标定节点（预览-确认-执行）
-│       ├── dummy_vc_perception/   视觉感知（几何层已落地，节点待写）
+│       ├── dummy_vc_perception/   视觉感知（几何/检测层已离线自测，vision_node 待 VM 验证）
 │       └── dummy_vc_moveit_config/ MoveIt 2 配置（SRDF、限位、规划器、RViz）
 │
 ├── tools/                 不依赖 ROS 的独立工具（索引见 tools/README.md）
@@ -126,7 +126,7 @@ python tools/run_checks.py
 它覆盖：Python 语法、编码/BOM、换行符、URDF 结构与限位、MoveIt 配置与 URDF
 及设备实测行程的一致性、坐标换算恒等式、下发链对实测配对、标定自洽
 （锚点/收缩折叠/往返/三处默认值一致）、等待逻辑（对模拟的慢速设备）、
-MoveIt 的 action 接口、视觉几何层（顶抓轴向/畸变/桌面反投影/夹爪映射）。
+MoveIt 的 action 接口、视觉几何与检测层（顶抓轴向/畸变/桌面反投影/边长与朝向/夹爪映射）。
 
 ### 起驱动
 
@@ -170,7 +170,7 @@ ros2 topic pub --once /joint_trajectory_controller/joint_trajectory \
 | 1c | 夹爪实测 | ⛔ **阻塞** —— 见下方 |
 | **2** | **MoveIt 配置** | ✅ 真机 Plan & Execute 已连续可用（含安全退出）；配置见 `docs/08` |
 | 3 | 驱动补强（限速、急停、GripperCommand 动作） | 部分完成（FollowJointTrajectory 动作已完成） |
-| 4 | 视觉感知 | 🔸 几何层已落地并离线自测；节点待写（相机已到货：Gemini 335L） |
+| 4 | 视觉感知 | 🔸 几何层 + 检测层 + `vision_node` 已落地；几何/检测离线自测，节点待 VM 上验证（相机已到货：Gemini 335L） |
 | 5 | 抓取规划 + 任务状态机 | 待开始 |
 | 6 | 深度相机接入 + 手眼标定 | 待开始（相机已到货，先在 Windows 上验证） |
 
