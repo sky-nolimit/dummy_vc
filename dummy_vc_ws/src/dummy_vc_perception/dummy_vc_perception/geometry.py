@@ -55,7 +55,14 @@ class GeometryError(RuntimeError):
 class PinholeCamera:
     """针孔 + plumb_bob 畸变，字段与 sensor_msgs/CameraInfo 一一对应。
 
-    distortion 的顺序与 CameraInfo.d 一致：(k1, k2, p1, p2, k3)。
+    只取 `CameraInfo.d` 的**前 5 个**：(k1, k2, p1, p2, k3)，即 plumb_bob。
+
+    有的驱动会发 8 个系数（本仓库的 Orbbec Gemini 335L 就是：它把
+    `distortion_model` 写成 plumb_bob，`d` 却是 rational_polynomial 的
+    `(k1, k2, p1, p2, k3, k4, k5, k6)` 顺序）。多出来的 k4..k6 在 plumb_bob
+    公式里没有位置，这里丢掉它们并把个数记在 `ignored_distortion` 里，让上层
+    能 warn 一句，而不是静默丢——Gemini 335L 实测这三个都是 0，丢掉没有代价，
+    但换成别的相机就得重新判断。
     """
 
     def __init__(self, fx, fy, cx, cy, width=None, height=None,
@@ -69,10 +76,13 @@ class PinholeCamera:
         self.width = None if width is None else int(width)
         self.height = None if height is None else int(height)
         d = tuple(float(v) for v in distortion)
-        if len(d) != 5:
+        if not d:
+            d = (0.0, 0.0, 0.0, 0.0, 0.0)
+        if len(d) < 5:
             raise GeometryError(
-                'distortion 要 5 个数 (k1,k2,p1,p2,k3)，收到 {} 个'.format(len(d)))
-        self.distortion = d
+                'distortion 至少要 5 个数 (k1,k2,p1,p2,k3)，收到 {} 个'.format(len(d)))
+        self.ignored_distortion = len(d) - 5
+        self.distortion = d[:5]
 
     @classmethod
     def from_camera_info(cls, k, width=None, height=None, d=None):

@@ -205,6 +205,26 @@ def check_camera_model(geometry):
     expect_error('distortion 少一个数被拒绝', geometry.GeometryError,
                  geometry.PinholeCamera, FX, FY, CX, CY, None, None, (0.0, 0.0, 0.0))
 
+    # Gemini 335L 实测（2026-10-16 在 VM 上 echo 到的真实 CameraInfo）：
+    # distortion_model 写 plumb_bob，d 却是 8 个数——那是 rational_polynomial
+    # 的 (k1,k2,p1,p2,k3,k4,k5,k6)。只该用前 5 个，并且把丢掉的个数记下来。
+    # 这台相机的 k4..k6 全是 0，丢掉没代价；但代码不能因为 8 个数就整条挂掉。
+    GEMINI_K = (614.2484741210938, 0.0, 641.4732666015625,
+                0.0, 614.148193359375, 365.4802551269531,
+                0.0, 0.0, 1.0)
+    GEMINI_D = (-0.02929498627781868, 0.03310345113277435,
+                -9.030981891555712e-05, 9.581100312061608e-05,
+                -0.01202486827969551, 0.0, 0.0, 0.0)
+    gemini = geometry.PinholeCamera.from_camera_info(
+        GEMINI_K, width=1280, height=720, d=GEMINI_D)
+    close('8 个畸变系数只取前 5 个', gemini.distortion, GEMINI_D[:5], 0.0)
+    if gemini.ignored_distortion == 3:
+        ok('并记下丢掉了 3 个系数（k4,k5,k6）')
+    else:
+        fail(f'ignored_distortion 应为 3，实际 {gemini.ignored_distortion}')
+    close('Gemini 的 fx/fy 解析正确', [gemini.fx, gemini.fy],
+          [614.2484741210938, 614.148193359375], 0.0)
+
     dx, dy = cam.metres_per_pixel(0.6)
     print(f'    0.6 m 处 1 像素 = {dx * 1000:.3f} mm (x) / {dy * 1000:.3f} mm (y)')
     # docs/01 说"0.6 m 桌面 1 像素 ≈ 1 mm"，实际是 1.21 mm。这个数决定了

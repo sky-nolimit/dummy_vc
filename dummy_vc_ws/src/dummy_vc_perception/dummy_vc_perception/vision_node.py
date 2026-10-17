@@ -91,6 +91,7 @@ class VisionNode(Node):
         self.misses = 0               # 连续几次没找到目标，用来别刷屏
         self.tf_warned = False
         self.geometry_warned = False
+        self.distortion_warned = False
 
         self.pub = self.create_publisher(
             Detection3DArray, self.get_parameter('output_topic').value, 10)
@@ -174,6 +175,14 @@ class VisionNode(Node):
                 '内参 fx/fy = {}/{}：相机节点没填内参，投不了影'.format(
                     self.camera.fx, self.camera.fy))
             self.camera = None
+            return
+        # 8 个畸变系数的驱动（Gemini 335L 就是）只用到前 5 个，说一声。
+        if self.camera.ignored_distortion and not self.distortion_warned:
+            self.distortion_warned = True
+            self.get_logger().warn(
+                'CameraInfo.d 有 {} 个数，只用了前 5 个 (k1,k2,p1,p2,k3)，'
+                '丢掉了 {} 个（k4,k5,k6）。如果那几项不是 0，畸变模型要换。'
+                .format(len(msg.d), self.camera.ignored_distortion))
 
     def _on_image(self, msg):
         if self.camera is None:
