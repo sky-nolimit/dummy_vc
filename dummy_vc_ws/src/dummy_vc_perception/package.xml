@@ -11,7 +11,9 @@
     依赖，所以能在没有 ROS 的机器上离线自测；节点只负责 ROS 接口与 TF。
     相机到位前先用 driver 里现成的 USB 相机，接口按深度相机标准设计。
   </description>
-  <maintainer email="dummy-vc@localhost">Dummy VC</maintainer>
+  <!-- 邮箱要有 @ 和带点的域名：dummy-vc@localhost 会让整个 manifest 解析失败，
+       colcon 只打一行 WARNING 就继续，结果是包编好了但 ros2 pkg 找不到它。 -->
+  <maintainer email="dummy-vc@example.com">Dummy VC</maintainer>
   <license>MIT</license>
 
   <!-- geometry.py / gripper.py / detection.py 只要 numpy；

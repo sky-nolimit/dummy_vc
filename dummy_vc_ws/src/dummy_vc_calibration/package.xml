@@ -8,7 +8,9 @@
     夹持力上限、set_position_with_time 的时间单位、TCP 偏移。
     采用「预览 - 确认 - 执行」两段式，所有动作先在 RViz 预览。
   </description>
-  <maintainer email="dummy-vc@localhost">Dummy VC</maintainer>
+  <!-- 邮箱要有 @ 和带点的域名：dummy-vc@localhost 会让整个 manifest 解析失败，
+       colcon 只打一行 WARNING 就继续，结果是包编好了但 ros2 pkg 找不到它。 -->
+  <maintainer email="dummy-vc@example.com">Dummy VC</maintainer>
   <license>MIT</license>
 
   <depend>rclpy</depend>
