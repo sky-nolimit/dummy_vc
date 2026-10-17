@@ -18,8 +18,13 @@
 <!-- 手指伸出的方向：URDF 里手爪挂在 link7 的 +y 方向 -->
 <xacro:property name="hand_axis" value="y"/>
 
-<!-- link7 -> 两指夹持中心(指尖前端中点)，沿 hand_axis 的距离。实测 -->
-<xacro:property name="tcp_offset_y" value="0.06"/>
+<!-- link7 -> 两指夹持中心(指尖前端中点)，沿 hand_axis 的距离。
+     实测：2026-10-16 尺量，约 15 mm。
+     注意它比 hand 关节的 0.052312 还小，所以 gripper_tcp 落在 hand 坐标系
+     原点的**后方**（y = 0.015 - 0.052312 = -0.037312，即比 hand 原点更靠近
+     link7）—— 实物手爪的两指是贴着腕部夹的。URDF 里那套手指几何来自原作者
+     模型、与实物不符（docs/04 A1），两者不能互相印证。 -->
+<xacro:property name="tcp_offset_y" value="0.015"/>
 
 <!-- 相机的安装参数（外置支架，eye-to-hand）定义在文件末尾的相机段落里，
      因为那里有较长的说明。用 grep 搜 camera_offset 可以找到。 -->

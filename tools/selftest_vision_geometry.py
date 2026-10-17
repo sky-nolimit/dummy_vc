@@ -82,6 +82,25 @@ def expect_error(label, exc_types, func, *args, **kwargs):
     return False
 
 
+def xacro_property(name, default):
+    """从 xacro 里读一个 <xacro:property> 的数值；读不到/不是数就返回 default。
+
+    xacro 是 URDF 的权威，所以这里直接读源文件，不另抄一份常量。
+    """
+    try:
+        with open(XACRO, encoding='utf-8') as fh:
+            text = fh.read()
+    except OSError:
+        return default
+    hit = re.search(r'name="%s"\s+value="([^"]+)"' % name, text)
+    if not hit:
+        return default
+    try:
+        return float(hit.group(1))
+    except ValueError:
+        return default
+
+
 def load_modules():
     if PKG_ROOT not in sys.path:
         sys.path.insert(0, PKG_ROOT)
@@ -315,20 +334,10 @@ def check_waypoints(geometry):
 
 def check_xacro_camera_note(geometry):
     print('--- 7. xacro 里的相机占位姿态（只提示，不判红）')
-    try:
-        with open(XACRO, encoding='utf-8') as fh:
-            text = fh.read()
-    except OSError as exc:
-        fail(f'读不到 {XACRO}: {exc}')
-        return
-
-    def prop(name, default):
-        hit = re.search(r'name="%s"\s+value="([^"]+)"' % name, text)
-        return float(hit.group(1)) if hit else default
-
-    cam_xyz = (prop('camera_offset_x', 0.30), prop('camera_offset_y', 0.0),
-               prop('camera_offset_z', 0.60))
-    mount = tuple(math.radians(prop('camera_mount_%s_deg' % axis, 0.0))
+    cam_xyz = (xacro_property('camera_offset_x', 0.30),
+               xacro_property('camera_offset_y', 0.0),
+               xacro_property('camera_offset_z', 0.60))
+    mount = tuple(math.radians(xacro_property('camera_mount_%s_deg' % axis, 0.0))
                   for axis in ('roll', 'pitch', 'yaw'))
     T_base_cam = geometry.transform_from_xyz_rpy(cam_xyz, mount)
     # camera_link 的 +x 是镜头方向（xacro 自己的注释这么写的），
@@ -389,7 +398,7 @@ def check_gripper(gripper, geometry):
     print(f'    {measured.describe()}')
 
 
-def check_measurements(geometry):
+def check_measurements(geometry, gripper):
     print('--- 9. 还没实测的数被标出来了')
     scene = geometry.default_scene_measurements()
     unmeasured = scene.unmeasured()
@@ -402,6 +411,37 @@ def check_measurements(geometry):
         fail("source='measured' 仍被当成未实测")
     expect_error('source 拼错被拒绝', geometry.GeometryError,
                  geometry.Measurement, 0.1, 'm', 'measured-ish', '尺子')
+
+    print('--- 9b. 本机的实测值，以及它必须和 xacro 一致')
+    real = geometry.project_scene_measurements()
+    if real.unmeasured():
+        fail('本机实测值里还有没实测的：' + real.describe_unmeasured())
+    else:
+        ok('本机三个数都是 measured：' + '; '.join(
+            '{} = {}'.format(name, m.describe())
+            for name, m in real.as_dict().items()))
+    # 同一个数写在两个地方（xacro 给 MoveIt 用，代码给抓取点用），
+    # 改一处不改另一处，规划用的 TCP 和视觉算的抓取点就差几毫米 ——
+    # 而这正好是"对准了但没夹住"的样子。
+    xacro_tcp = xacro_property('tcp_offset_y', float('nan'))
+    close('xacro 的 tcp_offset_y 与代码里的实测值一致',
+          real.tcp_offset_y.value, xacro_tcp, 1e-12)
+    # 方块是放在工作面上的，抓取点取它的中心，所以高度是边长的一半。
+    close('24 mm 方块的中心在工作面上方 12 mm',
+          geometry.object_center_on_table(0.0, 0.0, real.table_z.value,
+                                          real.object_edge.value),
+          np.array([0.0, 0.0, real.table_z.value + real.object_edge.value / 2.0]),
+          1e-12)
+    # 开口需求 = 边长 + clearance（clearance 是总余量，两侧各 1 mm），
+    # 与 gripper.grasp_width_for() 的算法保持一致。
+    need = real.object_edge.value + gripper.DEFAULT_GRASP_CLEARANCE_M
+    close('夹 24 mm 方块需要 26 mm 开口', need, 0.026, 1e-12)
+    close('grasp_width_for() 与上面那个式子一致',
+          gripper.unverified_placeholder_model().grasp_width_for(
+              real.object_edge.value),
+          need, 1e-12)
+    print(f'    抓取点高度 {real.object_edge.value / 2.0 * 1000:.1f} mm，'
+          f'需要的开口 {need * 1000:.1f} mm（实机最大开口还没量过）')
 
 
 def main():
@@ -420,7 +460,7 @@ def main():
     check_waypoints(geometry)
     check_xacro_camera_note(geometry)
     check_gripper(gripper, geometry)
-    check_measurements(geometry)
+    check_measurements(geometry, gripper)
 
     print()
     if FAILURES:

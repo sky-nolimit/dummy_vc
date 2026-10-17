@@ -170,9 +170,9 @@ ros2 topic pub --once /joint_trajectory_controller/joint_trajectory \
 | 1c | 夹爪实测 | ⛔ **阻塞** —— 见下方 |
 | **2** | **MoveIt 配置** | ✅ 真机 Plan & Execute 已连续可用（含安全退出）；配置见 `docs/08` |
 | 3 | 驱动补强（限速、急停、GripperCommand 动作） | 部分完成（FollowJointTrajectory 动作已完成） |
-| 4 | 视觉感知 | 🔸 几何层已落地并离线自测；节点待写（相机未到货） |
+| 4 | 视觉感知 | 🔸 几何层已落地并离线自测；节点待写（相机已到货：Gemini 335L） |
 | 5 | 抓取规划 + 任务状态机 | 待开始 |
-| 6 | 深度相机接入 + 手眼标定 | 待开始 |
+| 6 | 深度相机接入 + 手眼标定 | 待开始（相机已到货，先在 Windows 上验证） |
 
 ### 已知阻塞：夹爪
 

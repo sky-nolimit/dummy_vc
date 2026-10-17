@@ -402,8 +402,11 @@ class SceneMeasurements:
 
         [WARN] 还没实测：table_z = 0.0 m (placeholder)
 
-    table_z        base_link 下桌面的高度（米）。量法：尺子量 base_link 原点
-                   所在平面到桌面的距离。
+    table_z        base_link 下**工作面**的高度（米）—— 方块底面贴在这个平面上。
+                   有桌面时是桌面；本机这套**没有桌子，工件和底座在同一平面**，
+                   于是 z = 0（base_link 的原点就在底座底面，j1 在 z = 0.0805，
+                   是 78 mm 高的底座顶面）。量法：尺子量 base_link 原点所在平面
+                   到工作面的距离，同平面时就是 0。
     tcp_offset_y   link7 端面到两指夹持中心的距离（米），也就是 URDF 里
                    gripper_tcp 的偏移（docs/04 的 A1）。量法：卡尺。
     object_edge    演示用方块的边长（米）。
@@ -440,4 +443,33 @@ def default_scene_measurements() -> SceneMeasurements:
                                  'xacro 里 tcp_offset_y 的占位值；卡尺量 link7 端面到两指夹持中心'),
         object_edge=Measurement(0.04, 'm', 'placeholder',
                                 '演示方块的边长，卡尺量'),
+    )
+
+
+def project_scene_measurements() -> SceneMeasurements:
+    """本机这套的实际数值（2026-10-16 由用户实测/确认）。
+
+    与 default_scene_measurements() 分开是有意的：默认值保持"全是占位"，
+    好让占位那条路径一直被测到；这一份是这台机器现在的真实状态，节点在
+    没有配置覆盖时用它，并且在日志里点名每个数的来历。
+
+    - table_z = 0.0：**没有桌子**，方块就放在和机械臂底座同一平面上，而
+      base_link 的原点正是底座底面（j1 在 z = 0.0805 处，即 78 mm 底座的
+      顶面），所以工作面就是 z = 0。
+    - tcp_offset_y = 0.015：link7 端面到两指夹持中心约 15 mm（尺量）。它比
+      hand 关节的 0.052312 小，所以 gripper_tcp 落在 hand 坐标系原点后方
+      y = -0.037312 —— 实物两指是贴着腕部夹的，URDF 里那套手指几何来自
+      原作者模型、与实物不符（docs/04 A1）。
+    - object_edge = 0.024：边长 24 mm 的方形方块。
+
+    注意 tcp_offset_y 已经写进 `dummy2_urdf.xacro` 的 `tcp_offset_y`，两处必须
+    一致；改一处不改另一处，规划用的 TCP 和这里算的抓取点就会差几毫米。
+    """
+    return SceneMeasurements(
+        table_z=Measurement(0.0, 'm', 'measured',
+                            '无桌面：工件与底座同平面，base_link 原点即底座底面'),
+        tcp_offset_y=Measurement(0.015, 'm', 'measured',
+                                 '尺量 link7 端面到两指夹持中心约 15 mm（xacro 里同名常量）'),
+        object_edge=Measurement(0.024, 'm', 'measured',
+                                '方形方块，边长 24 mm'),
     )
