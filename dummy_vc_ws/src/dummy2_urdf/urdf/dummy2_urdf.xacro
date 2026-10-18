@@ -441,33 +441,37 @@
          方案 A（推荐）：把标定结果填进下面这个固定关节，删掉外部静态发布
          方案 B：给下面这个关节加条件，标定后不再展开
        首期用方案 A，简单直接。 -->
-<xacro:property name="camera_offset_x" value="-0.23"/>
+<xacro:property name="camera_offset_x" value="-0.21"/>
 <xacro:property name="camera_offset_y" value="0.30"/>
 <xacro:property name="camera_offset_z" value="0.15"/>
 
 <!-- 相机安装姿态（度）。
-     这三条是 2026-10-16 用户口头给的位置（-x 23 cm、+y 30 cm、高 15 cm），
-     **不是标定结果**，手眼标定会给出准确值。
 
-     相机是**斜向下 30°（相对水平）**，不是垂直向下 —— 倾斜方向朝 +x，
-     光轴在 base_link 里是 (0.866, 0, -0.500)，落到地面（z=0）上的点是
-     (-0.23 + 0.15/tan30°, 0.30) ≈ (+0.03, +0.30)，离用户说的方块位置
-     （+y 31 cm、x≈0）只有几厘米，所以方块应该出现在画面中心附近。
+     位置和角度都是 2026-10-16 用户用卷尺/目测给的（-x 21 cm、+y 30 cm、
+     高 15 cm），**不是标定结果**，手眼标定会给出准确值。
 
-     rpy 这里为什么是 pitch=+30°：
-     相机本体系 camera_link 的 **+x 是镜头方向**（REP-103 下 x 前），而
-     orbbec_camera 驱动把光学系定义成 optical 的 z（前）指向 camera_link 的 +x。
-     绕 y 轴转 pitch 角，+x 变成 (cos pitch, 0, -sin pitch)：
-       pitch=90° → (0, 0, -1)  垂直朝下
-       pitch=30° → (0.866, 0, -0.5)  朝 +x 斜下 30°  ← 现在用这个
-     写成绕 x 轴转 roll 的话镜头只在 yz 平面里动，方向完全不同；写成
-     roll=180 则镜头水平朝 +x —— 那个值反投影出来的结果全是斜的，而且
-     不会报错。
+     俯角这一条是**反解出来的，不是估的**：方块放在 base_link 的 (+y 0.30、
+     边长 24 mm) 时，vision_node 实际看到的那个像素是 (591, 555)，而按原先
+     估的"斜下 30°、高 15 cm"应该落在 (564, 376) —— 竖直差了 180 像素，
+     报出来的抓取点因此偏了 9 cm（x 方向）。固定高度 15 cm，用这一个观测点
+     解出俯角 16°，此时算出的抓取点与尺量位置对得上。
 
-     yaw=0：倾斜方向就是 +x。如果实机上画面中心不在方块上，改的是 pitch
-     和 yaw 两个数（pitch 管压低多少、yaw 管朝哪个方位压），不是只改 yaw。 -->
+     不确定度要说清楚：单点标定对高度很敏感 —— 高度 14 cm 会解出 14°、
+     16 cm 解出 18°，所以 16° 的误差可能随时是 ±3°，在 0.27 m 处就是 ±1.4 cm。
+     手眼标定之前够用，标定之后换真实值。
+
+     俯角写小了/写大了怎么改：pitch 越大压得越陡（90° = 垂直朝下）。这个角
+     必须写在 **pitch** 上 —— camera_link 的 +x 才是镜头方向（orbbec 驱动把
+     光学系的 z 指向 camera_link 的 +x），绕 y 轴转 pitch 时 +x 变成
+     (cos pitch, 0, -sin pitch)；写成 roll 的话镜头只在 yz 平面里动，方向完全
+     不同，而且不会报错，只是所有抓取点都偏。
+
+     yaw=0：倾斜方向就是 +x。水平方向还差约 5°（观测像素比预期偏左 50 像素，
+     相当于 0.27 m 处 2 cm），现在分不清是相机装歪了 5°、还是相机/方块的位置
+     量偏了 2 cm，所以先不动 yaw —— 把方块换个 y 位置再测一次就能分开。
+     真要改的时候：pitch 管压低多少，yaw 管朝哪个方位压，不是只改 yaw。 -->
 <xacro:property name="camera_mount_roll_deg" value="0"/>
-<xacro:property name="camera_mount_pitch_deg" value="30"/>
+<xacro:property name="camera_mount_pitch_deg" value="16"/>
 <xacro:property name="camera_mount_yaw_deg" value="0"/>
 
 <link name="camera_link"/>
