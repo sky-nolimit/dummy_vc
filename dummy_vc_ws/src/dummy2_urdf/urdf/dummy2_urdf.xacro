@@ -449,15 +449,25 @@
      这三条是 2026-10-16 用户口头给的位置（-x 23 cm、+y 30 cm、高 15 cm），
      **不是标定结果**，手眼标定会给出准确值。
 
-     rpy 这里为什么是 pitch=+90° 而不是"绕 x 轴 -90°"：
+     相机是**斜向下 30°（相对水平）**，不是垂直向下 —— 倾斜方向朝 +x，
+     光轴在 base_link 里是 (0.866, 0, -0.500)，落到地面（z=0）上的点是
+     (-0.23 + 0.15/tan30°, 0.30) ≈ (+0.03, +0.30)，离用户说的方块位置
+     （+y 31 cm、x≈0）只有几厘米，所以方块应该出现在画面中心附近。
+
+     rpy 这里为什么是 pitch=+30°：
      相机本体系 camera_link 的 **+x 是镜头方向**（REP-103 下 x 前），而
      orbbec_camera 驱动把光学系定义成 optical 的 z（前）指向 camera_link 的 +x。
-     所以要让镜头朝下（optical z = base_link -z），必须把 camera_link 的 +x
-     转到 -z 上，也就是绕 y 轴 +90°。写成绕 x 转 -90° 的话镜头会保持水平朝
-     +x —— 那个值反投影出来的结果全是斜的，而且不会报错。
-     安装偏航角（图像落在哪个方向上）标定前不关心，先取 0。 -->
+     绕 y 轴转 pitch 角，+x 变成 (cos pitch, 0, -sin pitch)：
+       pitch=90° → (0, 0, -1)  垂直朝下
+       pitch=30° → (0.866, 0, -0.5)  朝 +x 斜下 30°  ← 现在用这个
+     写成绕 x 轴转 roll 的话镜头只在 yz 平面里动，方向完全不同；写成
+     roll=180 则镜头水平朝 +x —— 那个值反投影出来的结果全是斜的，而且
+     不会报错。
+
+     yaw=0：倾斜方向就是 +x。如果实机上画面中心不在方块上，改的是 pitch
+     和 yaw 两个数（pitch 管压低多少、yaw 管朝哪个方位压），不是只改 yaw。 -->
 <xacro:property name="camera_mount_roll_deg" value="0"/>
-<xacro:property name="camera_mount_pitch_deg" value="90"/>
+<xacro:property name="camera_mount_pitch_deg" value="30"/>
 <xacro:property name="camera_mount_yaw_deg" value="0"/>
 
 <link name="camera_link"/>

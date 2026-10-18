@@ -36,6 +36,34 @@ ros2 topic echo /detected_objects --once
 ros2 run rviz2 rviz2      # 加 MarkerArray -> /detected_objects/markers
 ```
 
+### 没有机械臂也能验（只用相机）
+
+`base_link -> camera_link` 是固定关节，由 `robot_state_publisher` 从 URDF 直接
+发到 `/tf_static`，**跟机械臂在不在、使能没使能无关**。所以相机单独就能把整条
+几何链跑通：
+
+```bash
+# 终端 1：只要 TF，不碰硬件（不需要驱动，手臂不会动）
+xacro $(ros2 pkg prefix dummy2_urdf_description)/share/dummy2_urdf_description/urdf/dummy2_urdf.xacro > /tmp/dummy2.urdf
+ros2 run robot_state_publisher robot_state_publisher --ros-args \
+  -p robot_description:="$(cat /tmp/dummy2.urdf)"
+
+# 终端 2：相机（Orbbec）
+ros2 launch orbbec_camera gemini_330_series.launch.py
+
+# 终端 3：核对挂载 —— translation 应该是 [-0.230, 0.300, 0.150]
+ros2 run tf2_ros tf2_echo base_link camera_color_optical_frame
+
+# 终端 4：视觉节点（Orbbec 的话题名）
+ros2 run dummy_vc_perception vision_node --ros-args \
+  -p image_topic:=/camera/color/image_raw \
+  -p camera_info_topic:=/camera/color/camera_info
+```
+
+这条路径验的是「分割 + 投影 + 平面假设 + TF 链」，不验标定：`base_link` 的
+位置是 URDF 里声称的，相机实际摆在哪儿它并不知道。所以数值对得上要对得上
+的前提是**相机真的摆在那三个数上**；摆歪了数值就歪，那不算失败。
+
 成功判据（由弱到强）：
 
 1. 节点日志有 `listening on ...` 和 `工作面 z = +0.0000 m ...`；
@@ -63,10 +91,20 @@ tool0 / gripper_tcp           +y 是接近方向（手腕 -> 两指夹持中心�
 ```
 
 相机挂载（`base_link -> camera_link`）由 URDF 的 `camera_link_joint` 负责，
-目前是用户口头给的粗略位置 `(-0.23, 0.30, 0.15)`、`rpy (0, 90°, 0)`（朝下）。
-**`rpy` 必须是 pitch=+90°**：`camera_link` 的 +x 是镜头方向，光学系的 z 就是它，
-所以把 +x 转到 -z（朝下）要绕 y 轴 +90°；写成绕 x 轴 -90° 镜头会保持水平朝 +x，
-反投影全斜而且不报错。手眼标定后这几个数要换成标定结果。
+目前是用户口头给的粗略位置 `(-0.23, 0.30, 0.15)`、`rpy (0, 30°, 0)`。
+**相机是斜下 30°（相对水平），不是垂直俯视**，光轴在 base_link 里是
+`(0.866, 0, -0.500)`，落地点 `(+0.03, +0.30, 0)`，离方块（`(0, +0.31, 0)`）
+只有几厘米 —— 所以方块应该出现在画面中心附近（实算约 `(619, 376)` / 1280×720）。
+
+**`rpy` 是 pitch，不是 roll**：`camera_link` 的 +x 才是镜头方向（光学系的 z 就是
+它），绕 y 轴转 pitch 才能把 +x 压向 -z：pitch=90° 是垂直朝下，pitch=30° 是斜下
+30°。写成绕 x 轴转 roll 的话镜头只在 yz 平面里动；写成 `rpy(180°,0,0)` 镜头会
+保持水平朝 +x —— 反投影全斜而且不报错。手眼标定后这几个数要换成标定结果。
+
+斜视的代价（已在自测里记成 note）：平面反投影在倾斜方向上误差被 `1/sin` 放大
+（30° 时约 2 倍），画面远端更差；画面上方有相当一块是地平线以上，那些像素打在
+无穷远、反投影会被丢掉，所以方块要放在画面中间、别贴着上边缘。在方块那个距离
+（0.268 m）上 1 像素 ≈ 0.44 mm。
 
 `docs/01` 的阶段 4 里写的是「tool0 的 +y（两指接近方向）与桌面平行」，
 这句话与同一句里的「顶抓」自相矛盾：顶抓时 +y 必须朝下，否则夹爪是横着

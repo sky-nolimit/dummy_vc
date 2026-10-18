@@ -275,11 +275,12 @@ class VisionNode(Node):
             return
         axis = T[:3, 2]                 # 光轴在 base_link 里的方向
         height = T[2, 3]
-        if axis[2] > -0.7:
+        if axis[2] > -0.3:
             self.get_logger().warn(
-                '相机光轴 ({:.2f}, {:.2f}, {:.2f}) 不是朝下的 —— 顶抓假设相机在'
-                '工作面上方俯视。要么 xacro 里的 camera_link 还是占位姿态，'
-                '要么手眼标定还没做'.format(axis[0], axis[1], axis[2]))
+                '相机光轴 ({:.2f}, {:.2f}, {:.2f}) 几乎是水平的，照不到工作面 —— '
+                '顶抓要求相机在工件上方且向下倾斜（本机实装是斜下 30°，'
+                '光轴竖直分量约 -0.50）。要么 xacro 里的 camera_link 姿态还是'
+                '占位值，要么手眼标定还没做'.format(axis[0], axis[1], axis[2]))
         if height <= self.table_z + 0.05:
             self.get_logger().warn(
                 '相机高度 {:.3f} m 不高于工作面 {:.3f} m'.format(

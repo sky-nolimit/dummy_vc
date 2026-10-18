@@ -396,7 +396,7 @@ def check_waypoints(geometry):
 
 
 def check_xacro_camera_note(geometry):
-    print('--- 7. xacro 里的相机占位姿态（只提示，不判红）')
+    print('--- 7. xacro 里的相机安装姿态')
     cam_xyz = (xacro_property('camera_offset_x', 0.30),
                xacro_property('camera_offset_y', 0.0),
                xacro_property('camera_offset_z', 0.60))
@@ -409,12 +409,22 @@ def check_xacro_camera_note(geometry):
                                                 (-math.pi / 2.0, 0.0, -math.pi / 2.0))
     T = T_base_cam @ T_cam_opt
     axis = T[:3, 2]
-    print(f'    占位相机：位置 {tuple(round(v, 3) for v in cam_xyz)}，'
-          f'光轴在 base_link 里指向 ({axis[0]:.3f}, {axis[1]:.3f}, {axis[2]:.3f})')
+    depression = math.degrees(math.asin(min(1.0, max(-1.0, -axis[2]))))
+    print(f'    相机：位置 {tuple(round(v, 3) for v in cam_xyz)}，'
+          f'光轴在 base_link 里指向 ({axis[0]:.3f}, {axis[1]:.3f}, {axis[2]:.3f})'
+          f'（低于水平面 {depression:.1f}°）')
+    # 这条是真检查，不是提示：镜头必须"明显朝下"，否则平面反投影拿到的
+    # 是墙或者无限远，而且不会报错、只会给出离谱的抓取点。
+    # 实装是斜下 30°（竖直分量 -0.5），不是垂直俯视，所以门限定在 -0.3
+    # （约 17°）—— 只要"明显朝下"就算过，具体角度不判。
+    if axis[2] > -0.3:
+        fail('xacro 里相机光轴几乎是水平的（竖直分量 {:.2f}）—— 平面反投影'
+             '拿不到工作面。camera_link 的 +x 才是镜头方向，要让镜头朝下必须'
+             '绕 y 轴转 pitch，不是绕 x 轴转 roll'.format(axis[2]))
     if axis[2] > -0.9:
-        note('xacro 里那个相机固定关节是"标定前的兜底"，按它自己的说明'
-             '（camera_link 的 +x 是镜头方向）算出来并没有朝下 —— '
-             '现在不要拿它做反投影，等手眼标定或装好支架后改这里')
+        note('相机是斜下 {:.0f}°，不是垂直俯视：平面反投影在倾斜方向上误差被 '
+             '1/sin 放大（30° 时约 2 倍），画面远端更差 —— 方块要放在画面'
+             '中心附近'.format(depression))
     close('变换求逆 = 反向变换', geometry.invert_transform(T) @ T, np.eye(4), 1e-12)
 
 
