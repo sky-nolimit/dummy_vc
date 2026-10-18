@@ -53,12 +53,20 @@ ros2 run rviz2 rviz2      # 加 MarkerArray -> /detected_objects/markers
 ## 坐标轴约定（改之前先读这段）
 
 ```
-camera_color_optical_frame    x 右、y 下、z 前（朝景物）
+camera_color_optical_frame    x 右、y 下、z 前（朝景物）；**由 orbbec_camera 驱动
+                              发布**（camera_link -> camera_color_frame -> 光学系）
+usb_camera_optical_frame      裸 USB 相机的光学系，URDF 里 camera_link 的子帧
 tool0 / gripper_tcp           +y 是接近方向（手腕 -> 两指夹持中心）
                               ±x 是两指开合方向
 顶抓（top-down）              gripper_tcp 的 +y 朝下（base_link 的 -z）
                               两指开合方向躺在桌面内，绕竖直轴转 yaw
 ```
+
+相机挂载（`base_link -> camera_link`）由 URDF 的 `camera_link_joint` 负责，
+目前是用户口头给的粗略位置 `(-0.23, 0.30, 0.15)`、`rpy (0, 90°, 0)`（朝下）。
+**`rpy` 必须是 pitch=+90°**：`camera_link` 的 +x 是镜头方向，光学系的 z 就是它，
+所以把 +x 转到 -z（朝下）要绕 y 轴 +90°；写成绕 x 轴 -90° 镜头会保持水平朝 +x，
+反投影全斜而且不报错。手眼标定后这几个数要换成标定结果。
 
 `docs/01` 的阶段 4 里写的是「tool0 的 +y（两指接近方向）与桌面平行」，
 这句话与同一句里的「顶抓」自相矛盾：顶抓时 +y 必须朝下，否则夹爪是横着
@@ -79,10 +87,14 @@ tool0 / gripper_tcp           +y 是接近方向（手腕 -> 两指夹持中心�
    记的实测值不一致、相机光轴不朝下、相机高度不高于工作面。
 
 2. **相机的 `camera_frame_id` 与设备号已经改好**（`dummy_controller` 包里）：
-   `fingerprinter_camera.yaml` 的 `camera_frame_id` 从 `fingerprint_camera`
-   改成 `camera_color_optical_frame`（`camera_link` 的子帧，rpy -90 0 -90），
+   `fingerprinter_camera.yaml` 的 `camera_frame_id` 改成
+   `usb_camera_optical_frame`（URDF 里 `camera_link` 的子帧，rpy -90 0 -90），
    `fingerprint_camera.py` 加了 `device_index` 参数（默认 6），打不开时日志会
    直接告诉你去 `ls /dev/video*` 改参数。
+
+   为什么不写 `camera_color_optical_frame`：那个名字归 Orbbec 驱动所有，URDF
+   再定义一份就会让同一个 frame 有两个父节点，TF 树两条边、数字静默变错。
+   于是 URDF 只保留一个**不同名**的 `usb_camera_optical_frame` 给裸 USB 相机用。
 
    为什么不是 `camera_link`：图像是光学系约定（x 右、y 下、z 朝前），把 frame
    写成 `camera_link` 等于声称这些像素在机身坐标系里，针孔模型的 z 会指到侧面，

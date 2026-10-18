@@ -10,10 +10,13 @@
 轴向约定（REP-103，长度米、角度弧度）：
 
   camera_color_optical_frame   x 右、y 下、z 前（朝景物）。光学系的轴向与
-                               REP-103 不同，这个差异在 xacro 里由
-                               camera_optical_joint 的 rpy=(-pi/2, 0, -pi/2)
+                               REP-103 不同，这个差异由 rpy=(-pi/2, 0, -pi/2)
                                一次性转掉。本文件只跟光学系打交道，所以
                                像素 (u, v) 与 (x, y) 直接对应。
+                               这个 frame 由相机驱动发布（orbbec_camera：
+                               camera_link -> camera_color_frame -> 光学系）；
+                               URDF 只负责挂载（base_link -> camera_link）和
+                               裸 USB 相机的 usb_camera_optical_frame。
   tool0 / gripper_tcp          +y 是从手腕指向两指夹持中心的"接近方向"，
                                ±x 是两指开合方向（dummy2_finger_jointN 的
                                axis 就是 ±x；link7 -> tool0 -> gripper_tcp

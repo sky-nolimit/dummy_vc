@@ -398,7 +398,12 @@
 
      坐标链（注意：XML 注释里不能出现连续两个连字符，所以这里用箭头文字替代）
        link7_v1_1  ->  tool0  ->  gripper_tcp
-                           ->  camera_link  ->  camera_color_optical_frame
+                           ->  camera_link  ->  usb_camera_optical_frame
+
+      相机链其实挂在 base_link 下，不在末端：
+        base_link -> camera_link -> usb_camera_optical_frame（本文件发布，USB 兜底）
+                                -> camera_color_frame -> camera_color_optical_frame
+                                   （后两个由 orbbec_camera 驱动发布）
      ========================================================================== -->
 
 <!-- tool0：末端法兰坐标，与手爪根部重合，便于标定和参考项目对齐 -->
@@ -436,15 +441,23 @@
          方案 A（推荐）：把标定结果填进下面这个固定关节，删掉外部静态发布
          方案 B：给下面这个关节加条件，标定后不再展开
        首期用方案 A，简单直接。 -->
-<xacro:property name="camera_offset_x" value="0.30"/>
-<xacro:property name="camera_offset_y" value="0.0"/>
-<xacro:property name="camera_offset_z" value="0.60"/>
+<xacro:property name="camera_offset_x" value="-0.23"/>
+<xacro:property name="camera_offset_y" value="0.30"/>
+<xacro:property name="camera_offset_z" value="0.15"/>
 
-<!-- 相机安装姿态（度）。外置俯视支架通常是「朝下看」，
-     对应绕 x 轴 -90°；然后再绕 z 轴转一个安装偏航角。
-     这些都是标定前的估计值，手眼标定会给出准确结果。 -->
-<xacro:property name="camera_mount_roll_deg" value="180"/>
-<xacro:property name="camera_mount_pitch_deg" value="0"/>
+<!-- 相机安装姿态（度）。
+     这三条是 2026-10-16 用户口头给的位置（-x 23 cm、+y 30 cm、高 15 cm），
+     **不是标定结果**，手眼标定会给出准确值。
+
+     rpy 这里为什么是 pitch=+90° 而不是"绕 x 轴 -90°"：
+     相机本体系 camera_link 的 **+x 是镜头方向**（REP-103 下 x 前），而
+     orbbec_camera 驱动把光学系定义成 optical 的 z（前）指向 camera_link 的 +x。
+     所以要让镜头朝下（optical z = base_link -z），必须把 camera_link 的 +x
+     转到 -z 上，也就是绕 y 轴 +90°。写成绕 x 转 -90° 的话镜头会保持水平朝
+     +x —— 那个值反投影出来的结果全是斜的，而且不会报错。
+     安装偏航角（图像落在哪个方向上）标定前不关心，先取 0。 -->
+<xacro:property name="camera_mount_roll_deg" value="0"/>
+<xacro:property name="camera_mount_pitch_deg" value="90"/>
 <xacro:property name="camera_mount_yaw_deg" value="0"/>
 
 <link name="camera_link"/>
@@ -456,23 +469,27 @@
   <child link="camera_link"/>
 </joint>
 
-<!-- camera_color_optical_frame：光学坐标系（z 前、x 右、y 下）。
+<!-- usb_camera_optical_frame：USB 兜底相机的光学坐标系（z 前、x 右、y 下）。
      注意 optical frame 的轴向约定与 REP-103 不同，这是写视觉变换时最容易
      翻车的地方：图像的 x 对应光学系的 x（右），图像的 y 对应光学系的 y（下），
      深度对应光学系的 z（前，正值朝景物）。
 
-     RealSense 的 realsense2_camera 节点会自己发布 camera_link 到
-     camera_color_optical_frame，所以接了真实驱动后这里会被覆盖；
-     保留它是为了没有相机时 RViz 里也能看到坐标系。
+     camera_color_optical_frame 不在这里定义 —— 它由 orbbec_camera 驱动自己发布
+     （camera_link -> camera_color_frame -> camera_color_optical_frame）。
+     以前这里也定义过一份同名的，结果是那个 frame 同时挂在 xacro 的
+     camera_link 与驱动的 camera_color_frame 两个父节点下，TF 树出现两条边；
+     查出来的变换不可信，而且不报错，只是数字不对。两个名字分开之后，
+     接 Gemini 用驱动的 camera_color_optical_frame，跑裸 USB 相机用本文件的
+     usb_camera_optical_frame，互不干扰。
 
      rpy="-1.5707963 0 -1.5707963" 是 REP-103 -> 光学系的标准变换：
      绕 x 转 -90° 把 z 从朝上掰到朝前，再绕 z 转 -90° 对齐 x/y。 -->
-<link name="camera_color_optical_frame"/>
+<link name="usb_camera_optical_frame"/>
 
-<joint name="camera_optical_joint" type="fixed">
+<joint name="usb_camera_optical_joint" type="fixed">
   <origin xyz="0 0 0" rpy="-1.5707963 0 -1.5707963"/>
   <parent link="camera_link"/>
-  <child link="camera_color_optical_frame"/>
+  <child link="usb_camera_optical_frame"/>
 </joint>
 
 </robot>

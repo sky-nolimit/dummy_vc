@@ -31,6 +31,11 @@ DEFAULT_TARGETS = [
 ]
 
 # Frames this project needs for MoveIt and for the vision pipeline.
+# camera_color_optical_frame is deliberately NOT here: it belongs to the camera
+# driver (orbbec_camera publishes camera_link -> camera_color_frame ->
+# camera_color_optical_frame). Defining it in the URDF as well gave that frame
+# two parents, and tf2 then silently mixes the two trees. What the URDF does own
+# is the mount (base_link -> camera_link) and the USB fallback optical frame.
 REQUIRED_FRAMES = [
     'base_link',
     'link7_v1_1',
@@ -38,7 +43,7 @@ REQUIRED_FRAMES = [
     'tool0',
     'gripper_tcp',
     'camera_link',
-    'camera_color_optical_frame',
+    'usb_camera_optical_frame',
 ]
 
 # A root/world frame is needed for MoveIt's virtual joint.

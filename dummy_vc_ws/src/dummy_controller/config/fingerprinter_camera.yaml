@@ -19,7 +19,8 @@ fingerprinter_cam_publisher:
     # 图像本身是光学系约定（x 右、y 下、z 朝前），所以 frame_id 必须是 optical
     # frame，不能写 camera_link —— 写成 camera_link 就等于声称像素在"机身"坐标系
     # 里，针孔模型的 z 会指到侧面去，投影出来的点会错得离谱却不报错。
-    # camera_color_optical_frame 是 URDF 里 camera_link 的子帧（固定 rpy
-    # -90 0 -90），TF 树上有它；标定结果进 camera_link_joint 后这里不用改。
-    camera_frame_id: "camera_color_optical_frame"
+    # usb_camera_optical_frame 是 URDF 里 camera_link 的子帧（固定 rpy -90 0 -90）。
+    # 不写成 camera_color_optical_frame：那个名字归 orbbec_camera 驱动所有，
+    # 两边都定义会让同一个 frame 有两个父节点。
+    camera_frame_id: "usb_camera_optical_frame"
     camera_topic: "/dummy/visual/fingerprint_camera"
