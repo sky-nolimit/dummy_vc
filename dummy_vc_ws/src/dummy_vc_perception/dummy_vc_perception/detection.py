@@ -229,16 +229,30 @@ def detection_from_blob(blob, camera, T_base_optical, plane_z, object_edge_m,
 
 
 def detections_from_blobs(blobs, camera, T_base_optical, plane_z,
-                          object_edge_m, max_edge_error_m=0.01) -> List[SceneDetection]:
-    """批量版本：尺寸对不上的直接丢掉（多半是反光、阴影、或者别的物体）。"""
+                          object_edge_m, max_edge_error_m=0.01,
+                          rejects=None) -> List[SceneDetection]:
+    """批量版本：尺寸对不上的直接丢掉（多半是反光、阴影、或者别的物体）。
+
+    `rejects` 不是 None 时，被丢掉的 blob 会以 `(blob, 原因)` 追加进去。理由：
+    现场跑一轮很贵，"没检测到"如果只报一个 blob 数量，就只能靠猜是分割没切出来、
+    反投影没落到平面上、还是尺寸对不上 —— 这三件事的修法完全不同。
+    """
     out = []
     for blob in blobs:
         try:
             det = detection_from_blob(blob, camera, T_base_optical, plane_z,
                                       object_edge_m)
-        except GeometryError:
+        except GeometryError as exc:
+            if rejects is not None:
+                rejects.append((blob, str(exc)))
             continue
         if det.edge_error_m > float(max_edge_error_m):
+            if rejects is not None:
+                rejects.append((blob, '拟合出的边长 {:.1f}x{:.1f} mm，与目标 '
+                                      '{:.1f} mm 差 {:.1f} mm（上限 {:.1f}）'.format(
+                    det.extent_m[0] * 1e3, det.extent_m[1] * 1e3,
+                    object_edge_m * 1e3, det.edge_error_m * 1e3,
+                    max_edge_error_m * 1e3)))
             continue
         out.append(det)
     return out

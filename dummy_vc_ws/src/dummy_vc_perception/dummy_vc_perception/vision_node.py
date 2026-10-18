@@ -89,6 +89,7 @@ class VisionNode(Node):
         self.camera = None            # CameraInfo 到了才有
         self.last_stamp = None
         self.misses = 0               # 连续几次没找到目标，用来别刷屏
+        self.hits = 0                 # 一共认出来几次，用来决定要不要打坐标
         self.tf_warned = False
         self.geometry_warned = False
         self.distortion_warned = False
@@ -159,6 +160,18 @@ class VisionNode(Node):
             '{}~{}'.format(lower.tolist(), upper.tolist())
             for lower, upper in self.hsv_ranges)
 
+    def _log_rejects(self, rejects):
+        """把"为什么这些 blob 没被采用"打出来，最多三条，按面积大的优先。"""
+        if not rejects:
+            self.get_logger().warn(
+                '一个 blob 都没有 —— 分割没切出东西来，先看 HSV 范围对不对')
+            return
+        ordered = sorted(rejects, key=lambda item: item[0].area_px, reverse=True)
+        for blob, reason in ordered[:3]:
+            self.get_logger().warn(
+                '  被丢掉的 blob：{} 像素，中心 ({:.0f}, {:.0f})，原因：{}'.format(
+                    blob.area_px, blob.u, blob.v, reason))
+
     # ------------------------------------------------------------------
     # 回调
     # ------------------------------------------------------------------
@@ -205,10 +218,11 @@ class VisionNode(Node):
             return
 
         blobs = self._segment(frame)
+        rejects = []
         try:
             detections = detection.detections_from_blobs(
                 blobs, self.camera, T, self.table_z, self.object_edge,
-                max_edge_error_m=self.max_edge_error)
+                max_edge_error_m=self.max_edge_error, rejects=rejects)
         except geometry.GeometryError as exc:
             self.get_logger().error('算抓取点失败：{}'.format(exc))
             return
@@ -220,11 +234,27 @@ class VisionNode(Node):
                 self.get_logger().warn(
                     '连续 {} 帧没找到合格的方块（HSV 范围 {}，blob {} 个）'.format(
                         self.misses, self._ranges_text(), len(blobs)))
+                self._log_rejects(rejects)
             return
         if self.misses:
             self.get_logger().info('重新找到了目标（之前漏了 {} 帧）'.format(
                 self.misses))
             self.misses = 0
+
+        # 终端里就把坐标打出来：单目 0.3 Hz 的环境下 `topic echo` 很容易错过
+        # 那一帧，日志是唯一一定能拿到的证据。
+        self.hits += 1
+        if self.hits == 1 or self.hits % 10 == 0:
+            best = detections[0]
+            self.get_logger().info(
+                '第 {} 次命中：{} 个候选，取最大的那个 '
+                'base_link=({:.3f}, {:.3f}, {:.3f}) m，yaw={:.1f}°，'
+                '拟合边长 {:.1f}x{:.1f} mm，距离 {:.3f} m'.format(
+                    self.hits, len(detections),
+                    best.position[0], best.position[1], best.position[2],
+                    math.degrees(best.yaw_rad),
+                    best.extent_m[0] * 1e3, best.extent_m[1] * 1e3,
+                    best.distance_m))
 
         array = self._to_message(detections, msg.header)
         self.pub.publish(array)
