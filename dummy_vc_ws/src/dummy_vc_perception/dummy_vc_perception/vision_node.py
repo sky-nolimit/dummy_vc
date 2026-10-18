@@ -12,10 +12,17 @@
     camera_info_topic  /camera/color/camera_info
     frame_id           /camera/color/image_raw 的 header 自己带 optical frame
 
-单目这条路径把像素投到"工作面"平面上（`table_z`，本机没有桌子所以是 0），
-物体有高度时顶面中心会往外偏一点 —— 这就是为什么单目只够把框架跑通。
-接了深度之后，把 `_on_image()` 里那次
-`detection.detections_from_blobs(...)` 换成"取掩膜内的深度中值"，其余不用动。
+有两条算抓取点的路，`use_depth` 选：
+
+* **深度（默认）**：掩膜里的像素去查深度图，直接得到 3D 点，在顶面上定
+  xy、z 减半个边长。不依赖"相机水平、地面等高处"这两个假设，也就没有
+  单目那条路对俯角的病态敏感（本机斜下 16°，1° 就能让落点差 8 mm）。
+* **单目（`use_depth:=false`）**：把像素投到"工作面"平面上（`table_z`，
+  本机没有桌子所以是 0），物体有高度时顶面中心会往外偏十几毫米。留着它
+  是为了深度不可用（没接相机、深度流坏了）时还能跑，不是首选。
+
+`calibrate_plane:=true` 会每隔一阵用整幅深度图拟合一次地面，把"相机实际
+倾了多少度、离地多高"打出来 —— 那是标定 `camera_mount_pitch_deg` 的依据。
 """
 
 import math
@@ -35,6 +42,7 @@ from vision_msgs.msg import Detection3D, Detection3DArray, ObjectHypothesisWithP
 from visualization_msgs.msg import Marker, MarkerArray
 
 from dummy_vc_perception import detection, geometry
+from dummy_vc_perception import depth as depth3d
 
 
 class VisionNode(Node):
@@ -68,6 +76,17 @@ class VisionNode(Node):
         self.declare_parameter('max_distance', 1.5)
         self.declare_parameter('max_rate_hz', 10.0)
         self.declare_parameter('publish_markers', True)
+        # 深度路径。关掉就退回"像素投到平面上"的单目路。
+        self.declare_parameter('use_depth', True)
+        self.declare_parameter('depth_topic', '/camera/depth/image_raw')
+        # 0 表示按图像编码自动定（16UC1 -> 毫米，32FC1 -> 米）。
+        self.declare_parameter('depth_scale', 0.0)
+        # 掩膜抽稀步长：24 mm 方块在 0.3 m 处有上千个像素，隔一个取一个
+        # 已经把定位钉到毫米级，全用只是让 2 Hz 的节点更卡。
+        self.declare_parameter('depth_step', 2)
+        self.declare_parameter('depth_max_range', depth3d.DEFAULT_MAX_RANGE_M)
+        # 打开后每隔一阵用整幅深度图拟合地面，报相机真实的倾角和离地高度。
+        self.declare_parameter('calibrate_plane', False)
 
         self.base_frame = self.get_parameter('base_frame').value
         self.table_z = float(self.get_parameter('table_z').value)
@@ -80,6 +99,12 @@ class VisionNode(Node):
         self.max_distance = float(self.get_parameter('max_distance').value)
         self.min_period = 1.0 / max(float(self.get_parameter('max_rate_hz').value), 1e-3)
         self.publish_markers = bool(self.get_parameter('publish_markers').value)
+        self.use_depth = bool(self.get_parameter('use_depth').value)
+        self.depth_scale_setting = float(self.get_parameter('depth_scale').value)
+        self.depth_step = max(1, int(self.get_parameter('depth_step').value))
+        self.depth_max_range = float(self.get_parameter('depth_max_range').value)
+        self.calibrate_plane = bool(self.get_parameter('calibrate_plane').value)
+        self.depth_scale = self.depth_scale_setting or None
 
         self._check_measured(scene)
 
@@ -93,6 +118,11 @@ class VisionNode(Node):
         self.tf_warned = False
         self.geometry_warned = False
         self.distortion_warned = False
+        self.depth_warned = False
+        self.depth_stale_warned = False
+        self.depth_msg = None         # 最近一帧深度（与彩色对齐）
+        self.depth_frame_count = 0
+        self.plane_reports = 0
 
         self.pub = self.create_publisher(
             Detection3DArray, self.get_parameter('output_topic').value, 10)
@@ -103,12 +133,25 @@ class VisionNode(Node):
             self._on_camera_info, 10)
         self.create_subscription(
             Image, self.get_parameter('image_topic').value, self._on_image, 1)
+        if self.use_depth:
+            self.create_subscription(
+                Image, self.get_parameter('depth_topic').value, self._on_depth, 1)
 
         self.get_logger().info(
             'listening on {} (info: {}), publishing {} in {}'.format(
                 self.get_parameter('image_topic').value,
                 self.get_parameter('camera_info_topic').value,
                 self.get_parameter('output_topic').value, self.base_frame))
+        if self.use_depth:
+            self.get_logger().info(
+                '深度路径：{}（步长 {}，编码为 16UC1 时按毫米算{}）'.format(
+                    self.get_parameter('depth_topic').value, self.depth_step,
+                    '，已按参数覆盖为 {} 米/像素值'.format(self.depth_scale_setting)
+                    if self.depth_scale_setting else ''))
+        else:
+            self.get_logger().info(
+                '单目路径：像素投到 z = {:.4f} m 的平面上（俯角每差 1° 落点差约 '
+                '8 mm，标定没做完前别信它的绝对精度）'.format(self.table_z))
         self.get_logger().info(
             '工作面 z = {:+.4f} m，目标方块边长 {:.1f} mm，'
             '夹它需要 {:.1f} mm 开口（见 README 的实测记录）'.format(
@@ -161,16 +204,56 @@ class VisionNode(Node):
             for lower, upper in self.hsv_ranges)
 
     def _log_rejects(self, rejects):
-        """把"为什么这些 blob 没被采用"打出来，最多三条，按面积大的优先。"""
+        """把"为什么这些 blob 没被采用"打出来，最多三条，按面积大的优先。
+
+        两种路径的 `rejects` 元素形状不同：单目路径是 `(Blob, 原因)`，
+        深度路径是 `(label, 像素数, 原因)`。这里统一成"多少像素 + 为什么"。
+        """
         if not rejects:
             self.get_logger().warn(
                 '一个 blob 都没有 —— 分割没切出东西来，先看 HSV 范围对不对')
             return
-        ordered = sorted(rejects, key=lambda item: item[0].area_px, reverse=True)
-        for blob, reason in ordered[:3]:
+
+        def area_of(item):
+            return item[0].area_px if hasattr(item[0], 'area_px') else int(item[1])
+
+        def describe(item):
+            if hasattr(item[0], 'area_px'):
+                blob, reason = item
+                return '{} 像素，中心 ({:.0f}, {:.0f})，原因：{}'.format(
+                    blob.area_px, blob.u, blob.v, reason)
+            label, pixels, reason = item
+            return '{} 像素（label {}），原因：{}'.format(pixels, label, reason)
+
+        for item in sorted(rejects, key=area_of, reverse=True)[:3]:
+            self.get_logger().warn('  被丢掉的 blob：{}'.format(describe(item)))
+
+    def _usable_depth(self, header):
+        """最近一帧深度图（ndarray）或 None。None 时用单目路径。"""
+        if not self.use_depth:
+            return None
+        if self.depth_msg is None:
+            if not self.depth_warned:
+                self.depth_warned = True
+                self.get_logger().warn(
+                    '还没收到深度图（{}），先退回单目路径'.format(
+                        self.get_parameter('depth_topic').value))
+            return None
+        stamp = self.depth_msg.header.stamp
+        age = (header.stamp.sec - stamp.sec) + \
+              (header.stamp.nanosec - stamp.nanosec) * 1e-9
+        if abs(age) > 5.0 and not self.depth_stale_warned:
+            self.depth_stale_warned = True
             self.get_logger().warn(
-                '  被丢掉的 blob：{} 像素，中心 ({:.0f}, {:.0f})，原因：{}'.format(
-                    blob.area_px, blob.u, blob.v, reason))
+                '深度图和彩色图的时间戳差了 {:.1f} 秒，可能是两路没同步；'
+                '静止场景下凑合能用，动起来就会错位'.format(age))
+        try:
+            frame = self.bridge.imgmsg_to_cv2(self.depth_msg,
+                                              desired_encoding='passthrough')
+        except Exception as exc:        # noqa: BLE001 - cv_bridge 抛什么的都有
+            self.get_logger().error('深度图转换失败：{}'.format(exc))
+            return None
+        return np.asarray(frame)
 
     # ------------------------------------------------------------------
     # 回调
@@ -217,15 +300,26 @@ class VisionNode(Node):
         if T is None:
             return
 
-        blobs = self._segment(frame)
+        labels, blobs = self._segment(frame)
         rejects = []
-        try:
-            detections = detection.detections_from_blobs(
-                blobs, self.camera, T, self.table_z, self.object_edge,
-                max_edge_error_m=self.max_edge_error, rejects=rejects)
-        except geometry.GeometryError as exc:
-            self.get_logger().error('算抓取点失败：{}'.format(exc))
-            return
+        depth_frame = self._usable_depth(msg.header)
+        if depth_frame is not None:
+            try:
+                detections = depth3d.detections_from_labels_and_depth(
+                    labels, depth_frame, self.camera, T, self.object_edge,
+                    self.depth_scale, step=self.depth_step,
+                    max_edge_error_m=self.max_edge_error, rejects=rejects)
+            except geometry.GeometryError as exc:
+                self.get_logger().error('深度路径算抓取点失败：{}'.format(exc))
+                return
+        else:
+            try:
+                detections = detection.detections_from_blobs(
+                    blobs, self.camera, T, self.table_z, self.object_edge,
+                    max_edge_error_m=self.max_edge_error, rejects=rejects)
+            except geometry.GeometryError as exc:
+                self.get_logger().error('算抓取点失败：{}'.format(exc))
+                return
         detections = [d for d in detections if d.distance_m <= self.max_distance]
 
         if not detections:
@@ -260,6 +354,80 @@ class VisionNode(Node):
         self.pub.publish(array)
         if self.publish_markers:
             self.pub_markers.publish(self._to_markers(detections, msg.header))
+
+    # ------------------------------------------------------------------
+    # 深度：取帧，以及"用地面把相机自己标出来"
+    # ------------------------------------------------------------------
+
+    def _on_depth(self, msg):
+        if self.depth_scale is None:
+            try:
+                self.depth_scale = depth3d.depth_scale_for(msg.encoding)
+            except geometry.GeometryError as exc:
+                if not self.depth_warned:
+                    self.depth_warned = True
+                    self.get_logger().error('深度图用不了：{}'.format(exc))
+                return
+            self.get_logger().info(
+                '深度编码 {}，按 {} 米/像素值换算'.format(
+                    msg.encoding, self.depth_scale))
+        self.depth_msg = msg
+        self.depth_frame_count += 1
+        if self.calibrate_plane and self.depth_frame_count % 10 == 0:
+            self._calibrate_from_plane(msg)
+
+    def _calibrate_from_plane(self, msg):
+        """整幅深度图拟合地面，反解相机真实的倾角和离地高度。
+
+        为什么值得做：单目那条路在 16° 安装角下，俯角差 1° 抓取点就差 8 mm；
+        手量角度到不了 1°，而地面在点云里占一片，拟合出来的法向精度在 0.1°
+        量级。这是唯一能替代"手扫角度试出来"的办法。
+
+        注意只标得动俯仰和高度：水平面绕竖直轴转多少度都还是它自己，
+        偏航要靠已知位置的物体另做。
+        """
+        if self.camera is None:
+            return
+        try:
+            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+        except Exception as exc:        # noqa: BLE001
+            self.get_logger().error('深度图转换失败：{}'.format(exc))
+            return
+        T = self._lookup(msg.header)
+        if T is None:
+            return
+        arr = np.asarray(frame)
+        height = int(self.camera.height or arr.shape[0])
+        width = int(self.camera.width or arr.shape[1])
+        # 按彩色图坐标抽样（深度已对齐到彩色），步长 8 已经够拟合一个平面。
+        grid_v, grid_u = np.mgrid[0:height:8, 0:width:8]
+        us = grid_u.ravel().astype(float)
+        vs = grid_v.ravel().astype(float)
+        z = depth3d.sample_depth(arr, us, vs, (height, width)) * self.depth_scale
+        ok = np.isfinite(z) & (z > 0.05) & (z < self.depth_max_range)
+        if np.count_nonzero(ok) < 50:
+            self.get_logger().warn(
+                '地面拟合：有效深度只有 {} 个点，跳过'.format(np.count_nonzero(ok)))
+            return
+        us, vs, z = us[ok], vs[ok], z[ok]
+        x, y = depth3d.undistort_pixels(self.camera, us, vs)
+        p_opt = np.stack([x * z, y * z, z], axis=1)
+        try:
+            normal_opt, offset = depth3d.plane_from_points(p_opt)
+        except geometry.GeometryError as exc:
+            self.get_logger().warn('地面拟合失败：{}'.format(exc))
+            return
+        report = depth3d.plane_report(T[:3, :3] @ normal_opt, offset)
+        self.plane_reports += 1
+        nx, ny, nz = report['normal']
+        self.get_logger().info(
+            '地面拟合：法向在 {} 里 = ({:+.3f}, {:+.3f}, {:+.3f})，'
+            '相对竖直偏 {:.2f}°；相机离地 {:.3f} m（xacro 里写的是 {:.3f} m）；'
+            '要把法向压到 (0,0,1)：camera_mount_pitch_deg 加上 {:+.2f}°'
+            '（当前 xacro 是 16°，改完重启 robot_state_publisher 即可）'.format(
+                self.base_frame, nx, ny, nz, report['tilt_deg'],
+                report['camera_height_m'], float(T[2, 3]),
+                report['pitch_correction_deg']))
 
     # ------------------------------------------------------------------
     # 查 TF：相机光学系在 base_link 里的位姿
@@ -322,7 +490,11 @@ class VisionNode(Node):
     # ------------------------------------------------------------------
 
     def _segment(self, frame):
-        """BGR 图 -> [Blob]。纯几何在 detection.py 里，这里只碰 cv2。"""
+        """BGR 图 -> (labels 图, [Blob])。纯几何在 detection.py 里，这里只碰 cv2。
+
+        返回 labels 是为了深度路径：它要按"每个 blob 的像素"去查深度值，
+        而 `Blob` 只带像素坐标、不带 label。
+        """
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         mask = np.zeros(hsv.shape[:2], np.uint8)
         for lower, upper in self.hsv_ranges:
@@ -338,7 +510,7 @@ class VisionNode(Node):
             if self.min_area_px <= area <= limit:
                 keep[labels == label_id] = label_id
         blobs = detection.blobs_from_labels(keep, min_area_px=self.min_area_px)
-        return blobs
+        return keep, blobs
 
     # ------------------------------------------------------------------
     # 发消息

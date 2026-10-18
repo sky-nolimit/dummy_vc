@@ -35,6 +35,17 @@ XACRO = os.path.join(REPO, 'dummy_vc_ws', 'src', 'dummy2_urdf',
 FX, FY, CX, CY = 495.231697, 494.590030, 303.808212, 249.027693
 DISTORTION = (0.077718, -0.127016, -0.000550, -0.001023, 0.0)
 
+# Gemini 335L 实测（2026-10-16 在 VM 上 echo 到的真实 CameraInfo）：
+# distortion_model 写 plumb_bob，d 却是 8 个数——那是 rational_polynomial
+# 的 (k1,k2,p1,p2,k3,k4,k5,k6)。只该用前 5 个，并且把丢掉的个数记下来。
+# 这台相机的 k4..k6 全是 0，丢掉没代价；但代码不能因为 8 个数就整条挂掉。
+GEMINI_K = (614.2484741210938, 0.0, 641.4732666015625,
+            0.0, 614.148193359375, 365.4802551269531,
+            0.0, 0.0, 1.0)
+GEMINI_D = (-0.02929498627781868, 0.03310345113277435,
+            -9.030981891555712e-05, 9.581100312061608e-05,
+            -0.01202486827969551, 0.0, 0.0, 0.0)
+
 FAILURES = []
 NOTES = []
 
@@ -105,11 +116,12 @@ def load_modules():
     if PKG_ROOT not in sys.path:
         sys.path.insert(0, PKG_ROOT)
     try:
+        from dummy_vc_perception import depth as depth3d
         from dummy_vc_perception import detection, geometry, gripper
     except ImportError as exc:
         fail(f'import dummy_vc_perception 失败：{exc}（几何层只依赖 numpy）')
-        return None, None, None
-    return geometry, gripper, detection
+        return None, None, None, None
+    return geometry, gripper, detection, depth3d
 
 
 # --------------------------------------------------------------------------
@@ -121,7 +133,7 @@ ALLOWED_IMPORTS = {'math', 'dataclasses', 'typing', 'numpy'}
 
 def check_offline_imports():
     print('--- 0. 几何层不许 import ROS / OpenCV')
-    for name in ('geometry.py', 'gripper.py', 'detection.py'):
+    for name in ('geometry.py', 'gripper.py', 'detection.py', 'depth.py'):
         path = os.path.join(PKG_ROOT, 'dummy_vc_perception', name)
         with open(path, encoding='utf-8') as fh:
             tree = ast.parse(fh.read(), filename=path)
@@ -148,7 +160,7 @@ def check_offline_imports():
 NODE_PATH = os.path.join(PKG_ROOT, 'dummy_vc_perception', 'vision_node.py')
 
 
-def check_node_api(geometry, gripper, detection):
+def check_node_api(geometry, gripper, detection, depth3d):
     """节点不能离线跑，所以至少盯着它别把接口名写错。
 
     这是这一层能做的"最接近集成测试"的检查：`geometry.foo` / `detection.bar`
@@ -161,7 +173,8 @@ def check_node_api(geometry, gripper, detection):
         return
     with open(NODE_PATH, encoding='utf-8') as fh:
         tree = ast.parse(fh.read(), filename=NODE_PATH)
-    modules = {'geometry': geometry, 'gripper': gripper, 'detection': detection}
+    modules = {'geometry': geometry, 'gripper': gripper,
+               'detection': detection, 'depth3d': depth3d}
     referenced = set()
     unknown = []
     for node in ast.walk(tree):
@@ -205,16 +218,6 @@ def check_camera_model(geometry):
     expect_error('distortion 少一个数被拒绝', geometry.GeometryError,
                  geometry.PinholeCamera, FX, FY, CX, CY, None, None, (0.0, 0.0, 0.0))
 
-    # Gemini 335L 实测（2026-10-16 在 VM 上 echo 到的真实 CameraInfo）：
-    # distortion_model 写 plumb_bob，d 却是 8 个数——那是 rational_polynomial
-    # 的 (k1,k2,p1,p2,k3,k4,k5,k6)。只该用前 5 个，并且把丢掉的个数记下来。
-    # 这台相机的 k4..k6 全是 0，丢掉没代价；但代码不能因为 8 个数就整条挂掉。
-    GEMINI_K = (614.2484741210938, 0.0, 641.4732666015625,
-                0.0, 614.148193359375, 365.4802551269531,
-                0.0, 0.0, 1.0)
-    GEMINI_D = (-0.02929498627781868, 0.03310345113277435,
-                -9.030981891555712e-05, 9.581100312061608e-05,
-                -0.01202486827969551, 0.0, 0.0, 0.0)
     gemini = geometry.PinholeCamera.from_camera_info(
         GEMINI_K, width=1280, height=720, d=GEMINI_D)
     close('8 个畸变系数只取前 5 个', gemini.distortion, GEMINI_D[:5], 0.0)
@@ -622,15 +625,196 @@ def check_detection(geometry, gripper, detection):
                  detection.fit_edge_yaw, np.zeros((5, 2)))
 
 
+# --------------------------------------------------------------------------
+# 11. 深度这一层（合成场景，端到端）
+# --------------------------------------------------------------------------
+
+DEPTH_DOWNSCALE = 4.0
+DEPTH_W = int(1280 / DEPTH_DOWNSCALE)
+DEPTH_H = int(720 / DEPTH_DOWNSCALE)
+CUBE_EDGE = 0.024
+CUBE_CENTRE = (0.0, 0.30, CUBE_EDGE / 2.0)
+MOUNT_XYZ = (-0.21, 0.30, 0.15)
+
+
+def synthetic_camera(geometry):
+    """把 Gemini 的真实内参等比缩小，做一张便宜的合成图。
+
+    真实图 1280x720 有 92 万像素，为了一个自测渲染它没必要——缩小 4 倍之后
+    精度差 4 倍，但足以看出"几毫米 vs 几十毫米"的区别。畸变照原样带进来，
+    这样去畸变那条路真的走到。
+    """
+    return geometry.PinholeCamera(
+        GEMINI_K[0] / DEPTH_DOWNSCALE, GEMINI_K[4] / DEPTH_DOWNSCALE,
+        GEMINI_K[2] / DEPTH_DOWNSCALE, GEMINI_K[5] / DEPTH_DOWNSCALE,
+        width=DEPTH_W, height=DEPTH_H, distortion=GEMINI_D[:5])
+
+
+def mount_transform(geometry, pitch_deg):
+    """base_link -> camera_color_optical_frame，跟 xacro 里那两个关节一致。"""
+    mount = geometry.transform_from_xyz_rpy(
+        MOUNT_XYZ, (0.0, math.radians(pitch_deg), 0.0))
+    optical = geometry.transform_from_xyz_rpy(
+        (0.0, 0.0, 0.0), (math.radians(-90.0), 0.0, math.radians(-90.0)))
+    return mount @ optical
+
+
+def ray_box(origin, direction, lower, upper):
+    """slab 法求射线与轴对齐立方体的最近交点参数 t；打不到就是 inf。"""
+    near = np.full(direction.shape[0], -np.inf)
+    far = np.full(direction.shape[0], np.inf)
+    for k in range(3):
+        d = direction[:, k]
+        with np.errstate(divide='ignore', invalid='ignore'):
+            t1 = (lower[k] - origin[k]) / d
+            t2 = (upper[k] - origin[k]) / d
+        near = np.maximum(near, np.minimum(t1, t2))
+        far = np.minimum(far, np.maximum(t1, t2))
+    hit = (far > near) & (far > 0.0)
+    t = np.where(near > 0.0, near, far)
+    return np.where(hit, t, np.inf)
+
+
+def render_scene(geometry, depth3d, camera, T):
+    """合成一张深度图：24 mm 立方体站在 z=0 的地面上。
+
+    返回 (depth 图, labels 图, 每个像素的光学系单位射线)。labels 里 1=方块、
+    2=地面、0=什么都没有（地平线以上）。
+    """
+    grid_u, grid_v = np.meshgrid(np.arange(DEPTH_W, dtype=float),
+                                 np.arange(DEPTH_H, dtype=float))
+    xs, ys = depth3d.undistort_pixels(camera, grid_u.ravel(), grid_v.ravel())
+    ray = np.stack([xs, ys, np.ones_like(xs)], axis=1)
+    ray /= np.linalg.norm(ray, axis=1, keepdims=True)
+    origin = T[:3, 3]
+    direction = ray @ T[:3, :3].T
+
+    half = CUBE_EDGE / 2.0
+    lower = np.array([CUBE_CENTRE[0] - half, CUBE_CENTRE[1] - half, 0.0])
+    upper = np.array([CUBE_CENTRE[0] + half, CUBE_CENTRE[1] + half, CUBE_EDGE])
+    t_box = ray_box(origin, direction, lower, upper)
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        t_ground = (0.0 - origin[2]) / direction[:, 2]
+    t_ground = np.where((t_ground > 0.0) & (direction[:, 2] < 0.0),
+                        t_ground, np.inf)
+
+    t = np.minimum(t_box, t_ground)
+    labels = np.zeros(t.shape, dtype=np.int32)
+    labels[t_box <= t_ground] = 1
+    labels[(t_ground < t_box) & np.isfinite(t_ground)] = 2
+    labels[~np.isfinite(t)] = 0
+
+    depth = np.zeros(t.shape, dtype=np.float32)
+    finite = np.isfinite(t)
+    depth[finite] = (t[finite] * ray[finite, 2]).astype(np.float32)
+    return (depth.reshape(DEPTH_H, DEPTH_W),
+            labels.reshape(DEPTH_H, DEPTH_W), ray, direction, t)
+
+
+def check_depth(geometry, depth3d):
+    print('--- 11. 深度这一层（合成场景）')
+    camera = synthetic_camera(geometry)
+
+    # 11a. 向量版去畸变必须正好是投影的逆
+    us = np.array([0.0, 40.0, 160.0, 300.0, DEPTH_W - 1.0])
+    vs = np.array([0.0, 30.0, 90.0, 150.0, DEPTH_H - 1.0])
+    x, y = depth3d.undistort_pixels(camera, us, vs)
+    projected = [camera.project((xi, yi, 1.0)) for xi, yi in zip(x, y)]
+    got_u = np.array([p[0] for p in projected])
+    got_v = np.array([p[1] for p in projected])
+    close('向量版去畸变是投影的逆（畸变真的生效）',
+          [got_u, got_v], [us, vs], 1e-9)
+
+    # 11b. 深度编码 -> 比例尺
+    for encoding, want in (('16UC1', 0.001), ('mono16', 0.001),
+                           ('32FC1', 1.0), ('64FC1', 1.0)):
+        close(f'depth_scale_for({encoding})', depth3d.depth_scale_for(encoding),
+              want, 0.0)
+    expect_error('不认识的编码宁可报错也不猜', geometry.GeometryError,
+                 depth3d.depth_scale_for, 'rgb8')
+
+    # 11c. 端到端：合成深度图 -> 3D 点 -> 抓取点
+    true_pitch = 20.0
+    T = mount_transform(geometry, true_pitch)
+    depth, labels, ray, direction, t = render_scene(geometry, depth3d, camera, T)
+    box_px = int(np.count_nonzero(labels == 1))
+    ground_px = int(np.count_nonzero(labels == 2))
+    if box_px < 40:
+        fail(f'合成图里方块只有 {box_px} 个像素，场景没搭对')
+    else:
+        ok(f'合成图：方块 {box_px} 个像素、地面 {ground_px} 个像素')
+
+    points, point_labels = depth3d.points_from_labels(
+        labels, depth, camera, T, 1.0, step=1)
+    if box_px and np.count_nonzero(point_labels == 1) < 0.5 * box_px:
+        fail('方块像素有一半以上没变成 3D 点')
+    else:
+        ok('方块的像素都变成了 base_link 下的 3D 点')
+    scene = depth3d.detection_from_points(
+        points[point_labels == 1], CUBE_EDGE, T, camera)
+    err = np.linalg.norm(np.asarray(scene.position) - np.array(CUBE_CENTRE))
+    print(f'    报出 ({scene.position[0]:+.4f}, {scene.position[1]:+.4f}, '
+          f'{scene.position[2]:+.4f}) m，真值 ({CUBE_CENTRE[0]:+.4f}, '
+          f'{CUBE_CENTRE[1]:+.4f}, {CUBE_CENTRE[2]:+.4f}) m，差 '
+          f'{err * 1000:.2f} mm（像素 {1000 * float(np.mean(camera.metres_per_pixel(0.3))):.1f} mm 宽）')
+    if err < 8e-3:
+        ok(f'抓取点误差 {err * 1000:.2f} mm < 8 mm')
+    else:
+        fail(f'抓取点误差 {err * 1000:.2f} mm 超了 8 mm')
+    if abs(scene.position[2] - CUBE_EDGE / 2.0) < 0.4e-3:
+        ok('z 落在边长一半（顶面减半个边长）')
+    else:
+        fail(f'z = {scene.position[2] * 1000:.2f} mm，应该是 '
+             f'{CUBE_EDGE / 2.0 * 1000:.1f} mm')
+
+    # 11d. 用地面拟合反解相机倾角：真实 20°，URDF 里写的 16° -> 应补 +4°
+    ground_opt = (ray[labels.ravel() == 2]
+                  * t[labels.ravel() == 2][:, None])
+    normal_opt, offset = depth3d.plane_from_points(ground_opt)
+    assumed = mount_transform(geometry, 16.0)
+    report = depth3d.plane_report(assumed[:3, :3] @ normal_opt, offset)
+    print(f'    地面法向：光学系 ({normal_opt[0]:+.4f}, {normal_opt[1]:+.4f}, '
+          f'{normal_opt[2]:+.4f})；标定报告 pitch 要补 '
+          f'{report["pitch_correction_deg"]:+.2f}°、离地 '
+          f'{report["camera_height_m"]:.4f} m')
+    if abs(report['pitch_correction_deg'] - (true_pitch - 16.0)) < 0.4:
+        ok(f'俯角补 {report["pitch_correction_deg"]:+.2f}° ≈ 真实-写的 = '
+           f'{true_pitch - 16.0:+.1f}°（符号也对）')
+    else:
+        fail(f'俯角补 {report["pitch_correction_deg"]:+.2f}°，应该是 '
+             f'{true_pitch - 16.0:+.1f}°——符号错或法向约定错')
+    if abs(report['camera_height_m'] - MOUNT_XYZ[2]) < 2e-3:
+        ok(f'相机离地 {report["camera_height_m"]:.4f} m ≈ xacro 里的 '
+           f'{MOUNT_XYZ[2]:.2f} m')
+    else:
+        fail(f'相机离地 {report["camera_height_m"]:.4f} m，xacro 写 '
+             f'{MOUNT_XYZ[2]:.2f} m')
+
+    # 11e. 超量程/零深度的像素必须被丢掉，而不是当成 0 米
+    holes = np.array(depth, copy=True)
+    holes[labels == 1] = 0.0
+    pts, plt = depth3d.points_from_labels(labels, holes, camera, T, 1.0, step=1)
+    if np.count_nonzero(plt == 1) == 0:
+        ok('深度为 0 的像素被丢掉（不会变成 base_link 原点上的点）')
+    else:
+        fail(f'深度为 0 的位置还是造出了 {np.count_nonzero(plt == 1)} 个点')
+    far = np.full(depth.shape, 5.0, dtype=np.float32)
+    expect_error('5 m 远（超出 max_range）的掩膜整个被拒',
+                 geometry.GeometryError, depth3d.points_from_labels,
+                 labels, far, camera, T, 1.0)
+
+
+
 def main():
     print(f'reading {os.path.relpath(PKG_ROOT, REPO)}')
-    geometry, gripper, detection = load_modules()
+    geometry, gripper, detection, depth3d = load_modules()
     if geometry is None:
         print('\nFAILED (geometry layer not importable)')
         return 1
 
     check_offline_imports()
-    check_node_api(geometry, gripper, detection)
+    check_node_api(geometry, gripper, detection, depth3d)
     check_camera_model(geometry)
     check_project_roundtrip(geometry)
     check_plane_and_backproject(geometry)
@@ -641,6 +825,7 @@ def main():
     check_gripper(gripper, geometry)
     check_measurements(geometry, gripper)
     check_detection(geometry, gripper, detection)
+    check_depth(geometry, depth3d)
 
     print()
     if FAILURES:

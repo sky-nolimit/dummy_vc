@@ -10,9 +10,10 @@
 | --- | --- | --- |
 | `dummy_vc_perception/geometry.py` | 相机模型（针孔 + plumb_bob 畸变）、去畸变、桌面反投影、顶抓位姿、测量值来源 | 能，纯 numpy |
 | `dummy_vc_perception/gripper.py` | 开口宽度 ↔ `hand.set_angle` 的映射，未实测就拒绝下发 | 能 |
-| `dummy_vc_perception/detection.py` | blob → 平面质心 → 边长/朝向 → `SceneDetection`（最小面积外接矩形，不用二阶矩） | 能 |
-| `dummy_vc_perception/vision_node.py` | ROS 层：取图、查 TF、HSV 分割、发 `/detected_objects` + RViz 标记 | 不能（要 ROS） |
-| `config/vision.yaml` | 节点参数（话题、工作面、边长、HSV 范围、合格判据） | — |
+| `dummy_vc_perception/detection.py` | blob → 平面质心 → 边长/朝向 → `SceneDetection`（最小面积外接矩形，不用二阶矩）。**单目兜底用** | 能 |
+| `dummy_vc_perception/depth.py` | 深度图 → 3D 点 → 抓取点；地面拟合反解相机倾角。**默认走这条** | 能 |
+| `dummy_vc_perception/vision_node.py` | ROS 层：取彩色+深度、查 TF、HSV 分割、发 `/detected_objects` + RViz 标记 | 不能（要 ROS） |
+| `config/vision.yaml` | 节点参数（话题、工作面、边长、HSV 范围、合格判据、深度开关） | — |
 
 分层不是洁癖：这一层将来要在真机上调坐标轴约定，而真机调试一轮很贵。
 把它写成纯 numpy，本机（没有 ROS）就能用
@@ -35,6 +36,36 @@ ros2 run dummy_vc_perception vision_node --ros-args \
 ros2 topic echo /detected_objects --once
 ros2 run rviz2 rviz2      # 加 MarkerArray -> /detected_objects/markers
 ```
+
+### 深度这条路（默认）与用地面自己标定俯角
+
+节点默认 `use_depth: true`：彩色图照旧用来分割，位置改成"掩膜里的像素配上
+深度图，反投影成 3D 点"。这样绕掉了单目那两个假设（物体贴在 `table_z` 平面上、
+立体物体的地面投影等于它的边长）——后者在斜视下**数学上就不可能成立**，
+拟合出的边长永远是沿视线拉长的（24 mm 方块在 16° 俯角下恒被量成 65 × 28.6 mm）。
+
+深度图必须是**已经对齐到彩色**的（`depth_registration:=true`；判断方法是话题
+列表里同时有 `/camera/depth/image_unaligned`）。没深度或深度太旧时节点会自己
+退回单目那条路并打一次警告，所以拔了深度不会崩，只是精度回到毫米级偏厘米。
+
+**相机到底装成多少度，别再手扫了**——让地面自己说：
+
+```bash
+ros2 run dummy_vc_perception vision_node --ros-args \
+  --params-file $(ros2 pkg prefix dummy_vc_perception)/share/dummy_vc_perception/config/vision.yaml \
+  -p use_depth:=true -p calibrate_plane:=true
+```
+
+日志会打出（每 10 帧一次）：
+
+```
+法向在 base_link 里 = (0.070, 0.000, 0.998)，相对竖直偏 4.0°，相机离地 0.150 m（xacro 里写的是 0.15 m）；
+要把法向压到 (0,0,1)：camera_mount_pitch_deg 加上 -4.0°（当前 xacro 是 16°，改完重启 robot_state_publisher 即可）
+```
+
+照它给的数改 `dummy2_urdf.xacro` 的 L474，重启 `robot_state_publisher` 就能收敛到
+0.1° 量级——比手扫角度准两个数量级，而且不用再猜。**平面标不出偏航**：一个水平面
+绕它自己的法向转多少度都还是它自己，偏航得用已知位置的物体另做。
 
 ### 没有机械臂也能验（只用相机）
 
@@ -70,8 +101,12 @@ ros2 run dummy_vc_perception vision_node --ros-args \
 2. 举起方块时 `/detected_objects` 有东西，位置随方块移动而移动；
 3. RViz 里绿色方块**贴在**真方块上、橙色箭头与方块一条边平行（45° 摆放时
    箭头也要转 45°，这是朝向有没有算对的判据）；
-4. 拿尺子量：`position` 的 xy 与真值差 < 10 mm（单目只够到这个量级，
-   见下面第 4 条），`z` 应恒等于 `object_edge / 2 = 12 mm`。
+4. 拿尺子量：`position` 的 xy 与真值差 < 10 mm（走深度这条路应该到几毫米，
+   单目兜底只够到 10 mm，见下面第 4 条），`z` 应恒等于
+   `object_edge / 2 = 12 mm`。
+
+日志里每次命中（第 1 次和每 10 次）都会打出报出的坐标和拟合边长，被丢掉的
+候选也会打原因——排查"为什么没认出来"靠这几行，不用再去 RViz 里猜。
 
 `/detected_objects` 里每个元素：`bbox.center` = `gripper_tcp` 的位姿
 （位置 + 顶抓四元数），`bbox.size` = 方块边长，`results[0].hypothesis.class_id`
@@ -177,15 +212,13 @@ tool0 / gripper_tcp           +y 是接近方向（手腕 -> 两指夹持中心�
    "1 mm/像素"大，验收线（10 mm）里没有多少余量。
 
 5. **深度相机已到货：Orbbec Gemini 335L**（不是 docs/01 里写的 RealSense）。
-   `vision_node.py` 的数据源要按它设计：ROS 2 包是 `orbbec_camera`，
-   对齐后的深度图在 `/camera/depth/image_raw`（`depth_registration:=true`），
-   彩色在 `/camera/color/image_raw`，点云在 `/camera/depth/points`，
-   服务 `/camera/set_image_registration_mode` 可在运行时切 `OFF`/`HW_D2C`/`SW_D2C`。
-   接进来之前先在 Windows 上用 Orbbec Viewer 确认相机本身是好的。
-   **接进来时只需要改 `config/vision.yaml` 的两个话题名**（文件里有注释好的
-   那两行），节点其余部分不用动；但那时应该把 `_on_image()` 里那次
-   `detections_from_blobs`（平面反投影）
-   换成"取掩膜内的深度中值"，单目那套假设就可以扔了。
+   节点已经按它写好：彩色 `/camera/color/image_raw` 用来分割，深度
+   `/camera/depth/image_raw`（`depth_registration:=true`，已对齐到彩色）用来定位，
+   `use_depth: true` 是默认。**接进来只需要改 `config/vision.yaml` 的两个话题名**
+   （文件里有注释好的那两行），节点其余部分不用动。
+   深度只有 **2 Hz**（USB 2.0 + VirtualBox 的等时传输，见 docs/03），静止场景够用；
+   真要提高得换 USB 3.0 线并把相机直通进虚拟机。
+   单目那条路留着当兜底（`use_depth:=false`，或深度没数据时节点自己退回）。
 
 6. **夹爪的映射是占位值，而且代码拒绝用它下发指令。**
    `gripper.unverified_placeholder_model().command_for_width()` 一定抛
