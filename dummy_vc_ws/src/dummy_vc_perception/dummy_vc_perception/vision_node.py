@@ -123,6 +123,7 @@ class VisionNode(Node):
         self.depth_msg = None         # 最近一帧深度（与彩色对齐）
         self.depth_frame_count = 0
         self.plane_reports = 0
+        self.last_plane_z = None
 
         self.pub = self.create_publisher(
             Detection3DArray, self.get_parameter('output_topic').value, 10)
@@ -349,6 +350,8 @@ class VisionNode(Node):
                     math.degrees(best.yaw_rad),
                     best.extent_m[0] * 1e3, best.extent_m[1] * 1e3,
                     best.distance_m))
+            if depth_frame is not None:
+                self._log_depth_probe(labels, depth_frame, T)
 
         array = self._to_message(detections, msg.header)
         self.pub.publish(array)
@@ -358,6 +361,42 @@ class VisionNode(Node):
     # ------------------------------------------------------------------
     # 深度：取帧，以及"用地面把相机自己标出来"
     # ------------------------------------------------------------------
+
+    def _log_depth_probe(self, labels, depth, T):
+        """把"深度这一层实际看到什么"压成一行。
+
+        只有最终坐标时，抓取点偏了分不清是掩膜偏、深度不对、还是 TF 的平移
+        不对。这一行把原始深度值、以及这些点在 base_link 下的 z 摊开：和
+        `table_z`（工作面）一比，就知道差在哪儿。
+        """
+        scale = self.depth_scale
+        if not scale:
+            return
+        vs, us = np.nonzero(labels)
+        if us.size == 0:
+            return
+        raw = depth3d.sample_depth(depth, us.astype(float), vs.astype(float),
+                                   labels.shape)
+        ok = np.isfinite(raw) & (raw > 0.0) & (raw * scale < self.depth_max_range)
+        if not np.any(ok):
+            self.get_logger().warn('深度诊断：掩膜里没有有效深度')
+            return
+        raw, uu, vv = raw[ok], us[ok].astype(float), vs[ok].astype(float)
+        z = raw * scale
+        x, y = depth3d.undistort_pixels(self.camera, uu, vv)
+        p_opt = np.stack([x * z, y * z, z], axis=1)
+        T = np.asarray(T, float)
+        z_base = p_opt @ T[:3, :3].T[:, 2] + T[2, 3]
+        plane = ('{:.4f}'.format(self.last_plane_z)
+                 if self.last_plane_z is not None else '还没标定')
+        self.get_logger().info(
+            '深度诊断：掩膜 {} 像素，原始值中位数 {:.1f} mm（{:.1f}~{:.1f}），'
+            'base_link 下 z 中位数 {:+.4f} m（{:+.4f}~{:+.4f}）；'
+            '拟合地面过 z = {} m，参数 table_z = {:+.4f} m'.format(
+                vv.size, float(np.median(raw)), float(np.min(raw)),
+                float(np.max(raw)), float(np.median(z_base)),
+                float(np.min(z_base)), float(np.max(z_base)),
+                plane, self.table_z))
 
     def _on_depth(self, msg):
         if self.depth_scale is None:
@@ -420,14 +459,26 @@ class VisionNode(Node):
         report = depth3d.plane_report(T[:3, :3] @ normal_opt, offset)
         self.plane_reports += 1
         nx, ny, nz = report['normal']
+        # 平面在 base_link 里过 z = plane_z（在 z 轴上截距）。这个数和 table_z
+        # 一比，就知道差的是"相机装高了"还是"工作面不在 z=0 上"——两者的症状
+        # 都是抓取点 z 偏，只有这个数能分开。
+        normal_base = np.asarray(report['normal'], float)
+        point_on_plane = (T[:3, :3] @ (normal_opt * offset)) + T[:3, 3]
+        if abs(normal_base[2]) > 1e-6:
+            self.last_plane_z = float(normal_base @ point_on_plane
+                                      / normal_base[2])
+        else:
+            self.last_plane_z = None
         self.get_logger().info(
             '地面拟合：法向在 {} 里 = ({:+.3f}, {:+.3f}, {:+.3f})，'
-            '相对竖直偏 {:.2f}°；相机离地 {:.3f} m（xacro 里写的是 {:.3f} m）；'
-            '要把法向压到 (0,0,1)：camera_mount_pitch_deg 加上 {:+.2f}°'
-            '（当前 xacro 是 16°，改完重启 robot_state_publisher 即可）'.format(
+            '相对竖直偏 {:.2f}°；相机到地面的距离 {:.3f} m（xacro 里相机 z = '
+            '{:.3f} m）；地面在 {} 里过 z = {} m（参数 table_z = {:.4f} m）。'
+            '要把法向压到 (0,0,1)：camera_mount_pitch_deg 加上 {:+.2f}°'.format(
                 self.base_frame, nx, ny, nz, report['tilt_deg'],
-                report['camera_height_m'], float(T[2, 3]),
-                report['pitch_correction_deg']))
+                report['camera_height_m'], float(T[2, 3]), self.base_frame,
+                ('{:.4f}'.format(self.last_plane_z)
+                 if self.last_plane_z is not None else '测不出'),
+                self.table_z, report['pitch_correction_deg']))
 
     # ------------------------------------------------------------------
     # 查 TF：相机光学系在 base_link 里的位姿
