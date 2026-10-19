@@ -767,6 +767,24 @@ def check_depth(geometry, depth3d):
     else:
         fail(f'z = {scene.position[2] * 1000:.2f} mm，应该是 '
              f'{CUBE_EDGE / 2.0 * 1000:.1f} mm')
+    # 斜下 20° 看这个方块，拟合出的外接矩形必然是长条：短边≈真实边长，长边被
+    # 侧面拉长。尺寸判据只认短边，否则真方块永远过不了 —— 虚拟机上的实测就是
+    # 34.9x25.5 和 46.6x25.8 两种，长边把 10 mm 的容差顶穿了。
+    short_m, long_m = sorted(scene.extent_m)
+    print(f'    外接矩形 {long_m * 1e3:.1f} x {short_m * 1e3:.1f} mm'
+          f'（长边/短边 = {long_m / short_m:.2f}）')
+    if abs(short_m - CUBE_EDGE) < 3e-3:
+        ok(f'短边 {short_m * 1e3:.1f} mm 贴住真实边长 '
+           f'{CUBE_EDGE * 1e3:.0f} mm（斜视下短边也会被压短一点，所以是 3 mm）')
+    else:
+        fail(f'短边 {short_m * 1e3:.1f} mm 与真实边长 '
+             f'{CUBE_EDGE * 1e3:.0f} mm 不符')
+    if scene.edge_error_m <= 0.01:
+        ok(f'尺寸判据用短边，斜视下误差 {scene.edge_error_m * 1e3:.1f} mm '
+           f'在 10 mm 以内（若用长边是 '
+           f'{abs(long_m - CUBE_EDGE) * 1e3:.1f} mm，会被拒）')
+    else:
+        fail(f'短边误差 {scene.edge_error_m * 1e3:.1f} mm 超了 10 mm')
 
     # 11d. 用地面拟合反解相机倾角：真实 20°，URDF 里写的 16° -> 应补 +4°
     ground_opt = (ray[labels.ravel() == 2]

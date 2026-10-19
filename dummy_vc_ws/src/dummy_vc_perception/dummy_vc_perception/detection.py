@@ -217,8 +217,9 @@ def detection_from_blob(blob, camera, T_base_optical, plane_z, object_edge_m,
         raise GeometryError(
             '抓取点在相机背后（光学系 z = {:.4f}）'.format(distance))
 
-    edge_error = max(abs(fit.extent_a_m - object_edge_m),
-                     abs(fit.extent_b_m - object_edge_m))
+    # 只看短边，理由同 depth.detection_from_points：斜向下看立在平面上的方块，
+    # 轮廓沿视线方向必然被拉长，长边不可信，短边才是真实边长。
+    edge_error = abs(min(fit.extent_a_m, fit.extent_b_m) - object_edge_m)
     return SceneDetection(position=np.asarray(position, float),
                           yaw_rad=fit.yaw_rad,
                           quaternion=quaternion,

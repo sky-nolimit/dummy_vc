@@ -177,7 +177,12 @@ def detection_from_points(points, object_edge_m, T_base_optical,
         raise GeometryError(
             '抓取点在相机背后（光学系 z = {:.4f}）'.format(distance))
 
-    edge_error = max(abs(fit.extent_a_m - edge), abs(fit.extent_b_m - edge))
+    # 判"是不是方块"只看**短边**。相机是斜向下看的，立方体的顶面切片里必然还
+    # 带进一条侧面，那个方向会被拉长：实测同一个方块报出过 34.9x25.5、
+    # 46.6x25.8 mm。短边才是真实边长（24 mm 附近），长边是斜视的代价。
+    # 只看短边的代价：又长又窄的东西能混进来 —— 但抓取场景里没有。
+    short_edge = min(fit.extent_a_m, fit.extent_b_m)
+    edge_error = abs(short_edge - edge)
     per_pixel = camera.metres_per_pixel(distance) if camera is not None else (0.0, 0.0)
     return SceneDetection(position=position,
                           yaw_rad=fit.yaw_rad,
@@ -212,7 +217,7 @@ def detections_from_labels_and_depth(labels, depth, camera, T_base_optical,
         if det.edge_error_m > float(max_edge_error_m):
             if rejects is not None:
                 rejects.append((label_id, label_pixels,
-                                '顶面拟合出 {:.1f}x{:.1f} mm，与目标 {:.1f} mm '
+                                '顶面拟合出 {:.1f}x{:.1f} mm，短边与目标 {:.1f} mm '
                                 '差 {:.1f} mm（上限 {:.1f}）'.format(
                                     det.extent_m[0] * 1e3, det.extent_m[1] * 1e3,
                                     float(object_edge_m) * 1e3,
