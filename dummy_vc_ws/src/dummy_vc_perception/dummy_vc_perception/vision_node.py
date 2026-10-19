@@ -124,6 +124,7 @@ class VisionNode(Node):
         self.depth_frame_count = 0
         self.depth_size = None         # 深度图的 (宽, 高)
         self.size_reported = False     # 深度/彩色尺寸只报一次
+        self.no_info_warned = False    # 没 CameraInfo 只抱怨一次
         self.plane_reports = 0
         self.last_plane_z = None
 
@@ -304,7 +305,17 @@ class VisionNode(Node):
 
     def _on_image(self, msg):
         if self.camera is None:
-            return                      # 还没收到 CameraInfo
+            # 没有内参就算不了坐标。但**不能安静地 return**：话题名打错一个字母
+            # 时，节点会一条日志都不打，看起来像卡死（2026-10-19 真机就这么
+            # 卡了一次：camera_info_topic 写成了 /camera/coolor/camera_info）。
+            if not self.no_info_warned:
+                self.no_info_warned = True
+                self.get_logger().error(
+                    '收到图像，但没收到过 CameraInfo（{}）—— 没有内参就算不了'
+                    '坐标，每帧都直接丢掉。检查 camera_info_topic 有没有写错，'
+                    '以及相机驱动是否发布了它'.format(
+                        self.get_parameter('camera_info_topic').value))
+            return
         if self.last_stamp is not None:
             elapsed = (msg.header.stamp.sec - self.last_stamp.sec) + \
                       (msg.header.stamp.nanosec - self.last_stamp.nanosec) * 1e-9
