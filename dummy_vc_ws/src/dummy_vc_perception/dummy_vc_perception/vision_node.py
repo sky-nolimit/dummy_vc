@@ -229,6 +229,24 @@ class VisionNode(Node):
         for item in sorted(rejects, key=area_of, reverse=True)[:3]:
             self.get_logger().warn('  被丢掉的 blob：{}'.format(describe(item)))
 
+    def _log_blobs(self, blobs):
+        """画面里到底有几块绿的、最大那几块在哪儿。
+
+        认错对象时（比如抓到一个远处的绿东西、而方块根本没进掩膜），这是唯一
+        能定案的证据：方块按几何该落在某个像素上，掩膜里有没有东西在那儿，一眼
+        就知道是"分割没切到"还是"切到了但被后面的判据拒了"。
+        """
+        if not blobs:
+            self.get_logger().warn(
+                '  画面里一个绿斑都没有（HSV 范围 {}）'.format(self._ranges_text()))
+            return
+        top = sorted(blobs, key=lambda b: b.area_px, reverse=True)[:3]
+        self.get_logger().info(
+            '  画面里 {} 个绿斑，最大的几个：{}'.format(
+                len(blobs), '、'.join(
+                    '({:.0f}, {:.0f}) {} 像素'.format(b.u, b.v, b.area_px)
+                    for b in top)))
+
     def _usable_depth(self, header):
         """最近一帧深度图（ndarray）或 None。None 时用单目路径。"""
         if not self.use_depth:
@@ -330,6 +348,7 @@ class VisionNode(Node):
                     '连续 {} 帧没找到合格的方块（HSV 范围 {}，blob {} 个）'.format(
                         self.misses, self._ranges_text(), len(blobs)))
                 self._log_rejects(rejects)
+                self._log_blobs(blobs)
             return
         if self.misses:
             self.get_logger().info('重新找到了目标（之前漏了 {} 帧）'.format(
@@ -352,6 +371,7 @@ class VisionNode(Node):
                     best.distance_m))
             if depth_frame is not None:
                 self._log_depth_probe(labels, depth_frame, T)
+            self._log_blobs(blobs)
 
         array = self._to_message(detections, msg.header)
         self.pub.publish(array)
