@@ -192,18 +192,48 @@ def fit_edge_yaw(xy, coarse_step_deg=COARSE_STEP_DEG,
     return EdgeYaw(yaw_rad=yaw, extent_a_m=a, extent_b_m=b)
 
 
+def shadow_bias(centre_xy, camera_xyz, plane_z, height_m):
+    """斜视看一个立在工作面上的物体时，"影子"质心离相机比真实底面中心更远。
+
+    物体高 h、视线与平面的夹角 θ：把它沿视线投影到平面上，得到的是"底面轮廓
+    ⊕ 一段长 h·cotθ 的平移"，质心因此沿视线方向多走了 h·cotθ/2。24 mm 的方块、
+    30° 的视线下约 20 mm，正是之前测到的 +18 mm 那个偏置。
+
+    h 是这个物体的**高度**（不是宽度）；平贴在面上的标记物传 0，这时没有影子
+    偏置，不该硬减。返回需要从影子质心减掉的二维向量（沿"背离相机"的方向）。
+    """
+    cam = np.asarray(camera_xyz, float)
+    d = np.array([float(centre_xy[0]) - cam[0], float(centre_xy[1]) - cam[1], 0.0])
+    horiz = float(np.hypot(d[0], d[1]))
+    drop = float(cam[2] - plane_z)
+    if horiz < 1e-6 or drop <= 1e-6 or not float(height_m) > 0.0:
+        return np.zeros(2)
+    shift = 0.5 * float(height_m) * horiz / drop
+    return d[:2] / horiz * shift
+
+
 def detection_from_blob(blob, camera, T_base_optical, plane_z, object_edge_m,
-                        max_points=2000) -> SceneDetection:
-    """blob -> 抓取目标：在平面上定质心、拟合朝向、算抓取点与顶抓姿态。"""
+                        max_points=2000, object_height_m=None) -> SceneDetection:
+    """blob -> 抓取目标：在平面上定质心、拟合朝向、算抓取点与顶抓姿态。
+
+    `object_height_m` 只有算影子偏置时才用得上，默认等于边长（立方体）。
+
+    朝向（yaw）只在"影子"不够长时才可信：影子被拉成 e × e(1+cotθ) 的矩形，
+    当方块正好转过 45° 时，最小外接矩形会贴着视线方向而不是方块的边。夹爪还
+    没通，这一条的影响等做抓取时再处理。
+    """
     if not float(object_edge_m) > 0.0:
         raise GeometryError('方块边长必须为正：{}'.format(object_edge_m))
+    height = float(object_edge_m) if object_height_m is None else float(object_height_m)
     xy = project_blob_to_plane(blob, camera, T_base_optical, plane_z,
                                max_points=max_points)
     if xy.shape[0] < MIN_PROJECTED_POINTS:
         raise GeometryError(
             '平面上只有 {} 个点，不足以定位'.format(xy.shape[0]))
 
-    centre_xy = xy.mean(axis=0)
+    centre_xy = xy.mean(axis=0) - shadow_bias(
+        xy.mean(axis=0), np.asarray(T_base_optical, float)[:3, 3], plane_z,
+        height)
     fit = fit_edge_yaw(xy)
     # 抓取点取方块几何中心：底面贴在工作面上，所以比平面高半个边长。
     position = object_center_on_table(centre_xy[0], centre_xy[1], plane_z,
@@ -231,7 +261,7 @@ def detection_from_blob(blob, camera, T_base_optical, plane_z, object_edge_m,
 
 def detections_from_blobs(blobs, camera, T_base_optical, plane_z,
                           object_edge_m, max_edge_error_m=0.01,
-                          rejects=None) -> List[SceneDetection]:
+                          rejects=None, object_height_m=None) -> List[SceneDetection]:
     """批量版本：尺寸对不上的直接丢掉（多半是反光、阴影、或者别的物体）。
 
     `rejects` 不是 None 时，被丢掉的 blob 会以 `(blob, 原因)` 追加进去。理由：
@@ -242,7 +272,8 @@ def detections_from_blobs(blobs, camera, T_base_optical, plane_z,
     for blob in blobs:
         try:
             det = detection_from_blob(blob, camera, T_base_optical, plane_z,
-                                      object_edge_m)
+                                      object_edge_m,
+                                      object_height_m=object_height_m)
         except GeometryError as exc:
             if rejects is not None:
                 rejects.append((blob, str(exc)))

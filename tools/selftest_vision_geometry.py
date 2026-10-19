@@ -575,7 +575,10 @@ def check_detection(geometry, gripper, detection):
         if len(blobs) != 1:
             fail('标签图里应该只有一个 blob，拿到 {} 个'.format(len(blobs)))
             continue
-        det = detection.detection_from_blob(blobs[0], camera, T, table_z, edge)
+        # 这批合成掩膜是"平贴在平面上的方块投影"（没有高度），所以影子偏置
+        # 必须传 0 —— 它考的是投影与矩形拟合，不是立体几何。
+        det = detection.detection_from_blob(blobs[0], camera, T, table_z, edge,
+                                            object_height_m=0.0)
         tag = '{:.0f} 度'.format(yaw_deg)
         # 1.5 mm 的容差 = 一个像素多一点（0.6 m 处 1 px = 1.212 mm），
         # 因为掩膜本身就是按像素量化出来的。
@@ -712,7 +715,7 @@ def render_scene(geometry, depth3d, camera, T):
             labels.reshape(DEPTH_H, DEPTH_W), ray, direction, t)
 
 
-def check_depth(geometry, depth3d):
+def check_depth(geometry, depth3d, detection):
     print('--- 11. 深度这一层（合成场景）')
     camera = synthetic_camera(geometry)
 
@@ -804,6 +807,30 @@ def check_depth(geometry, depth3d):
         ok('只有一簇深度时不做裁剪（不该把唯一点集切碎）')
     else:
         fail('只有一簇深度时被裁掉了')
+
+    # 11j. 单目（没有深度）：斜视下"影子质心"比真实底面中心偏 e·cotθ/2，
+    #      必须把它算回去，否则抓取点会系统地偏向远处（实测过 +18 mm）。
+    mono_blob = detection.blob_from_mask(labels == 1)
+    mono = detection.detection_from_blob(mono_blob, camera, T, 0.0, CUBE_EDGE)
+    err_mono = float(np.linalg.norm(np.asarray(mono.position)
+                                    - np.array(CUBE_CENTRE)))
+    xy_raw = detection.project_blob_to_plane(mono_blob, camera, T, 0.0)
+    raw_xy = xy_raw.mean(axis=0)
+    raw_pos = geometry.object_center_on_table(raw_xy[0], raw_xy[1], 0.0,
+                                              CUBE_EDGE)
+    err_raw = float(np.linalg.norm(np.asarray(raw_pos)
+                                   - np.array(CUBE_CENTRE)))
+    print(f'    单目：不修正影子偏置 {err_raw * 1e3:.2f} mm -> 修正后 '
+          f'{err_mono * 1e3:.2f} mm（真值 {CUBE_CENTRE}）')
+    if err_raw < 8e-3:
+        fail(f'合成场景里影子偏置只有 {err_raw * 1e3:.2f} mm，'
+             f'这条检查证明不了任何事（场景视野太正或相机太低）')
+    else:
+        note(f'不修正时偏 {err_raw * 1e3:.2f} mm，说明影子偏置确实存在')
+    if err_mono < 5e-3:
+        ok(f'单目修正影子偏置后误差 {err_mono * 1e3:.2f} mm < 5 mm')
+    else:
+        fail(f'单目修正后仍有 {err_mono * 1e3:.2f} mm 误差')
 
     # 11d. 用地面拟合反解相机倾角：真实 20°，URDF 里写的 16° -> 应补 +4°
     ground_opt = (ray[labels.ravel() == 2]
@@ -967,7 +994,7 @@ def main():
     check_gripper(gripper, geometry)
     check_measurements(geometry, gripper)
     check_detection(geometry, gripper, detection)
-    check_depth(geometry, depth3d)
+    check_depth(geometry, depth3d, detection)
 
     print()
     if FAILURES:
