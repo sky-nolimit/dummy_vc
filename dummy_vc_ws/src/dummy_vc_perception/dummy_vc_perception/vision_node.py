@@ -509,7 +509,8 @@ class VisionNode(Node):
         x, y = depth3d.undistort_pixels(self.camera, us, vs)
         p_opt = np.stack([x * z, y * z, z], axis=1)
         try:
-            normal_opt, offset = depth3d.plane_from_points(p_opt)
+            normal_opt, offset = depth3d.plane_from_points(
+                p_opt, T_base_optical=T, max_tilt_deg=25.0)
         except geometry.GeometryError as exc:
             self.get_logger().warn('地面拟合失败：{}'.format(exc))
             return

@@ -13,6 +13,8 @@
 在 base_link 下、单位米。
 """
 
+import math
+
 import numpy as np
 
 from .detection import (MIN_PROJECTED_POINTS, SceneDetection, fit_edge_yaw)
@@ -260,7 +262,8 @@ def detections_from_labels_and_depth(labels, depth, camera, T_base_optical,
 # ----------------------------------------------------------------------
 
 def plane_from_points(points, tolerance_m=PLANE_TOLERANCE_M,
-                      iterations=PLANE_ITERATIONS, trials=RANSAC_TRIALS):
+                      iterations=PLANE_ITERATIONS, trials=RANSAC_TRIALS,
+                      T_base_optical=None, max_tilt_deg=None):
     """RANSAC 找最大的那个平面，再用它的内点做最小二乘 -> (法向 n, 偏移 d)。
 
     法向的符号统一成"指向相机"：输入的点在光学系里时，相机在原点，于是
@@ -271,6 +274,11 @@ def plane_from_points(points, tolerance_m=PLANE_TOLERANCE_M,
     "看起来正常"的距离。2026-10-19 就是这么错的：内点 763/2500、RMS 11.2 mm、
     相机到地面 0.206 m（卷尺量的是 0.16），而法向同时偏了 2.5°。
     RANSAC 只用 3 个点定平面、数内点，能扛住大半画面是别的东西。
+
+    `T_base_optical` + `max_tilt_deg` 可选：给了就只接受"法向在 base_link 里
+    与竖直方向夹角不超过 max_tilt_deg"的候选。地面按重力必然是水平的，这条先验
+    能直接排掉墙壁、显示器、纸箱 —— 2026-10-19 真机上一帧就锁到了 85.7° 的
+    竖直面（1.34 m 外的东西），把"相机到地面"报成 1.336 m。
     """
     pts = np.asarray(points, float)
     if pts.ndim != 2 or pts.shape[1] != 3:
@@ -278,6 +286,11 @@ def plane_from_points(points, tolerance_m=PLANE_TOLERANCE_M,
     if pts.shape[0] < 3:
         raise GeometryError('少于 3 个点拟合不出平面')
     tol = float(tolerance_m)
+    cos_limit = None
+    rot = None
+    if T_base_optical is not None and max_tilt_deg is not None:
+        rot = np.asarray(T_base_optical, float)[:3, :3]
+        cos_limit = float(math.cos(math.radians(max_tilt_deg)))
 
     # 固定种子：同一个点云每次跑出同一个结果，日志才可比、自测才能判红。
     rng = np.random.default_rng(RANSAC_SEED)
@@ -290,6 +303,10 @@ def plane_from_points(points, tolerance_m=PLANE_TOLERANCE_M,
         if norm < 1e-12:
             continue                    # 三点共线，定不出平面
         n = n / norm
+        if cos_limit is not None:
+            # 先验：这条候选平面的法向在 base_link 里必须接近竖直。
+            if abs(float((rot @ n)[2])) < cos_limit:
+                continue
         d = float(n @ p0)
         count = int(np.count_nonzero(np.abs(pts @ n - d) < tol))
         if count > best_count:

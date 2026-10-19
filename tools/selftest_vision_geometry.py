@@ -881,6 +881,53 @@ def check_depth(geometry, depth3d):
         fail(f'内点 {kept}/{total_mixed}、RMS {rms_mixed * 1e3:.2f} mm：'
              f'内点该接近 400、RMS 该在毫米级')
 
+    # 11h. 画面里有一面墙比地面还大时，靠"地面是水平的"这条先验把它排掉。
+    #      2026-10-19 真机上一帧就锁到了 85.7° 的竖直面，把"相机到地面"报成
+    #      1.336 m（真实 0.15 m）。地面按重力必然水平，这条先验是免费的。
+    wall = np.column_stack([
+        np.full(600, 1.0),                       # x = 1.0 的墙面
+        junk.uniform(-0.4, 0.4, 600),
+        junk.uniform(-0.4, 0.4, 600)])
+    floor_small = np.column_stack([
+        junk.uniform(-0.2, 0.2, 300),
+        junk.uniform(-0.2, 0.2, 300),
+        np.full(300, 0.0)])
+    room = np.vstack([wall, floor_small])
+    junk.shuffle(room)
+    n_free, off_free = depth3d.plane_from_points(room)
+    # 相机在 base 里朝下看（和上面合成场景的约定一致），所以 T 的旋转部分把
+    # 光学系的 z 轴映到 base 的 -z。
+    T_down = np.array([[1.0, 0.0, 0.0, 0.0],
+                       [0.0, -1.0, 0.0, 0.0],
+                       [0.0, 0.0, -1.0, 0.6],
+                       [0.0, 0.0, 0.0, 1.0]])
+    rot_t = T_down[:3, :3]
+    room_opt = (room - T_down[:3, 3]) @ rot_t     # base -> optical（R^T 乘）
+    n_pri, off_pri = depth3d.plane_from_points(
+        room_opt, T_base_optical=T_down, max_tilt_deg=25.0)
+
+    def plane_z_in_base(n_opt, off_opt):
+        """把光学系里的平面搬到 base_link，取它在 z 轴上的截距。
+
+        法向几乎水平（锁到了墙）时截距没有意义，返回 nan 而不是 inf。
+        """
+        n_base = rot_t @ n_opt
+        point_base = rot_t @ (n_opt * off_opt) + T_down[:3, 3]
+        if abs(n_base[2]) < 1e-6:
+            return float('nan')
+        return float(n_base @ point_base / n_base[2])
+
+    free_z = plane_z_in_base(n_free, off_free)
+    pri_z = plane_z_in_base(n_pri, off_pri)
+    print(f'    墙 600 点 + 地面 300 点：不加先验锁到 z = {free_z:+.3f} m、'
+          f'法向竖直分量 {abs((rot_t @ n_free)[2]):.3f}；加先验后 '
+          f'z = {pri_z:+.3f} m、竖直分量 {abs((rot_t @ n_pri)[2]):.3f}')
+    if abs((rot_t @ n_free)[2]) < 0.3 and abs(pri_z) < 5e-3:
+        ok('一面大墙时，先验把拟合从墙面拉回了地面（+0.000 m）')
+    else:
+        fail(f'先验没起作用：不加先验竖直分量 {abs((rot_t @ n_free)[2]):.3f}'
+             f'（该接近 0，即锁到墙），加先验后 z = {pri_z:+.4f}（该是 0）')
+
 
 def main():
     print(f'reading {os.path.relpath(PKG_ROOT, REPO)}')
