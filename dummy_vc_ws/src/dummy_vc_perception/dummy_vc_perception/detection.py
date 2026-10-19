@@ -277,7 +277,8 @@ def detection_from_blob(blob, camera, T_base_optical, plane_z, object_edge_m,
 
 def detections_from_blobs(blobs, camera, T_base_optical, plane_z,
                           object_edge_m, max_edge_error_m=0.01,
-                          rejects=None, object_height_m=None) -> List[SceneDetection]:
+                          rejects=None, object_height_m=None,
+                          centres=None) -> List[SceneDetection]:
     """批量版本：尺寸对不上的直接丢掉（多半是反光、阴影、或者别的物体）。
 
     `rejects` 不是 None 时，被丢掉的 blob 会以 `(blob, 原因)` 追加进去。理由：
@@ -306,4 +307,8 @@ def detections_from_blobs(blobs, camera, T_base_optical, plane_z,
                     det.edge_error_m * 1e3, max_edge_error_m * 1e3)))
             continue
         out.append(det)
+        if centres is not None:
+            # 一起把像素交出去：标定相机位姿时，"报出的坐标 + 它来自哪个像素"
+            # 这一对才是完整约束，光有坐标解不出位姿。
+            centres.append((float(blob.u), float(blob.v)))
     return out

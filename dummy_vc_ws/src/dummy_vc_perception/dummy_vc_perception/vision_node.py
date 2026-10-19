@@ -339,6 +339,7 @@ class VisionNode(Node):
 
         labels, blobs = self._segment(frame)
         rejects = []
+        centres = []
         depth_frame = self._usable_depth(msg.header)
         if depth_frame is not None:
             try:
@@ -353,7 +354,8 @@ class VisionNode(Node):
             try:
                 detections = detection.detections_from_blobs(
                     blobs, self.camera, T, self.table_z, self.object_edge,
-                    max_edge_error_m=self.max_edge_error, rejects=rejects)
+                    max_edge_error_m=self.max_edge_error, rejects=rejects,
+                    centres=centres)
             except geometry.GeometryError as exc:
                 self.get_logger().error('算抓取点失败：{}'.format(exc))
                 return
@@ -378,15 +380,20 @@ class VisionNode(Node):
         self.hits += 1
         if self.hits == 1 or self.hits % 10 == 0:
             best = detections[0]
+            # 像素中心也打出来：标定相机位姿要的是"这个坐标来自哪个像素"，
+            # 少了它，光有一堆坐标也反解不出相机在哪。
+            where = ''
+            if centres:
+                where = '，绿斑中心 ({:.0f}, {:.0f})'.format(*centres[0])
             self.get_logger().info(
                 '第 {} 次命中：{} 个候选，取最大的那个 '
                 'base_link=({:.3f}, {:.3f}, {:.3f}) m，yaw={:.1f}°，'
-                '拟合边长 {:.1f}x{:.1f} mm，距离 {:.3f} m'.format(
+                '拟合边长 {:.1f}x{:.1f} mm，距离 {:.3f} m{}'.format(
                     self.hits, len(detections),
                     best.position[0], best.position[1], best.position[2],
                     math.degrees(best.yaw_rad),
                     best.extent_m[0] * 1e3, best.extent_m[1] * 1e3,
-                    best.distance_m))
+                    best.distance_m, where))
             if depth_frame is not None:
                 self._log_depth_probe(labels, depth_frame, T)
             self._log_blobs(blobs)
