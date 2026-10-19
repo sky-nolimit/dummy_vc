@@ -258,6 +258,33 @@ def plane_from_points(points, tolerance_m=PLANE_TOLERANCE_M,
     return normal, offset
 
 
+def plane_quality(points, normal, offset, tolerance_m=PLANE_TOLERANCE_M):
+    """平面拟合的可信度 -> (内点数, 总点数, 残差 RMS 米)。
+
+    只有一个"离地多少米"的数字时，看不出它能不能信：点云是弯的、平面上混进
+    了别的物体、或者深度值根本不是沿光轴的 z 距离，都可能给出一个看起来正常
+    的数。残差 RMS 在毫米级 = 真的拟合到了一个平面（传感器噪声就那么大）；
+    到厘米级 = 这堆点根本不共面，那个距离不能直接写进标定。
+
+    这一条也是"深度值到底是 z 还是斜距"的判据：把斜距当 z 用，地面会被算成
+    一个球心在相机的碗，残差会有几厘米，而中心附近的点照样很准。
+    """
+    pts = np.asarray(points, float)
+    if pts.ndim != 2 or pts.shape[1] != 3 or pts.shape[0] < 3:
+        raise GeometryError('点要是 (N, 3) 且至少 3 个，收到 {}'.format(pts.shape))
+    n = np.asarray(normal, float)
+    n = n / float(np.linalg.norm(n))
+    dist = np.abs(pts @ n - float(offset))
+    keep = dist < float(tolerance_m)
+    count = int(np.count_nonzero(keep))
+    if count < 3:
+        # 连三个内点都没有：这堆点根本不共面。这时候仍然给一个数（全体残差），
+        # 好让日志能显示"偏了多少"，而不是一个 inf 让人无从判断。
+        return count, int(pts.shape[0]), float(np.sqrt(np.mean(dist ** 2)))
+    rms = float(np.sqrt(np.mean(dist[keep] ** 2)))
+    return count, int(pts.shape[0]), rms
+
+
 def plane_report(normal_base, offset_optical):
     """地面法向 -> 一串"相机到底装成什么样"的数，给标定用。
 

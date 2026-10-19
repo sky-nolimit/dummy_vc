@@ -457,6 +457,7 @@ class VisionNode(Node):
             self.get_logger().warn('地面拟合失败：{}'.format(exc))
             return
         report = depth3d.plane_report(T[:3, :3] @ normal_opt, offset)
+        inliers, total, rms = depth3d.plane_quality(p_opt, normal_opt, offset)
         self.plane_reports += 1
         nx, ny, nz = report['normal']
         # 平面在 base_link 里过 z = plane_z（在 z 轴上截距）。这个数和 table_z
@@ -471,11 +472,14 @@ class VisionNode(Node):
             self.last_plane_z = None
         self.get_logger().info(
             '地面拟合：法向在 {} 里 = ({:+.3f}, {:+.3f}, {:+.3f})，'
-            '相对竖直偏 {:.2f}°；相机到地面的距离 {:.3f} m（xacro 里相机 z = '
-            '{:.3f} m）；地面在 {} 里过 z = {} m（参数 table_z = {:.4f} m）。'
+            '相对竖直偏 {:.2f}°；相机到地面的距离 {:.3f} m（垂直距离，'
+            '不是沿光轴的斜距；xacro 里相机 z = {:.3f} m）；'
+            '面内点 {}/{}，残差 RMS {:.1f} mm；地面在 {} 里过 z = {} m'
+            '（参数 table_z = {:.4f} m）。'
             '要把法向压到 (0,0,1)：camera_mount_pitch_deg 加上 {:+.2f}°'.format(
                 self.base_frame, nx, ny, nz, report['tilt_deg'],
-                report['camera_height_m'], float(T[2, 3]), self.base_frame,
+                report['camera_height_m'], float(T[2, 3]),
+                inliers, total, rms * 1e3, self.base_frame,
                 ('{:.4f}'.format(self.last_plane_z)
                  if self.last_plane_z is not None else '测不出'),
                 self.table_z, report['pitch_correction_deg']))

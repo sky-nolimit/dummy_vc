@@ -806,6 +806,27 @@ def check_depth(geometry, depth3d):
 
 
 
+    # 11f. 拟合质量：真平面残差该是毫米级，弯的/混了东西的必须变大
+    exact = np.array([[u, v, 0.4] for u in (-0.2, 0.0, 0.2) for v in (-0.2, 0.2)],
+                     dtype=float)
+    n_exact, total_exact, rms_exact = depth3d.plane_quality(exact, (0.0, 0.0, 1.0),
+                                                           0.4)
+    if rms_exact < 1e-9 and n_exact == total_exact:
+        ok(f'精确平面：{n_exact}/{total_exact} 个点在内，残差 RMS '
+           f'{rms_exact * 1e3:.3f} mm')
+    else:
+        fail(f'精确平面的残差 RMS 应该是 0，实得 {rms_exact:.6f} m（{n_exact}/'
+             f'{total_exact} 个点）')
+    bowed = exact.copy()
+    bowed[:, 2] += 0.02 * (bowed[:, 0] ** 2 + bowed[:, 1] ** 2) / 0.04
+    _, _, rms_bowed = depth3d.plane_quality(bowed, (0.0, 0.0, 1.0), 0.4)
+    if rms_bowed > rms_exact + 1e-3:
+        ok(f'弯掉的点云残差变大（{rms_bowed * 1e3:.2f} mm）—— 这个数能把'
+           f'"深度值其实是斜距"这类问题暴露出来')
+    else:
+        fail(f'弯掉的点云残差没变大（{rms_bowed * 1e3:.3f} mm），这个检查是摆设')
+
+
 def main():
     print(f'reading {os.path.relpath(PKG_ROOT, REPO)}')
     geometry, gripper, detection, depth3d = load_modules()

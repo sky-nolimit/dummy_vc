@@ -466,9 +466,12 @@ def project_scene_measurements() -> SceneMeasurements:
     好让占位那条路径一直被测到；这一份是这台机器现在的真实状态，节点在
     没有配置覆盖时用它，并且在日志里点名每个数的来历。
 
-    - table_z = 0.0：**没有桌子**，方块就放在和机械臂底座同一平面上，而
-      base_link 的原点正是底座底面（j1 在 z = 0.0805 处，即 78 mm 底座的
-      顶面），所以工作面就是 z = 0。
+    - table_z = -0.0405：工作面是**地面**，不是底座底面。这台机器的底座垫在
+      一个约 2.5 cm 高的地台上，而 base_link 的原点也不在底座最底面 —— 它是
+      底座 stl 包围盒的中心，底面在 z = -0.0155（`base_link.stl` 的 z 范围
+      -15.5 ~ +83.5 mm）。所以地面在 base_link 里是 -(0.0155 + 0.025) =
+      -0.0405。方块放在地面上，抓取点的 z 就是 -0.0405 + 半个边长。
+      （2026-10-19 用户确认：地台约 2.5 cm、相机中心离地 16 cm、方块在地面上。）
     - tcp_offset_y = 0.015：link7 端面到两指夹持中心约 15 mm（尺量）。它比
       hand 关节的 0.052312 小，所以 gripper_tcp 落在 hand 坐标系原点后方
       y = -0.037312 —— 实物两指是贴着腕部夹的，URDF 里那套手指几何来自
@@ -479,8 +482,8 @@ def project_scene_measurements() -> SceneMeasurements:
     一致；改一处不改另一处，规划用的 TCP 和这里算的抓取点就会差几毫米。
     """
     return SceneMeasurements(
-        table_z=Measurement(0.0, 'm', 'measured',
-                            '无桌面：工件与底座同平面，base_link 原点即底座底面'),
+        table_z=Measurement(-0.0405, 'm', 'measured',
+                            '地面：底座底面 z=-0.0155（stl 包围盒）+ 2.5 cm 地台；方块放在地面上'),
         tcp_offset_y=Measurement(0.015, 'm', 'measured',
                                  '尺量 link7 端面到两指夹持中心约 15 mm（xacro 里同名常量）'),
         object_edge=Measurement(0.024, 'm', 'measured',
