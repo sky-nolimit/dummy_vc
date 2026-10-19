@@ -440,9 +440,15 @@
        tf2 会报 "TF_MULTIPLE_AUTHORITIES"。所以标定完成后必须二选一：
          方案 A（推荐）：把标定结果填进下面这个固定关节，删掉外部静态发布
          方案 B：给下面这个关节加条件，标定后不再展开
-       首期用方案 A，简单直接。 -->
-<xacro:property name="camera_offset_x" value="-0.31"/>
-<xacro:property name="camera_offset_y" value="0.31"/>
+       首期用方案 A，简单直接。
+
+     2026-10-19 用"已知位置的方块"校了一次：方块放在 base_link 的 (0, 0.31)，
+     节点报出 (0.022, 0.289)。合成场景验证过，相机的平移误差 e 会让重建出的点
+     整体偏 d ≈ -e（x/y 一比一，z 会放大到 1.5 倍左右），所以按 e=(-0.022,
+     +0.021) 把 x/y 各推了 2 cm。这只是**一点校正**，误差和"方块其实是放在
+     0.31 还是 0.29"分不开 —— 再量第二个点（换个位置）才能确认。 -->
+<xacro:property name="camera_offset_x" value="-0.332"/>
+<xacro:property name="camera_offset_y" value="0.331"/>
 <xacro:property name="camera_offset_z" value="0.15"/>
 
 <!-- 相机安装姿态（度）。
