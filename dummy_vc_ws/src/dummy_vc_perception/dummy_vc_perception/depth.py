@@ -204,25 +204,38 @@ def detections_from_labels_and_depth(labels, depth, camera, T_base_optical,
     if points.shape[0] == 0:
         return []
     out = []
+    T_inv = None
     for label_id in np.unique(point_labels):
         sel = points[point_labels == label_id]
         label_pixels = int(np.count_nonzero(labels_arr == label_id))
+        if T_inv is None:
+            T_inv = invert_transform(T_base_optical)
+        # 这组点在相机系里的深度，以及它们在 base_link 里占的 z 高度。拟合出来的
+        # 边长小得离谱时（虚拟机实测过 8900 像素的方块报 6.8x1.9 mm），靠这两个
+        # 数就能分清是"深度噪声大"还是"掩膜切到的不是方块"。
+        depth_of = (sel @ T_inv[:3, :3].T + T_inv[:3, 3])[:, 2]
+        stats = '这组 {} 点，深度中位数 {:.3f} m（{:.3f}~{:.3f}），' \
+                'base z 跨度 {:.1f} mm'.format(
+                    sel.shape[0], float(np.median(depth_of)),
+                    float(np.min(depth_of)), float(np.max(depth_of)),
+                    float(np.max(sel[:, 2]) - np.min(sel[:, 2])) * 1e3)
         try:
             det = detection_from_points(sel, object_edge_m, T_base_optical,
                                         camera=camera)
         except GeometryError as exc:
             if rejects is not None:
-                rejects.append((label_id, label_pixels, str(exc)))
+                rejects.append((label_id, label_pixels,
+                                '{}；{}'.format(exc, stats)))
             continue
         if det.edge_error_m > float(max_edge_error_m):
             if rejects is not None:
                 rejects.append((label_id, label_pixels,
                                 '顶面拟合出 {:.1f}x{:.1f} mm，短边与目标 {:.1f} mm '
-                                '差 {:.1f} mm（上限 {:.1f}）'.format(
+                                '差 {:.1f} mm（上限 {:.1f}）；{}'.format(
                                     det.extent_m[0] * 1e3, det.extent_m[1] * 1e3,
                                     float(object_edge_m) * 1e3,
                                     det.edge_error_m * 1e3,
-                                    max_edge_error_m * 1e3)))
+                                    max_edge_error_m * 1e3, stats)))
             continue
         out.append(det)
     out.sort(key=lambda d: d.distance_m)

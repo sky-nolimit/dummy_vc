@@ -430,6 +430,22 @@ class VisionNode(Node):
             self.get_logger().info(
                 '深度编码 {}，按 {} 米/像素值换算'.format(
                     msg.encoding, self.depth_scale))
+            # 分辨率必须和彩色图一致：深度没做对齐（depth_registration 关了）时
+            # 两张图尺寸不同，按彩色像素去查深度会取到完全无关的位置，表现为
+            # "掩膜里有几千像素，拟合出来的边长只有几毫米"。
+            h, w = int(msg.height), int(msg.width)
+            cam = self.camera
+            if cam is not None and (cam.width, cam.height) != (w, h):
+                self.get_logger().error(
+                    '深度图 {}x{} 与彩色图 {}x{} 尺寸不一致 —— 深度没有对齐到'
+                    '彩色，按彩色像素查深度是错的。请用 depth_registration:=true '
+                    '重启相机，或者改用 /camera/depth/image_rect_raw 之类对齐过的'
+                    '话题'.format(w, h, cam.width, cam.height))
+            else:
+                self.get_logger().info(
+                    '深度图 {}x{}，与彩色一致{}'.format(
+                        w, h, '' if cam is not None else '（还没收到 CameraInfo，'
+                        '暂时比不了）'))
         self.depth_msg = msg
         self.depth_frame_count += 1
         if self.calibrate_plane and self.depth_frame_count % 10 == 0:
