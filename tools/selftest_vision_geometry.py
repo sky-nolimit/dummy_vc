@@ -786,6 +786,25 @@ def check_depth(geometry, depth3d):
     else:
         fail(f'短边误差 {scene.edge_error_m * 1e3:.1f} mm 超了 10 mm')
 
+    # 11i. 掩膜里混进背景时：同一块掩膜的深度会分成两堆。方块在近处、桌面在后，
+    #      取中位数就选了背景（真机日志：中位数 0.478，而方块在 0.339）。
+    rng = np.random.default_rng(20261019)
+    near = 0.34 + 0.002 * rng.standard_normal(80)
+    far = 0.49 + 0.004 * rng.standard_normal(400)
+    both = np.concatenate([near, far])
+    keep = depth3d.near_depth_cluster(both)
+    kept = both[keep]
+    if kept.size and float(np.max(np.abs(kept - 0.34))) < 0.012:
+        ok(f'两簇深度（0.34 m 有 80 点、0.49 m 有 400 点）挑出近处那簇 '
+           f'{kept.size} 点，没被中位数带跑')
+    else:
+        fail(f'两簇深度挑错了：留下 {kept.size} 点，'
+             f'中位数 {float(np.median(kept)) if kept.size else float("nan"):.3f} m')
+    if depth3d.near_depth_cluster(np.array([0.4] * 20)).all():
+        ok('只有一簇深度时不做裁剪（不该把唯一点集切碎）')
+    else:
+        fail('只有一簇深度时被裁掉了')
+
     # 11d. 用地面拟合反解相机倾角：真实 20°，URDF 里写的 16° -> 应补 +4°
     ground_opt = (ray[labels.ravel() == 2]
                   * t[labels.ravel() == 2][:, None])

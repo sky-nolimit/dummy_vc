@@ -40,6 +40,11 @@ DEFAULT_MAX_RANGE_M = 1.50
 # 的轴上，所以只在顶面上取 xy 才不带这个偏置。
 TOP_SLICE_FRACTION = 0.3
 
+# 掩膜内的深度常常分成两堆：方块在近处、桌面或背景在远处（真机实测 0.321 与
+# 0.478 两堆，取中位数就选错了）。按这个宽度分箱、从近往远找第一簇。
+CLUSTER_BIN_M = 0.02
+CLUSTER_MIN_SHARE = 0.02
+
 # 平面拟合：RANSAC 找内点，再用内点做最小二乘；容差就是这个"内点"的宽度。
 # 256 次采样对几万个点足够（大半画面不是地面时也能命中），固定种子保证可复现。
 PLANE_TOLERANCE_M = 0.02
@@ -208,11 +213,53 @@ def detection_from_points(points, object_edge_m, T_base_optical,
                           metres_per_pixel=per_pixel)
 
 
+def near_depth_cluster(depths, bin_m=CLUSTER_BIN_M,
+                       min_share=CLUSTER_MIN_SHARE):
+    """挑"离相机最近、点又足够多"的那一簇深度。
+
+    掩膜里混进背景时，同一个 label 的点会分成两堆：方块在近处、桌面或背景在
+    远处（真机实测 0.321 和 0.478）。取中位数会把背景当成方块 —— 报出来的抓取
+    点因此偏了 +0.15 m、z 偏了 -0.09 m。
+
+    方块永远在它自己的颜色掩膜里最靠前，所以从近往远扫，第一簇够多的就是它。
+    返回布尔掩膜；只有一簇或者挑不出来时全给 True（调用方还有"全部点"这条退路）。
+    """
+    d = np.asarray(depths, float)
+    keep_all = np.ones(d.shape, bool)
+    if d.size < 2 * MIN_PROJECTED_POINTS:
+        return keep_all
+    lo, hi = float(np.min(d)), float(np.max(d))
+    if (hi - lo) < 2.0 * bin_m:
+        return keep_all
+    bins = int(np.ceil((hi - lo) / bin_m))
+    hist, edges = np.histogram(d, bins=bins, range=(lo, hi + 1e-9))
+    need = max(MIN_PROJECTED_POINTS, int(round(min_share * float(hist.max()))))
+    for i, count in enumerate(hist):
+        if count >= need:
+            centre = 0.5 * (float(edges[i]) + float(edges[i + 1]))
+            return np.abs(d - centre) <= bin_m
+    return keep_all
+
+
+def _depth_stats(depths):
+    """一行字说清这堆深度长什么样（分位数比中位数更能看出"两堆"）。"""
+    d = np.asarray(depths, float)
+    if d.size == 0:
+        return '没有点'
+    q = np.percentile(d, [5.0, 50.0, 95.0])
+    return '深度 {:.3f} m（5%/50%/95% = {:.3f}/{:.3f}/{:.3f}，{:.3f}~{:.3f}）'.format(
+        float(np.median(d)), q[0], q[1], q[2], float(np.min(d)), float(np.max(d)))
+
+
 def detections_from_labels_and_depth(labels, depth, camera, T_base_optical,
                                      object_edge_m, scale,
                                      step=2, max_edge_error_m=0.01,
                                      rejects=None):
-    """批量版：每个 label 一组点，逐组解析。`rejects` 用法同 detection 那边。"""
+    """批量版：每个 label 一组点，逐组解析。`rejects` 用法同 detection 那边。
+
+    每组先试"近处那一簇"，过不了尺寸判据再退回"全部点"：斜视下混进背景时
+    近处那簇才是方块，而纯粹噪声凑出来的近处小簇会被尺寸判据挡掉。
+    """
     labels_arr = np.asarray(labels)
     points, point_labels = points_from_labels(
         labels_arr, depth, camera, T_base_optical, scale, step=step)
@@ -229,28 +276,40 @@ def detections_from_labels_and_depth(labels, depth, camera, T_base_optical,
         # 边长小得离谱时（虚拟机实测过 8900 像素的方块报 6.8x1.9 mm），靠这两个
         # 数就能分清是"深度噪声大"还是"掩膜切到的不是方块"。
         depth_of = (sel @ T_inv[:3, :3].T + T_inv[:3, 3])[:, 2]
-        stats = '这组 {} 点，深度中位数 {:.3f} m（{:.3f}~{:.3f}），' \
-                'base z 跨度 {:.1f} mm'.format(
-                    sel.shape[0], float(np.median(depth_of)),
-                    float(np.min(depth_of)), float(np.max(depth_of)),
-                    float(np.max(sel[:, 2]) - np.min(sel[:, 2])) * 1e3)
-        try:
-            det = detection_from_points(sel, object_edge_m, T_base_optical,
-                                        camera=camera)
-        except GeometryError as exc:
+        stats = '这组 {} 点，{}，base z 跨度 {:.1f} mm'.format(
+            sel.shape[0], _depth_stats(depth_of),
+            float(np.max(sel[:, 2]) - np.min(sel[:, 2])) * 1e3)
+
+        near = near_depth_cluster(depth_of)
+        candidates = []
+        if not np.all(near) and np.count_nonzero(near) >= MIN_PROJECTED_POINTS:
+            near_stats = '近处那一簇 {} 点，{}'.format(
+                int(np.count_nonzero(near)), _depth_stats(depth_of[near]))
+            candidates.append((near_stats, sel[near]))
+        candidates.append((stats, sel))
+
+        det = None
+        reasons = []
+        for why, subset in candidates:
+            try:
+                trial = detection_from_points(subset, object_edge_m,
+                                              T_base_optical, camera=camera)
+            except GeometryError as exc:
+                reasons.append('{}；{}'.format(exc, why))
+                continue
+            if trial.edge_error_m > float(max_edge_error_m):
+                reasons.append(
+                    '顶面拟合出 {:.1f}x{:.1f} mm，短边与目标 {:.1f} mm '
+                    '差 {:.1f} mm（上限 {:.1f}）；{}'.format(
+                        trial.extent_m[0] * 1e3, trial.extent_m[1] * 1e3,
+                        float(object_edge_m) * 1e3, trial.edge_error_m * 1e3,
+                        max_edge_error_m * 1e3, why))
+                continue
+            det = trial
+            break
+        if det is None:
             if rejects is not None:
-                rejects.append((label_id, label_pixels,
-                                '{}；{}'.format(exc, stats)))
-            continue
-        if det.edge_error_m > float(max_edge_error_m):
-            if rejects is not None:
-                rejects.append((label_id, label_pixels,
-                                '顶面拟合出 {:.1f}x{:.1f} mm，短边与目标 {:.1f} mm '
-                                '差 {:.1f} mm（上限 {:.1f}）；{}'.format(
-                                    det.extent_m[0] * 1e3, det.extent_m[1] * 1e3,
-                                    float(object_edge_m) * 1e3,
-                                    det.edge_error_m * 1e3,
-                                    max_edge_error_m * 1e3, stats)))
+                rejects.append((label_id, label_pixels, ' ／ '.join(reasons)))
             continue
         out.append(det)
     out.sort(key=lambda d: d.distance_m)
