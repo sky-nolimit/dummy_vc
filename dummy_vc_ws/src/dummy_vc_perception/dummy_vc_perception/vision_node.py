@@ -72,10 +72,11 @@ class VisionNode(Node):
         self.declare_parameter('hsv_ranges', [40, 80, 60, 80, 255, 255])
         self.declare_parameter('min_area_px', detection.MIN_BLOB_AREA_PX)
         self.declare_parameter('max_area_fraction', 0.2)
-        # 短边是拿"边长"和"对角线"两个假设比过的（见 detection.short_edge_error），
-        # 所以门限比早先的 10 mm 收紧到 6 mm：宽出来的那部分是给转向的，
-        # 不是给"不像方块的东西"的。
-        self.declare_parameter('max_edge_error', 0.006)
+        # 短边是拿"边长"和"对角线"两个假设比过的（见 detection.short_edge_error）。
+        # 门限 12 mm：这套斜视安装下掩膜边缘本身就有几个像素的肥边（0.35 m 处
+        # 1 px ≈ 0.58 mm），棱角正对相机时实测短边能到 41.6 mm —— 卡在 10 mm
+        # 就会把真正的方块丢掉。远处那个 0.75 m 的绿斑交给 max_distance 挡。
+        self.declare_parameter('max_edge_error', 0.012)
         self.declare_parameter('max_distance', 1.5)
         self.declare_parameter('max_rate_hz', 10.0)
         self.declare_parameter('publish_markers', True)

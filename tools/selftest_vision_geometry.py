@@ -835,11 +835,11 @@ def check_depth(geometry, depth3d, detection):
     # 11k. 方块转过 45° 时，影子的短边是**对角线** e√2，不是边长 e。
     #      只拿 e 当真值，24 mm 的方块会被报成 34 mm 并判掉 —— 现场就是这么丢的
     #      （短边 34.1 mm、误差 10.1 mm，刚好卡在 10.0 的门限外）。所以短边要跟
-    #      "边长"和"对角线"两个假设都比，取近的那个；门限也相应收到 6 mm，
-    #      免得把远处那个 17x21 mm 的绿斑放进来。
+    #      "边长"和"对角线"两个假设都比，取近的那个。
     cases = [(0.024, 0.070, '对齐 0°'),
              (0.034, 0.093, '转过约 45°'),
-             (0.0172, 0.0213, '远处那个绿斑（必须挡住）')]
+             (0.0416, 0.0941, '棱角正对相机（实测）'),
+             (0.0172, 0.0213, '远处那个绿斑')]
     for a, b, name in cases:
         old = abs(min(a, b) - CUBE_EDGE)
         new = detection.short_edge_error(a, b, CUBE_EDGE)
@@ -853,10 +853,15 @@ def check_depth(geometry, depth3d, detection):
         fail('测试数据不成立：转 45° 的那组在旧判据下就该通过')
     else:
         ok('短边同时认"边长"和"对角线"两个假设，转 45° 不再被误杀')
-    if detection.short_edge_error(0.0172, 0.0213, CUBE_EDGE) > 0.006:
-        ok('17x21 mm 的绿斑在新门限（6 mm）下仍被挡住')
+    # 棱角正对相机时实测短边 41.6 mm：新判据 + 12 mm 门限必须放它过去，
+    # 而 6 mm 门限会误杀 —— 这条钉住的是"门限为什么是 12 而不是 6"。
+    corner = detection.short_edge_error(0.0416, 0.0941, CUBE_EDGE)
+    if 0.006 < corner <= 0.012:
+        note(f'棱角正对相机时短边差 {corner * 1e3:.1f} mm：'
+             f'6 mm 门限会误杀，12 mm 门限放行')
     else:
-        fail('新判据把 17x21 mm 的绿斑放进来了 —— 门限太松')
+        fail(f'棱角那组的短边差 {corner * 1e3:.1f} mm，与 6/12 mm 门限的'
+             f'关系变了，检查的前提不成立')
 
     # 11d. 用地面拟合反解相机倾角：真实 20°，URDF 里写的 16° -> 应补 +4°
     ground_opt = (ray[labels.ravel() == 2]
