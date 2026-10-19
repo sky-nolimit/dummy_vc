@@ -115,10 +115,23 @@ def points_from_labels(labels, depth, camera, T_base_optical, scale,
     z = sample_depth(depth, us, vs, lab.shape) * float(scale)
     ok = np.isfinite(z) & (z >= float(min_range)) & (z <= float(max_range))
     if not np.any(ok):
+        # "没有一个有效深度"有两种完全不同的原因：这片像素根本没有深度
+        # （双目没匹配上，值就是 0），或者有深度但全部落在量程外（离得太近）。
+        # 分开数出来，才知道该去调相机还是去调量程。
+        finite = np.isfinite(z) & (z > 0.0)
+        zero = int(us.size - np.count_nonzero(finite))
+        low = int(np.count_nonzero(finite & (z < float(min_range))))
+        high = int(np.count_nonzero(finite & (z > float(max_range))))
+        detail = ('没读到深度的 {} 个、近于 {:.0f} mm 的 {} 个、远于 {:.0f} mm 的 {} 个'
+                  .format(zero, float(min_range) * 1e3, low,
+                          float(max_range) * 1e3, high))
+        if np.any(finite):
+            detail += '；非零深度 {:.1f}~{:.1f} mm（中位数 {:.1f}）'.format(
+                float(np.min(z[finite])) * 1e3, float(np.max(z[finite])) * 1e3,
+                float(np.median(z[finite])) * 1e3)
         raise GeometryError(
-            '掩膜里 {} 个像素没有一个有有效深度（{:.0f}~{:.0f} mm）。'
-            '检查深度话题有没有数据、depth_scale 对不对（16UC1 是毫米）'.format(
-                us.size, min_range * 1e3, max_range * 1e3))
+            '掩膜里 {} 个像素没有一个落在 {:.0f}~{:.0f} mm 里：{}'.format(
+                us.size, float(min_range) * 1e3, float(max_range) * 1e3, detail))
     us, vs, z = us[ok], vs[ok], z[ok]
 
     x, y = undistort_pixels(camera, us, vs)
