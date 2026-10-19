@@ -826,6 +826,43 @@ def check_depth(geometry, depth3d):
     else:
         fail(f'弯掉的点云残差没变大（{rms_bowed * 1e3:.3f} mm），这个检查是摆设')
 
+    # 11g. 画面里大半不是地面时，RANSAC 必须还能找到地面。
+    #      2026-10-19 的现场就是这样：整幅采样，机械臂、底座、方块、线缆都在画面
+    #      里，地面只占三成。那时用整堆点做最小二乘，报出 0.206 m / RMS 11.2 mm，
+    #      两个数都是错的，而且看起来很正常。
+    junk = np.random.default_rng(7)
+    grid = np.linspace(-0.25, 0.25, 20)
+    gu, gv = np.meshgrid(grid, grid)
+    floor_pts = np.stack([gu.ravel(), gv.ravel(), np.full(gu.size, 0.4)], axis=1)
+    clutter = np.column_stack([
+        junk.uniform(-0.25, 0.25, 400),
+        junk.uniform(-0.25, 0.25, 400),
+        junk.uniform(0.30, 0.60, 400)])
+    mixed = np.vstack([floor_pts, clutter])
+    junk.shuffle(mixed)
+    n_mixed, off_mixed = depth3d.plane_from_points(mixed)
+    kept, total_mixed, rms_mixed = depth3d.plane_quality(mixed, n_mixed, off_mixed)
+    print(f'    混了 {clutter.shape[0]} 个非地面点（占 '
+          f'{clutter.shape[0] / mixed.shape[0] * 100:.0f}%）：拟合出的地面过 '
+          f'z = {-off_mixed:+.4f} m，法向 z 分量 {n_mixed[2]:+.4f}，内点 '
+          f'{kept}/{total_mixed}，残差 RMS {rms_mixed * 1e3:.2f} mm')
+    if abs(-off_mixed - 0.4) < 2e-3 and n_mixed[2] < -0.99:
+        ok(f'非地面点占一半时仍然拟合到 z = 0.4 m（差 '
+           f'{abs(-off_mixed - 0.4) * 1e3:.2f} mm）')
+    else:
+        fail(f'混进一半非地面点后拟合出 z = {-off_mixed:.4f} m、法向 '
+             f'({n_mixed[0]:+.3f}, {n_mixed[1]:+.3f}, {n_mixed[2]:+.3f})，'
+             f'应该还是 z = 0.4 m、法向 (0, 0, -1)')
+    # 这里的 RMS 不可能像 11f 那样是 0：2 cm 的容差带里必然混进了几个非地面点，
+    # 它们贡献的残差就是那几毫米。能要求的是"带宽的零头"—— 说明内点确实都贴着
+    # 这个平面，而不是散在整条带子里。
+    if kept >= 380 and rms_mixed < 0.5 * 0.02:
+        ok(f'内点 {kept}/{total_mixed}、RMS {rms_mixed * 1e3:.2f} mm（不到容差'
+           f' 2 cm 的零头）—— 这两个数能当"这次标定可不可信"的判据')
+    else:
+        fail(f'内点 {kept}/{total_mixed}、RMS {rms_mixed * 1e3:.2f} mm：'
+             f'内点该接近 400、RMS 该在毫米级')
+
 
 def main():
     print(f'reading {os.path.relpath(PKG_ROOT, REPO)}')

@@ -38,9 +38,12 @@ DEFAULT_MAX_RANGE_M = 1.50
 # 的轴上，所以只在顶面上取 xy 才不带这个偏置。
 TOP_SLICE_FRACTION = 0.3
 
-# 平面拟合：先最小二乘，再按这个容差剔掉离群点重来。
+# 平面拟合：RANSAC 找内点，再用内点做最小二乘；容差就是这个"内点"的宽度。
+# 256 次采样对几万个点足够（大半画面不是地面时也能命中），固定种子保证可复现。
 PLANE_TOLERANCE_M = 0.02
 PLANE_ITERATIONS = 4
+RANSAC_TRIALS = 256
+RANSAC_SEED = 20261019
 
 
 def depth_scale_for(encoding):
@@ -226,32 +229,68 @@ def detections_from_labels_and_depth(labels, depth, camera, T_base_optical,
 # ----------------------------------------------------------------------
 
 def plane_from_points(points, tolerance_m=PLANE_TOLERANCE_M,
-                      iterations=PLANE_ITERATIONS):
-    """最小二乘拟合平面 -> (单位法向 n, 偏移 d)，满足 n·p = d。
+                      iterations=PLANE_ITERATIONS, trials=RANSAC_TRIALS):
+    """RANSAC 找最大的那个平面，再用它的内点做最小二乘 -> (法向 n, 偏移 d)。
 
     法向的符号统一成"指向相机"：输入的点在光学系里时，相机在原点，于是
     d 会是负数、|d| 就是相机到平面的距离（= 相机离地高度）。
+
+    为什么不是直接最小二乘：标定时是整幅采样，机械臂、底座、方块、线缆都在
+    画面里，地面往往只占三成。整堆点做 SVD 会被非地面点整体拉偏，给出一个
+    "看起来正常"的距离。2026-10-19 就是这么错的：内点 763/2500、RMS 11.2 mm、
+    相机到地面 0.206 m（卷尺量的是 0.16），而法向同时偏了 2.5°。
+    RANSAC 只用 3 个点定平面、数内点，能扛住大半画面是别的东西。
     """
     pts = np.asarray(points, float)
     if pts.ndim != 2 or pts.shape[1] != 3:
         raise GeometryError('点要是 (N, 3)，收到 {}'.format(pts.shape))
     if pts.shape[0] < 3:
         raise GeometryError('少于 3 个点拟合不出平面')
-    normal, offset = None, None
-    for _ in range(max(1, int(iterations))):
-        centre = pts.mean(axis=0)
-        _, _, vt = np.linalg.svd(pts - centre, full_matrices=False)
-        normal = vt[-1]
-        norm = float(np.linalg.norm(normal))
-        if norm < 1e-9:
-            raise GeometryError('点退化，拟合不出平面')
-        normal = normal / norm
-        offset = float(normal @ centre)
-        dist = np.abs(pts @ normal - offset)
-        keep = dist < float(tolerance_m)
-        if keep.all() or np.count_nonzero(keep) < 3:
-            break
-        pts = pts[keep]
+    tol = float(tolerance_m)
+
+    # 固定种子：同一个点云每次跑出同一个结果，日志才可比、自测才能判红。
+    rng = np.random.default_rng(RANSAC_SEED)
+    picks = rng.integers(0, pts.shape[0], size=(max(1, int(trials)), 3))
+    best_normal, best_offset, best_count = None, None, -1
+    for triple in picks:
+        p0 = pts[triple[0]]
+        n = np.cross(pts[triple[1]] - p0, pts[triple[2]] - p0)
+        norm = float(np.linalg.norm(n))
+        if norm < 1e-12:
+            continue                    # 三点共线，定不出平面
+        n = n / norm
+        d = float(n @ p0)
+        count = int(np.count_nonzero(np.abs(pts @ n - d) < tol))
+        if count > best_count:
+            best_normal, best_offset, best_count = n, d, count
+    if best_normal is None:
+        raise GeometryError('点退化，拟合不出平面')
+
+    # 精修：只用内点重算。容差一步步收紧（2 cm -> 1 cm -> 5 mm）：RANSAC 选出的
+    # 平面常常会为了"多框进几个噪声点"而微微倾斜，收紧之后这些点自然掉出去，
+    # 而真正的平面用任意一个子集拟合都得到同一个平面。
+    # 注意**不能**拿"全容差下的内点数"当接受条件：地面上杂物的点恰好落在那个
+    # 倾斜平面附近时，倾斜版的"内点数"反而更多，会把已经修正的平面又判出局。
+    normal, offset = best_normal, best_offset
+    for divisor in (1.0, 2.0, 4.0):
+        rtol = tol / divisor
+        for _ in range(max(1, int(iterations))):
+            keep = np.abs(pts @ normal - offset) < rtol
+            if np.count_nonzero(keep) < 3:
+                break
+            sub = pts[keep]
+            centre = sub.mean(axis=0)
+            _, _, vt = np.linalg.svd(sub - centre, full_matrices=False)
+            n = vt[-1]
+            norm = float(np.linalg.norm(n))
+            if norm < 1e-9:
+                break
+            n = n / norm
+            d = float(n @ centre)
+            moved = abs(d - offset) > 1e-9 or float(n @ normal) < 1.0 - 1e-12
+            normal, offset = n, d
+            if not moved:
+                break
     if offset > 0.0:
         # 让法向朝相机：相机在原点，n·0 - d = -d 应为正 -> d < 0
         normal, offset = -normal, -offset

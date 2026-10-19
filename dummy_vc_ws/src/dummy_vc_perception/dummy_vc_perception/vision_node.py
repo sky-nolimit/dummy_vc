@@ -470,7 +470,7 @@ class VisionNode(Node):
                                       / normal_base[2])
         else:
             self.last_plane_z = None
-        self.get_logger().info(
+        text = (
             '地面拟合：法向在 {} 里 = ({:+.3f}, {:+.3f}, {:+.3f})，'
             '相对竖直偏 {:.2f}°；相机到地面的距离 {:.3f} m（垂直距离，'
             '不是沿光轴的斜距；xacro 里相机 z = {:.3f} m）；'
@@ -483,6 +483,16 @@ class VisionNode(Node):
                 ('{:.4f}'.format(self.last_plane_z)
                  if self.last_plane_z is not None else '测不出'),
                 self.table_z, report['pitch_correction_deg']))
+        # 这个数本身要能判"能不能用"：内点太少或残差到厘米级，就说明这堆点里
+        # 混了机械臂/底座/方块，拟合出来的距离和角度都是被拉偏的，不能照着改。
+        share = inliers / float(total) if total else 0.0
+        if share >= 0.4 and rms < 0.008:
+            self.get_logger().info(text)
+        else:
+            self.get_logger().warn(
+                text + '。但内点只占 {:.0f}%、残差 RMS {:.1f} mm —— 这堆点不共面，'
+                '上面的距离和角度都别照着改，先把画面里的其他东西挪开'.format(
+                    share * 100.0, rms * 1e3))
 
     # ------------------------------------------------------------------
     # 查 TF：相机光学系在 base_link 里的位姿
