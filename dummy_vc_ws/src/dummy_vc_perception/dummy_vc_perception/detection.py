@@ -13,6 +13,7 @@
 原点在左上角；输出的位置一律在 base_link 下、单位米。
 """
 
+import math
 from dataclasses import dataclass
 from typing import List, Sequence, Tuple
 
@@ -212,6 +213,20 @@ def shadow_bias(centre_xy, camera_xyz, plane_z, height_m):
     return d[:2] / horiz * shift
 
 
+def short_edge_error(extent_a_m, extent_b_m, edge_m):
+    """短边离"边长"或"对角线"最近差多少（米）。
+
+    为什么不直接拿短边减边长：方块绕竖直轴转 θ 之后，它在地面上那块影子的
+    最小外接矩形，短边是**底面外接矩形的短边**，θ=0 时等于边长 e、θ=45° 时
+    等于对角线 e·√2，中间连续过渡。现场随手一放就是 20°~45°，只拿 e 当真值，
+    24 mm 的方块会被报成 34 mm、判成"不是方块"直接丢掉（实测那次短边
+    34.1 mm、误差 10.1 mm，刚好卡在 10.0 的门限外）。
+    """
+    short = min(float(extent_a_m), float(extent_b_m))
+    edge = float(edge_m)
+    return float(min(abs(short - edge), abs(edge * math.sqrt(2.0) - short)))
+
+
 def detection_from_blob(blob, camera, T_base_optical, plane_z, object_edge_m,
                         max_points=2000, object_height_m=None) -> SceneDetection:
     """blob -> 抓取目标：在平面上定质心、拟合朝向、算抓取点与顶抓姿态。
@@ -248,8 +263,9 @@ def detection_from_blob(blob, camera, T_base_optical, plane_z, object_edge_m,
             '抓取点在相机背后（光学系 z = {:.4f}）'.format(distance))
 
     # 只看短边，理由同 depth.detection_from_points：斜向下看立在平面上的方块，
-    # 轮廓沿视线方向必然被拉长，长边不可信，短边才是真实边长。
-    edge_error = abs(min(fit.extent_a_m, fit.extent_b_m) - object_edge_m)
+    # 轮廓沿视线方向必然被拉长，长边不可信，短边才挨着真实尺寸 —— 而且它随
+    # 方块转过的角度在 e 与 e√2 之间变，两种都算"对"（见 short_edge_error）。
+    edge_error = short_edge_error(fit.extent_a_m, fit.extent_b_m, object_edge_m)
     return SceneDetection(position=np.asarray(position, float),
                           yaw_rad=fit.yaw_rad,
                           quaternion=quaternion,
@@ -280,11 +296,14 @@ def detections_from_blobs(blobs, camera, T_base_optical, plane_z,
             continue
         if det.edge_error_m > float(max_edge_error_m):
             if rejects is not None:
-                rejects.append((blob, '拟合出的边长 {:.1f}x{:.1f} mm，与目标 '
-                                      '{:.1f} mm 差 {:.1f} mm（上限 {:.1f}）'.format(
-                    det.extent_m[0] * 1e3, det.extent_m[1] * 1e3,
-                    object_edge_m * 1e3, det.edge_error_m * 1e3,
-                    max_edge_error_m * 1e3)))
+                short = min(det.extent_m[0], det.extent_m[1])
+                rejects.append((blob, '拟合出的边长 {:.1f}x{:.1f} mm：短边 '
+                                      '{:.1f} mm 离边长 {:.1f} mm / 对角线 '
+                                      '{:.1f} mm 都差 {:.1f} mm 以上（上限 '
+                                      '{:.1f}）'.format(
+                    det.extent_m[0] * 1e3, det.extent_m[1] * 1e3, short * 1e3,
+                    object_edge_m * 1e3, object_edge_m * math.sqrt(2.0) * 1e3,
+                    det.edge_error_m * 1e3, max_edge_error_m * 1e3)))
             continue
         out.append(det)
     return out

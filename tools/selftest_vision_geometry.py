@@ -832,6 +832,32 @@ def check_depth(geometry, depth3d, detection):
     else:
         fail(f'单目修正后仍有 {err_mono * 1e3:.2f} mm 误差')
 
+    # 11k. 方块转过 45° 时，影子的短边是**对角线** e√2，不是边长 e。
+    #      只拿 e 当真值，24 mm 的方块会被报成 34 mm 并判掉 —— 现场就是这么丢的
+    #      （短边 34.1 mm、误差 10.1 mm，刚好卡在 10.0 的门限外）。所以短边要跟
+    #      "边长"和"对角线"两个假设都比，取近的那个；门限也相应收到 6 mm，
+    #      免得把远处那个 17x21 mm 的绿斑放进来。
+    cases = [(0.024, 0.070, '对齐 0°'),
+             (0.034, 0.093, '转过约 45°'),
+             (0.0172, 0.0213, '远处那个绿斑（必须挡住）')]
+    for a, b, name in cases:
+        old = abs(min(a, b) - CUBE_EDGE)
+        new = detection.short_edge_error(a, b, CUBE_EDGE)
+        print(f'    {name}: 短边 {min(a, b) * 1e3:.1f} mm，旧判据差 '
+              f'{old * 1e3:.1f} mm，新判据差 {new * 1e3:.1f} mm')
+    if detection.short_edge_error(0.024, 0.070, CUBE_EDGE) > 1e-6:
+        fail('对齐的方块短边误差应为 0')
+    elif detection.short_edge_error(0.034, 0.093, CUBE_EDGE) > 1e-3:
+        fail('转过 45° 的短边没按对角线（e√2）算')
+    elif abs(min(0.034, 0.093) - CUBE_EDGE) <= 0.006:
+        fail('测试数据不成立：转 45° 的那组在旧判据下就该通过')
+    else:
+        ok('短边同时认"边长"和"对角线"两个假设，转 45° 不再被误杀')
+    if detection.short_edge_error(0.0172, 0.0213, CUBE_EDGE) > 0.006:
+        ok('17x21 mm 的绿斑在新门限（6 mm）下仍被挡住')
+    else:
+        fail('新判据把 17x21 mm 的绿斑放进来了 —— 门限太松')
+
     # 11d. 用地面拟合反解相机倾角：真实 20°，URDF 里写的 16° -> 应补 +4°
     ground_opt = (ray[labels.ravel() == 2]
                   * t[labels.ravel() == 2][:, None])

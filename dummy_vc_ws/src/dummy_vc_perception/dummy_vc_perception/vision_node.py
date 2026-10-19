@@ -72,7 +72,10 @@ class VisionNode(Node):
         self.declare_parameter('hsv_ranges', [40, 80, 60, 80, 255, 255])
         self.declare_parameter('min_area_px', detection.MIN_BLOB_AREA_PX)
         self.declare_parameter('max_area_fraction', 0.2)
-        self.declare_parameter('max_edge_error', 0.010)
+        # 短边是拿"边长"和"对角线"两个假设比过的（见 detection.short_edge_error），
+        # 所以门限比早先的 10 mm 收紧到 6 mm：宽出来的那部分是给转向的，
+        # 不是给"不像方块的东西"的。
+        self.declare_parameter('max_edge_error', 0.006)
         self.declare_parameter('max_distance', 1.5)
         self.declare_parameter('max_rate_hz', 10.0)
         self.declare_parameter('publish_markers', True)

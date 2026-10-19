@@ -17,7 +17,8 @@ import math
 
 import numpy as np
 
-from .detection import (MIN_PROJECTED_POINTS, SceneDetection, fit_edge_yaw)
+from .detection import (MIN_PROJECTED_POINTS, SceneDetection, fit_edge_yaw,
+                        short_edge_error)
 from .geometry import GeometryError, invert_transform, top_down_grasp_quaternion
 
 # 深度图编码 -> 一个像素值是多少米。16UC1 是毫米（Orbbec / RealSense 的常见
@@ -200,9 +201,9 @@ def detection_from_points(points, object_edge_m, T_base_optical,
     # 判"是不是方块"只看**短边**。相机是斜向下看的，立方体的顶面切片里必然还
     # 带进一条侧面，那个方向会被拉长：实测同一个方块报出过 34.9x25.5、
     # 46.6x25.8 mm。短边才是真实边长（24 mm 附近），长边是斜视的代价。
+    # 短边随方块转过的角度在 e 与 e√2 之间变，两种都算对（同 detection）。
     # 只看短边的代价：又长又窄的东西能混进来 —— 但抓取场景里没有。
-    short_edge = min(fit.extent_a_m, fit.extent_b_m)
-    edge_error = abs(short_edge - edge)
+    edge_error = short_edge_error(fit.extent_a_m, fit.extent_b_m, edge)
     per_pixel = camera.metres_per_pixel(distance) if camera is not None else (0.0, 0.0)
     return SceneDetection(position=position,
                           yaw_rad=fit.yaw_rad,
