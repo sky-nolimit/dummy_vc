@@ -122,6 +122,8 @@ class VisionNode(Node):
         self.depth_stale_warned = False
         self.depth_msg = None         # 最近一帧深度（与彩色对齐）
         self.depth_frame_count = 0
+        self.depth_size = None         # 深度图的 (宽, 高)
+        self.size_reported = False     # 深度/彩色尺寸只报一次
         self.plane_reports = 0
         self.last_plane_z = None
 
@@ -298,6 +300,7 @@ class VisionNode(Node):
                 'CameraInfo.d 有 {} 个数，只用了前 5 个 (k1,k2,p1,p2,k3)，'
                 '丢掉了 {} 个（k4,k5,k6）。如果那几项不是 0，畸变模型要换。'
                 .format(len(msg.d), self.camera.ignored_distortion))
+        self._check_depth_size()
 
     def _on_image(self, msg):
         if self.camera is None:
@@ -418,6 +421,27 @@ class VisionNode(Node):
                 float(np.min(z_base)), float(np.max(z_base)),
                 plane, self.table_z))
 
+    def _check_depth_size(self):
+        """深度图必须和彩色图同尺寸，也就是同一个像素坐标系。
+
+        为什么要单独查：没开 depth_registration 时两者尺寸不同（Gemini 335L 的
+        深度原生 848x480、彩色 1280x720），按彩色像素去查深度会取到完全无关的
+        位置。这个错不会报错，只会让"几千像素的斑"拟合出几毫米的边长。
+        """
+        cam, size = self.camera, self.depth_size
+        if cam is None or size is None or self.size_reported:
+            return
+        self.size_reported = True
+        if (cam.width, cam.height) != size:
+            self.get_logger().error(
+                '深度图 {}x{} 与彩色图 {}x{} 尺寸不一致 —— 深度没有对齐到彩色，'
+                '按彩色像素查深度是错的。请用 depth_registration:=true 重启相机'
+                '（把深度对齐到彩色），或者改订阅已经对齐过的深度话题'
+                .format(size[0], size[1], cam.width, cam.height))
+        else:
+            self.get_logger().info(
+                '深度图 {}x{}，与彩色一致'.format(size[0], size[1]))
+
     def _on_depth(self, msg):
         if self.depth_scale is None:
             try:
@@ -430,22 +454,8 @@ class VisionNode(Node):
             self.get_logger().info(
                 '深度编码 {}，按 {} 米/像素值换算'.format(
                     msg.encoding, self.depth_scale))
-            # 分辨率必须和彩色图一致：深度没做对齐（depth_registration 关了）时
-            # 两张图尺寸不同，按彩色像素去查深度会取到完全无关的位置，表现为
-            # "掩膜里有几千像素，拟合出来的边长只有几毫米"。
-            h, w = int(msg.height), int(msg.width)
-            cam = self.camera
-            if cam is not None and (cam.width, cam.height) != (w, h):
-                self.get_logger().error(
-                    '深度图 {}x{} 与彩色图 {}x{} 尺寸不一致 —— 深度没有对齐到'
-                    '彩色，按彩色像素查深度是错的。请用 depth_registration:=true '
-                    '重启相机，或者改用 /camera/depth/image_rect_raw 之类对齐过的'
-                    '话题'.format(w, h, cam.width, cam.height))
-            else:
-                self.get_logger().info(
-                    '深度图 {}x{}，与彩色一致{}'.format(
-                        w, h, '' if cam is not None else '（还没收到 CameraInfo，'
-                        '暂时比不了）'))
+        self.depth_size = (int(msg.width), int(msg.height))
+        self._check_depth_size()
         self.depth_msg = msg
         self.depth_frame_count += 1
         if self.calibrate_plane and self.depth_frame_count % 10 == 0:
