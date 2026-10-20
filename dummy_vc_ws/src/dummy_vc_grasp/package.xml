@@ -23,6 +23,12 @@
   <depend>moveit_msgs</depend>
   <depend>dummy_vc_perception</depend>
 
+  <!-- launch/pick_place_demo.launch.py：把视觉那一半（vision_demo.launch.py）
+       和 pick_place_node 拼起来。 -->
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>dummy_vc_perception</exec_depend>
+
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>

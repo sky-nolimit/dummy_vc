@@ -13,9 +13,8 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        # launch 目录还没有（目前用 ros2 run + --params-file，见 config/vision.yaml
-        # 顶部的用法），所以只装 config：
-        # (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
+        # 一条命令起全套（URDF/TF + 相机 + 视觉节点）：vision_demo.launch.py
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
         (os.path.join('share', package_name, 'config'), glob('config/*')),
         # (os.path.join('share', package_name, 'rviz'), glob('rviz/*')),
     ],

@@ -158,6 +158,26 @@ ros2 topic pub --once /joint_trajectory_controller/joint_trajectory \
   "{joint_names: [dummy2_joint1], points: [{positions: [0.3], time_from_start: {sec: 3}}]}"
 ```
 
+### 看图（视觉）
+
+```bash
+# 一条命令起"看"这一半：URDF/TF + Orbbec 相机 + vision_node
+ros2 launch dummy_vc_perception vision_demo.launch.py
+
+# 看检测结果
+ros2 topic echo /detected_objects
+```
+
+### 看 + 抓
+
+```bash
+# 终端 1：MoveIt
+ros2 launch dummy_vc_moveit_config moveit_hardware.launch.py
+
+# 终端 2：视觉 + 抓取规划/状态机（默认只规划不执行）
+ros2 launch dummy_vc_grasp pick_place_demo.launch.py auto_start:=true
+```
+
 ---
 
 ## 当前进度

@@ -44,17 +44,36 @@ IDLE ─START→ OBSERVE ─看到目标→ MOVE_PRE_GRASP → APPROACH → CLOS
 
 需要三样东西同时活着：`move_group`、`vision_node`、本节点。
 
+**两条命令**（一条起 MoveIt，一条起"看 + 抓"）：
+
 ```bash
 # 终端 1：MoveIt（接真机就是 moveit_hardware.launch.py）
 ros2 launch dummy_vc_moveit_config moveit_hardware.launch.py
 
-# 终端 2：视觉
+# 终端 2：视觉（URDF/TF + 相机 + vision_node）+ 本节点
+ros2 launch dummy_vc_grasp pick_place_demo.launch.py auto_start:=true
+```
+
+`pick_place_demo.launch.py` 只负责"看 + 抓"这一半，**不含机械臂驱动和 MoveIt**
+（它们各开一个终端，日志和退出各归各的）。它的开关：
+
+| 参数 | 默认 | 用途 |
+|---|---|---|
+| `execute` | `false` | true 才真的动；默认只规划（夹爪 A2 还挡着） |
+| `auto_start` | `false` | true 则一启动就开始等目标 |
+| `vision` | `true` | 视觉那半已经在跑就传 `false` |
+| `camera` | `true` | 传给视觉 launch：是否顺带起相机 |
+| `place_x` / `place_y` | `0.0` / `0.10` | 放置点（base_link 下，米） |
+| `params_file` | 包内 `config/pick_place.yaml` | 换参数就复制一份改 |
+
+想分开排查时的手工等价命令：
+
+```bash
 ros2 run dummy_vc_perception vision_node --ros-args \
   --params-file $(ros2 pkg prefix dummy_vc_perception)/share/dummy_vc_perception/config/vision.yaml \
   -p image_topic:=/camera/color/image_raw \
   -p camera_info_topic:=/camera/color/camera_info
 
-# 终端 3：本节点（默认只规划不执行）
 ros2 run dummy_vc_grasp pick_place_node --ros-args \
   --params-file $(ros2 pkg prefix dummy_vc_grasp)/share/dummy_vc_grasp/config/pick_place.yaml \
   -p auto_start:=true

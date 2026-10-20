@@ -24,6 +24,29 @@
 
 ## 跑起来（在 VM 上）
 
+**一条命令**（URDF/TF + 相机 + 视觉节点都在里面）：
+
+```bash
+ros2 launch dummy_vc_perception vision_demo.launch.py
+```
+
+常用开关（都只是覆盖 launch 里的默认值）：
+
+| 参数 | 默认 | 用途 |
+|---|---|---|
+| `camera` | `true` | 相机已经在别处跑着就传 `false`，否则两个节点抢设备 |
+| `depth_registration` | `true` | 深度对齐到彩色；不对齐时两张图分辨率不同，像素会错位 |
+| `use_depth` | `false` | 关掉深度路（本机 0.34 m 上只有 5% 回波，开不起来） |
+| `image_topic` / `camera_info_topic` | `/camera/color/...` | 换数据源时只改这两个 |
+| `params_file` | 包内 `config/vision.yaml` | 想试别的参数就复制一份改 |
+
+```bash
+ros2 launch dummy_vc_perception vision_demo.launch.py camera:=false      # 相机另起
+ros2 launch dummy_vc_perception vision_demo.launch.py use_depth:=true    # 再试一次深度
+```
+
+出问题想逐个排查时，手工等价命令如下（launch 会把几路日志混在一起）：
+
 ```bash
 # 终端 1：驱动 + USB 相机（driver 会自己 configure/activate）
 ros2 launch dummy_controller dummy_fingerprint.launch.py
@@ -98,7 +121,9 @@ ros2 run robot_state_publisher robot_state_publisher --ros-args \
 # 终端 2：相机（Orbbec）
 ros2 launch orbbec_camera gemini_330_series.launch.py
 
-# 终端 3：核对挂载 —— translation 应该是 [-0.230, 0.300, 0.150]
+# 终端 3：核对挂载 —— translation 应该是 [-0.302, 0.317, 0.097]
+# （四点法解出来的位姿，见 dummy2_urdf.xacro 的 camera_offset_*；
+#   手量那组数已经作废，别再拿卷尺的数去对）
 ros2 run tf2_ros tf2_echo base_link camera_color_optical_frame
 
 # 终端 4：视觉节点（Orbbec 的话题名）

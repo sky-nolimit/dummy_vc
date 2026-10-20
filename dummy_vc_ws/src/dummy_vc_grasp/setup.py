@@ -13,7 +13,8 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        # 目前用 `ros2 run` + `--params-file`，没有 launch 文件，所以只装 config。
+        # 一条命令起"看 + 抓"：pick_place_demo.launch.py
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
         (os.path.join('share', package_name, 'config'), glob('config/*')),
     ],
     install_requires=['setuptools'],

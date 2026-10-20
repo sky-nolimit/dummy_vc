@@ -28,6 +28,14 @@
   <depend>tf2_ros</depend>
   <depend>tf2_ros_py</depend>
 
+  <!-- launch/vision_demo.launch.py：起 robot_state_publisher（URDF -> TF）、
+       可选地起 Orbbec 相机，再起 vision_node。 -->
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>dummy2_urdf_description</exec_depend>
+  <exec_depend>orbbec_camera</exec_depend>
+
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>
