@@ -1,0 +1,39 @@
+# pick_place_node（阶段 5）的默认参数
+#
+# 用法（VM 上）：
+#   ros2 run dummy_vc_grasp pick_place_node --ros-args \
+#     --params-file $(ros2 pkg prefix dummy_vc_grasp)/share/dummy_vc_grasp/config/pick_place.yaml \
+#     -p auto_start:=true
+#
+# 前置：move_group 已经起来（moveit_hardware.launch.py 或 demo.launch.py 都行），
+# 以及 vision_node 正在发 /detected_objects。
+pick_place_node:
+  ros__parameters:
+    # ---- 接口 ----
+    detections_topic: "/detected_objects"
+    move_action: "/move_action"          # MoveIt 的 MoveGroup 动作
+    planning_group: "dummy_arm"
+    ee_link: "gripper_tcp"               # 规划链的末端（xacro 里那个占位值）
+    base_frame: "base_link"
+
+    # ---- 安全 ----
+    # 默认只规划不执行：第一次上机先看它打算往哪儿走，别让没验过的链路驱动机械臂。
+    execute: false
+    max_velocity_scaling: 0.15
+    max_acceleration_scaling: 0.15
+    planning_time_s: 5.0
+
+    # ---- 抓取几何 ----
+    approach_m: 0.08                     # 起手位在抓取点上方多少
+    lift_m: 0.10                         # 合爪之后抬多少
+    place_x: 0.0                         # 放置点（首期由参数给定，不由视觉算）
+    place_y: 0.10
+    table_z: -0.0405                     # 工作面；和 perception 的实测值同源
+    max_reach_m: 0.45
+    min_reach_m: 0.15
+
+    # ---- 节奏 ----
+    observe_timeout_s: 15.0              # 等 /detected_objects 等多久算超时
+    action_timeout_s: 40.0               # 单个 MoveIt 目标最多等多久
+    max_retries: 2                       # 可重试的步骤失败后最多再来几次
+    auto_start: false                    # true = 节点一起来就自动开始一次抓取

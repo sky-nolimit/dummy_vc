@@ -43,7 +43,8 @@ Dummy_vc/
 │       ├── dummy2_urdf/           机械臂模型（URDF/Xacro + STL）—— 唯一模型来源
 │       ├── dummy_controller/      ROS 2 控制器（lifecycle 节点 + fibre 驱动）—— 唯一硬件通道
 │       ├── dummy_vc_calibration/  阶段 0 硬件标定节点（预览-确认-执行）
-│       ├── dummy_vc_perception/   视觉感知（几何/检测层已离线自测，vision_node 待 VM 验证）
+│       ├── dummy_vc_perception/   视觉感知（几何/检测层已离线自测，节点待 VM 验证）
+│       ├── dummy_vc_grasp/        抓取规划 + 任务状态机（纯层已离线自测，节点待 VM 验证）
 │       └── dummy_vc_moveit_config/ MoveIt 2 配置（SRDF、限位、规划器、RViz）
 │
 ├── tools/                 不依赖 ROS 的独立工具（索引见 tools/README.md）
@@ -117,7 +118,7 @@ source install/setup.bash
 
 ### 离线检查（不需要硬件，也不需要 ROS）
 
-改完代码先跑这个，**15 项一次过**：
+改完代码先跑这个，**16 项一次过**：
 
 ```bash
 python tools/run_checks.py
@@ -171,7 +172,7 @@ ros2 topic pub --once /joint_trajectory_controller/joint_trajectory \
 | **2** | **MoveIt 配置** | ✅ 真机 Plan & Execute 已连续可用（含安全退出）；配置见 `docs/08` |
 | 3 | 驱动补强（限速、急停、GripperCommand 动作） | 部分完成（FollowJointTrajectory 动作已完成） |
 | 4 | 视觉感知 | ✅ 单目检测真机跑通：四个已知位置的方块，报出坐标与真值差 ≤1 cm（相机位姿是解出来的，见 `ad2f8ed`）。深度路径在这套安装下不可用（0.34 m 处无回波） |
-| 5 | 抓取规划 + 任务状态机 | 待开始 |
+| 5 | 抓取规划 + 任务状态机 | 🔸 代码完成并离线自测（`dummy_vc_grasp`：规划 + 状态机 + MoveIt 动作客户端）；默认只规划不执行，夹爪那一步在 A2 未解决前会主动停在 CLOSE_GRIPPER |
 | 6 | 深度相机接入 + 手眼标定 | 部分：相机已接入并标定到位姿（四点法）；手眼标定本身未做（要机械臂能动） |
 
 ### 已知阻塞：夹爪

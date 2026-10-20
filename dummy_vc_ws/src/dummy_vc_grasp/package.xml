@@ -1,0 +1,34 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>dummy_vc_grasp</name>
+  <version>0.1.0</version>
+  <description>
+    抓取规划与任务状态机：把 /detected_objects 的目标变成抓取路点，
+    再用 MoveIt 的 MoveGroup 动作把它走完。
+    分两层：planner.py / task.py 是纯逻辑（不 import ROS），能在没有 ROS 的机器上
+    离线自测；pick_place_node.py 只负责 ROS 接口与动作调用。
+    夹爪那一步在"角度↔开口"没实测之前会被 gripper.py 挡住，不会发 hand.* 命令。
+  </description>
+  <!-- 邮箱要有 @ 和带点的域名：dummy-vc@localhost 会让整个 manifest 解析失败，
+       colcon 只打一行 WARNING 就继续，结果是包编好了但 ros2 pkg 找不到它。 -->
+  <maintainer email="dummy-vc@example.com">Dummy VC</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>python3-numpy</depend>
+  <depend>geometry_msgs</depend>
+  <depend>shape_msgs</depend>
+  <depend>vision_msgs</depend>
+  <depend>moveit_msgs</depend>
+  <depend>dummy_vc_perception</depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

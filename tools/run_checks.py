@@ -45,6 +45,16 @@ this project's worst bugs:
                           pinned down here rather than on the arm. It also
                           enforces that the geometry layer imports no ROS and
                           no OpenCV, which is why it can run at all.
+    selftest_grasp_task
+                           the stage-5 grasp planner and task state machine: every
+                           state has an action and a way forward, the retryable
+                           steps retry to their limit, the two gripper steps
+                           never retry, and an uncalibrated gripper stops the
+                           run right before CLOSE_GRIPPER instead of sending a
+                           hand command. Same reason as above: on the arm each
+                           failure costs a re-boot and a re-placed block, while
+                           the transitions are pure functions that can all be
+                           walked here.
 
 Usage:
     python tools/run_checks.py            # everything
@@ -125,6 +135,9 @@ CHECKS = [
     ('selftest_vision_geometry.py',
      'the vision geometry: axis conventions, distortion, table projection', True,
      []),
+    ('selftest_grasp_task.py',
+     'the grasp planner and task machine: retries, gripper gate, no dead ends',
+     True, []),
 ]
 
 

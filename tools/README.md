@@ -3,7 +3,7 @@
 把"靠眼睛看、靠记忆猜"的事情变成可复现的检查。除标注"需要 ROS"或"需要硬件"
 的以外，都不依赖 ROS 环境，Windows 和 Ubuntu 上都可直接用 Python 执行。
 
-**目前 50 个工具 + 本文件**（数的是 `tools/` 下的文件，去掉本文件和
+**目前 51 个工具 + 本文件**（数的是 `tools/` 下的文件，去掉本文件和
 `ssh_config_for_github` 那个配置模板）。数量不少，所以下面按用途分组。
 
 **曾经有 52 个。** 2026-10-14 清理掉了 9 个：8 个是排查特定假设时写的一次性
@@ -22,7 +22,7 @@
 python tools/run_checks.py
 ```
 
-**15 项一次过**，不需要硬件也不需要 source ROS。它串起下面这些（表的顺序就是
+**16 项一次过**，不需要硬件也不需要 source ROS。它串起下面这些（表的顺序就是
 `run_checks.py` 里 `CHECKS` 的顺序）：
 
 | 工具 | 作用 |
@@ -43,6 +43,7 @@ python tools/run_checks.py
 | `selftest_check_rviz_plugin.py` | 用**假 ROS 前缀**把 `check_rviz_plugin.py` 的四种情形在本地跑一遍（索引标记齐全 / 缺标记 / 标记指向不存在的文件 / XML 根本没装）。它同样只在虚拟机上跑，**而它出错时报的是"一个 panel 都没装"，跟它要诊断的故障一模一样** |
 | `selftest_follow_joint_trajectory.py` | 离线核对 MoveIt 执行接口：action 名与 `moveit_controllers.yaml` **逐字相等**（只有两段 `/<controller_name>/<action_ns>`，重复一段单独判红）、`ActionServer` 真在 `on_activate` 里建起来、execute 回调是普通函数而不是协程、`_execute_trajectory` 每条路径都返回错误码、`_traj_executing` 一定在 `try/finally` 里清掉、执行器线程数够在运动时继续发 `/joint_states` |
 | `selftest_vision_geometry.py` | 离线核对视觉几何层（`dummy_vc_perception/geometry.py` 与 `gripper.py`）：顶抓时 TCP 三轴的朝向、针孔+畸变的投影往返、桌面反投影、单目兜底在有高度时的固有偏差、夹爪映射在未实测时必须拒绝生成指令。**它同时强制这一层不许 import ROS / OpenCV**（AST 检查），这是它能离线跑的前提 |
+| `selftest_grasp_task.py` | 离线核对阶段 5（`dummy_vc_grasp/planner.py` 与 `task.py`）：规划能给出四个路点、太远/太近/太高/低于工作面各有拒绝理由、多个候选取第一个能抓的；状态机每条迁移边都走一遍（正常路径、重试到上限才认输、夹爪那两步不重试、ABORT 能打断任何状态、没有死胡同），并断言**夹爪映射未实测时走到 CLOSE_GRIPPER 必须停下**。同时用 AST 核对 `pick_place_node.py` 引用的接口都真的存在 |
 
 **`fix_line_endings.ps1` 不在上表里** —— 它不检查、只**修复**，也不由 `run_checks.py`
 调用，Windows 上改过文件后按 `AGENTS.md` 手动跑：

@@ -1,0 +1,412 @@
+#!/usr/bin/env python3
+"""离线自查阶段 5：抓取规划 + 任务状态机。
+
+它要防的故障是这一句：
+
+    真机上某一步失败了，但代码不知道该怎么办 —— 卡住、静默重来、或者把
+    "夹爪没标定"当成普通失败继续往下走
+
+真机上试一次失败要重开相机、重摆方块，一天试不了几次；而"哪一步失败之后该去
+哪"是纯逻辑，可以在这里把每条边都走一遍。所以这个自测的重点不是几何（那在
+`tools/selftest_vision_geometry.py` 里），而是：
+
+  * 每个状态都有动作、除终态外都有前进方向（没有死胡同）
+  * 可重试的步骤重试到上限才认输；夹爪那两步**不重试**
+  * 夹爪映射没实测时，前面几步照走，到 CLOSE_GRIPPER 必须停
+  * ABORT 从任何状态都能进 FAULT，START 能把 FAULT/DONE 拉回流程
+
+    python tools/selftest_grasp_task.py
+"""
+import ast
+import os
+import sys
+
+import numpy as np
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(HERE)
+PERCEPTION = os.path.join(REPO, 'dummy_vc_ws', 'src', 'dummy_vc_perception')
+GRASP = os.path.join(REPO, 'dummy_vc_ws', 'src', 'dummy_vc_grasp')
+
+#: 纯层允许 import 的东西。多一个 ROS/cv2 进来，离线自测就没了。
+PURE_IMPORTS = {'math', 'enum', 'dataclasses', 'typing', 'numpy',
+                'dummy_vc_perception', 'dummy_vc_grasp'}
+
+FAILURES = []
+NOTES = []
+
+
+def fail(msg):
+    FAILURES.append(msg)
+    print(f'  [FAIL] {msg}')
+
+
+def ok(msg):
+    print(f'  [ok  ] {msg}')
+
+
+def note(msg):
+    NOTES.append(msg)
+    print(f'  [note] {msg}')
+
+
+def close(label, got, want, tol=1e-9):
+    got_arr = np.asarray(got, float)
+    want_arr = np.asarray(want, float)
+    if got_arr.shape != want_arr.shape:
+        fail(f'{label}: 形状 {got_arr.shape} != {want_arr.shape}')
+        return False
+    err = float(np.max(np.abs(got_arr - want_arr)))
+    if err <= tol:
+        ok(f'{label}（最大误差 {err:.3e} <= {tol:.1e}）')
+        return True
+    fail(f'{label}: 最大误差 {err:.3e} > {tol:.1e}；got={got_arr} want={want_arr}')
+    return False
+
+
+def expect_error(label, exc_types, func, *args, **kwargs):
+    try:
+        func(*args, **kwargs)
+    except exc_types as exc:
+        ok(f'{label}（{type(exc).__name__}）')
+        return True
+    except Exception as exc:            # noqa: BLE001 - 报出来比咽下去强
+        fail(f'{label}: 抛了意料外的 {type(exc).__name__}: {exc}')
+        return False
+    fail(f'{label}: 没有拒绝，返回了一个看起来正常的值')
+    return False
+
+
+def load_modules():
+    for path in (PERCEPTION, GRASP):
+        if path not in sys.path:
+            sys.path.insert(0, path)
+    try:
+        from dummy_vc_grasp import planner, task
+        from dummy_vc_perception import geometry, gripper
+    except ImportError as exc:
+        fail(f'import 失败：{exc}（这两层只依赖 numpy）')
+        return None, None, None, None
+    return geometry, gripper, planner, task
+
+
+def check_offline_imports():
+    print('\n0. 纯层不许 import ROS / OpenCV')
+    for name in ('planner.py', 'task.py'):
+        path = os.path.join(GRASP, 'dummy_vc_grasp', name)
+        try:
+            with open(path, encoding='utf-8') as fh:
+                tree = ast.parse(fh.read())
+        except OSError as exc:
+            fail(f'读不到 {name}：{exc}')
+            continue
+        bad = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                mods = [a.name.split('.')[0] for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                mods = [(node.module or '').split('.')[0]]
+            else:
+                continue
+            bad += [m for m in mods if m and m not in PURE_IMPORTS]
+        if bad:
+            fail(f'{name} import 了不该 import 的：{sorted(set(bad))}')
+        else:
+            ok(f'{name} 只 import 了 {sorted(PURE_IMPORTS & set()) or "允许的模块"}')
+
+
+class FakeDetection:
+    """`dummy_vc_perception.detection.SceneDetection` 的替身。
+
+    规划层只读这四个字段，所以这里不必构造真的一帧图像。
+    """
+
+    def __init__(self, position, yaw_rad=0.0, extent=(0.024, 0.024),
+                 distance_m=0.3):
+        self.position = np.asarray(position, float)
+        self.yaw_rad = float(yaw_rad)
+        self.extent_m = (float(extent[0]), float(extent[1]))
+        self.edge_error_m = 0.0
+        self.distance_m = float(distance_m)
+        self.metres_per_pixel = (0.001, 0.001)
+
+
+def measured_model(gripper):
+    """四个端点都标成 measured 的夹爪模型（0 mm / 46 mm <-> 30 deg / 0 deg）。"""
+    return gripper.opening_endpoints_from_measurements(
+        closed_width_m=0.0, closed_angle_deg=30.0,
+        open_width_m=0.046, open_angle_deg=0.0,
+        where_closed='自测', where_open='自测')
+
+
+def check_planner(gripper, planner):
+    print('\n1. 规划：能抓的给出路点，不能抓的说清理由')
+    model = measured_model(gripper)
+    ground = -0.0405
+    good = FakeDetection([0.0, 0.30, ground + 0.012], yaw_rad=0.0)
+    plan = planner.plan_grasp(good, model)
+    wp = plan.waypoints
+    ok(f'正常目标：{plan.describe()}')
+    close('抓取点就是检测点', wp.grasp, [0.0, 0.30, ground + 0.012], 1e-12)
+    close('起手位在抓取点上方 80 mm', wp.pre_grasp - wp.grasp, [0, 0, 0.08], 1e-12)
+    close('抬升位在抓取点上方 100 mm', wp.lift - wp.grasp, [0, 0, 0.10], 1e-12)
+    close('开口 = 边长 + 2 mm', plan.open_width_m, 0.024 + 0.002, 1e-12)
+    if plan.gripper_ready:
+        ok('已实测的模型被认成 ready')
+    else:
+        fail('已实测的模型没被认成 ready')
+
+    # -- 拒的理由 ---------------------------------------------------------
+    far = FakeDetection([0.0, 0.60, ground + 0.012])
+    expect_error('太远', planner.NotGraspable, planner.plan_grasp, far, model)
+    near = FakeDetection([0.0, 0.05, ground + 0.012])
+    expect_error('太近', planner.NotGraspable, planner.plan_grasp, near, model)
+    high = FakeDetection([0.0, 0.30, 0.35])
+    expect_error('太高（顶抓不成立）', planner.NotGraspable,
+                 planner.plan_grasp, high, model)
+    below = FakeDetection([0.0, 0.30, -0.20])
+    expect_error('低于工作面', planner.NotGraspable, planner.plan_grasp, below, model)
+    bad_extent = FakeDetection([0.0, 0.30, ground + 0.012], extent=(0.0, 0.024))
+    expect_error('边长不合理', planner.NotGraspable,
+                 planner.plan_grasp, bad_extent, model)
+
+    # -- 多个候选：跳过不能抓的，理由一条条留着 ---------------------------
+    cands = [far, high, good]
+    picked, reasons = planner.first_graspable(cands, model)
+    if picked is None:
+        fail('三个候选里有一个能抓，却一个都没选出来')
+    else:
+        ok(f'跳过 {len(reasons)} 个候选后选中第 3 个')
+        close('选中的是同一个抓取点', picked.waypoints.grasp,
+              good.position, 1e-12)
+    if len(reasons) != 2:
+        fail(f'拒绝理由应该有 2 条，实际 {len(reasons)} 条')
+    none, reasons = planner.first_graspable([far, high], model)
+    if none is None and len(reasons) == 2:
+        ok('全都不能抓时返回 None 并带两条理由')
+    else:
+        fail(f'全不能抓的情形不对：plan={none}，理由 {len(reasons)} 条')
+
+    # -- 夹爪没实测：规划照做，但计划上标着不许合爪 -----------------------
+    placeholder = gripper.unverified_placeholder_model()
+    plan2 = planner.plan_grasp(good, placeholder)
+    if plan2.gripper_ready:
+        fail('未实测的夹爪模型被标成了 ready')
+    else:
+        ok('未实测的夹爪模型：规划成功但 gripper_ready=False')
+    expect_error('未实测模型拒绝给出角度指令值', gripper.UnverifiedGripperModel,
+                 placeholder.command_for_width, plan2.open_width_m)
+
+
+def run_machine(task, gripper_ready, events):
+    """按事件序列跑一遍，返回经过的状态列表。"""
+    machine = task.TaskMachine(max_retries=2, gripper_ready=gripper_ready)
+    trail = [machine.state]
+    out = []
+    for ev in events:
+        dec = machine.decide(ev)
+        trail.append(machine.state)
+        out.append(dec)
+    return machine, trail, out
+
+
+def check_task(task, gripper):
+    print('\n2. 状态机：正常路径')
+    machine, trail, out = run_machine(task, True, [
+        task.Event.START, task.Event.TARGET,
+        task.Event.SUCCEEDED, task.Event.SUCCEEDED,   # 起手位 -> 下探
+        task.Event.SUCCEEDED,                          # 合爪
+        task.Event.SUCCEEDED,                          # 抬升
+        task.Event.SUCCEEDED,                          # 移到放置点
+        task.Event.SUCCEEDED,                          # 开爪
+        task.Event.SUCCEEDED,                          # 退回
+    ])
+    want = [task.State.IDLE, task.State.OBSERVE, task.State.MOVE_PRE_GRASP,
+            task.State.APPROACH, task.State.CLOSE_GRIPPER, task.State.LIFT,
+            task.State.MOVE_PLACE, task.State.OPEN_GRIPPER, task.State.RETREAT,
+            task.State.DONE]
+    if trail == want:
+        ok('一路走到 DONE：' + ' -> '.join(s.value for s in trail[1:]))
+    else:
+        fail('路径不对：\n  got  ' + ' -> '.join(s.value for s in trail) +
+             '\n  want ' + ' -> '.join(s.value for s in want))
+    if all(d.action for d in out):
+        ok('每一步都给了动作：' + ', '.join(d.action for d in out))
+
+    print('\n3. 状态机：夹爪没标定时在合爪前停住')
+    machine, trail, out = run_machine(task, False, [
+        task.Event.START, task.Event.TARGET,
+        task.Event.SUCCEEDED, task.Event.SUCCEEDED])
+    last = out[-1]
+    if trail[-1] is task.State.FAULT:
+        ok(f'进 FAULT：{last.note}')
+    else:
+        fail(f'夹爪没标定却继续往下走到了 {trail[-1].value}')
+    if task.State.CLOSE_GRIPPER not in trail:
+        ok('确实没进 CLOSE_GRIPPER')
+    else:
+        fail('进了 CLOSE_GRIPPER —— 那会发 hand 命令')
+    # 前四步必须还能验（否则夹爪没标定之前什么都测不了）
+    if task.State.APPROACH in trail:
+        ok('起手位与下探这两步照常执行')
+
+    print('\n4. 状态机：重试与放弃')
+    machine = task.TaskMachine(max_retries=2, gripper_ready=True)
+    machine.decide(task.Event.START)
+    machine.decide(task.Event.TARGET)
+    d = machine.decide(task.Event.FAILED)
+    if d.state is task.State.MOVE_PRE_GRASP and d.retries == 1:
+        ok(f'第一次失败：原地重试（{d.note}）')
+    else:
+        fail(f'第一次失败应原地重试，实际 {d.state.value} retries={d.retries}')
+    machine.decide(task.Event.FAILED)
+    d = machine.decide(task.Event.FAILED)
+    if d.state is task.State.FAULT:
+        ok(f'重试用完进 FAULT（{d.note}）')
+    else:
+        fail(f'重试用完应进 FAULT，实际 {d.state.value}')
+
+    print('\n5. 状态机：夹爪那两步失败不重试')
+    machine = task.TaskMachine(max_retries=5, gripper_ready=True)
+    for ev in (task.Event.START, task.Event.TARGET,
+               task.Event.SUCCEEDED, task.Event.SUCCEEDED):
+        machine.decide(ev)          # 到 CLOSE_GRIPPER
+    if machine.state is not task.State.CLOSE_GRIPPER:
+        fail(f'没走到 CLOSE_GRIPPER（现在 {machine.state.value}）')
+    d = machine.decide(task.Event.FAILED)
+    if d.state is task.State.FAULT:
+        ok(f'合爪失败直接认输（{d.note}）')
+    else:
+        fail(f'合爪失败不该重试，实际去了 {d.state.value}')
+
+    print('\n6. 状态机：超时、叫停、重来')
+    machine = task.TaskMachine(max_retries=2, gripper_ready=True)
+    machine.decide(task.Event.START)
+    d = machine.decide(task.Event.TIMEOUT)
+    if d.state is task.State.FAULT:
+        ok(f'等目标超时进 FAULT（{d.note}）')
+    else:
+        fail(f'等目标超时该进 FAULT，实际 {d.state.value}')
+    d = machine.decide(task.Event.START)
+    if d.state is task.State.OBSERVE:
+        ok('FAULT 之后 START 能回到 OBSERVE')
+    else:
+        fail(f'FAULT 之后 START 应回 OBSERVE，实际 {d.state.value}')
+
+    machine = task.TaskMachine(max_retries=2, gripper_ready=True)
+    for ev in (task.Event.START, task.Event.TARGET, task.Event.SUCCEEDED):
+        machine.decide(ev)          # 到 APPROACH
+    d = machine.decide(task.Event.ABORT)
+    if d.state is task.State.FAULT:
+        ok(f'半路叫停进 FAULT（{d.note}）')
+    else:
+        fail(f'半路叫停应进 FAULT，实际 {d.state.value}')
+
+    machine = task.TaskMachine(max_retries=2, gripper_ready=True)
+    d = machine.decide(task.Event.SUCCEEDED)
+    if d.state is task.State.IDLE:
+        note(f'IDLE 收到 SUCCEEDED 被忽略（{d.note}）')
+    else:
+        fail(f'IDLE 收到 SUCCEEDED 应忽略，实际 {d.state.value}')
+
+    print('\n7. 状态机：没有死胡同')
+    missing_action = [s.value for s in task.State if s not in task.ACTIONS]
+    if missing_action:
+        fail(f'这些状态没有动作：{missing_action}')
+    else:
+        ok(f'{len(task.State)} 个状态都有动作')
+    terminal = {task.State.IDLE, task.State.DONE, task.State.FAULT, task.State.OBSERVE}
+    dead = [s.value for s in task.State
+            if s not in terminal and s not in task.NEXT]
+    if dead:
+        fail(f'这些状态没有下一站：{dead}')
+    else:
+        ok('所有动作状态都在 NEXT 里有下一站')
+
+    # 每个状态都要能被 ABORT 打断（安全侧的要求）
+    bad = []
+    for state in task.State:
+        m = task.TaskMachine(max_retries=2, gripper_ready=True)
+        m.state = state
+        if m.decide(task.Event.ABORT).state is not task.State.FAULT:
+            bad.append(state.value)
+    if bad:
+        fail(f'这些状态不吃 ABORT：{bad}')
+    else:
+        ok(f'{len(task.State)} 个状态都能被 ABORT 打断')
+
+
+def check_node_api(geometry, gripper, planner, task):
+    """pick_place_node 不能离线跑，但至少盯着它别把接口名写错。
+
+    写错属性名是这类代码最常见的翻车方式：离线看着挺好，到 VM 上一 import 就炸，
+    而那一炸要占掉一次开机、一次摆方块的机会。
+    """
+    print('\n8. pick_place_node 引用的接口都真的存在')
+    path = os.path.join(GRASP, 'dummy_vc_grasp', 'pick_place_node.py')
+    if not os.path.exists(path):
+        fail('pick_place_node.py 不在了')
+        return
+    try:
+        with open(path, encoding='utf-8') as fh:
+            text = fh.read()
+        tree = ast.parse(text, filename=path)
+    except (OSError, SyntaxError) as exc:
+        fail(f'解析 pick_place_node.py 失败：{exc}')
+        return
+    modules = {'g': geometry, 'gr': gripper, 'grasp_planner': planner,
+               'task_mod': task}
+    referenced = set()
+    unknown = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute) or not isinstance(node.value, ast.Name):
+            continue
+        module = modules.get(node.value.id)
+        if module is None:
+            continue
+        name = f'{node.value.id}.{node.attr}'
+        referenced.add(name)
+        if not hasattr(module, node.attr):
+            unknown.append(f'{name}（第 {node.lineno} 行）')
+    for item in unknown:
+        fail(f'pick_place_node.py 用了不存在的接口 {item}')
+    if not unknown:
+        ok(f'引用的 {len(referenced)} 个接口都在：{sorted(referenced)}')
+    if not referenced:
+        fail('一个规划/状态机接口都没引用？节点大概没在干正事')
+    # 三个"必须留在代码里"的安全点：光写在文档里，下一个人会忘。
+    for needle, why in (
+            ('command_for_width', '夹爪必须先问模型要角度，不能自己算'),
+            ('plan_only', 'plan_only 必须跟着 execute 参数走'),
+            ('execute', '默认不执行这件事必须写在代码里，不能只写在文档里'),
+    ):
+        if needle in text:
+            ok(f'代码里提到 {needle}（{why}）')
+        else:
+            fail(f'代码里找不到 {needle}（{why}）')
+
+
+def main():
+    geometry, gripper, planner, task = load_modules()
+    check_offline_imports()
+    if planner is None:
+        print('\nFAILED（连模块都 import 不了）')
+        return 1
+    check_planner(gripper, planner)
+    check_task(task, gripper)
+    check_node_api(geometry, gripper, planner, task)
+
+    print()
+    if FAILURES:
+        print(f'FAILED ({len(FAILURES)} problem(s))')
+        for msg in FAILURES:
+            print(f'  - {msg}')
+        return 1
+    print(f'ALL CHECKS PASSED ({len(NOTES)} note(s))')
+    for msg in NOTES:
+        print(f'  - {msg}')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
