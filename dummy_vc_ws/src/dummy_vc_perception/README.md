@@ -11,7 +11,7 @@
 | `dummy_vc_perception/geometry.py` | 相机模型（针孔 + plumb_bob 畸变）、去畸变、桌面反投影、顶抓位姿、测量值来源 | 能，纯 numpy |
 | `dummy_vc_perception/gripper.py` | 开口宽度 ↔ `hand.set_angle` 的映射，未实测就拒绝下发 | 能 |
 | `dummy_vc_perception/detection.py` | blob → 平面质心 → 边长/朝向 → `SceneDetection`（最小面积外接矩形，不用二阶矩）。**单目兜底用** | 能 |
-| `dummy_vc_perception/depth.py` | 深度图 → 3D 点 → 抓取点；地面拟合反解相机倾角。**默认走这条** | 能 |
+| `dummy_vc_perception/depth.py` | 深度图 → 3D 点 → 抓取点；地面拟合反解相机倾角。**默认关闭**（这台相机在 0.34 m 上没回波） | 能 |
 | `dummy_vc_perception/vision_node.py` | ROS 层：取彩色+深度、查 TF、HSV 分割、发 `/detected_objects` + RViz 标记 | 不能（要 ROS） |
 | `config/vision.yaml` | 节点参数（话题、工作面、边长、HSV 范围、合格判据、深度开关） | — |
 
@@ -37,9 +37,9 @@ ros2 topic echo /detected_objects --once
 ros2 run rviz2 rviz2      # 加 MarkerArray -> /detected_objects/markers
 ```
 
-### 深度这条路（默认）与用地面自己标定俯角
+### 深度这条路（默认关闭）与用地面自己标定俯角
 
-节点默认 `use_depth: true`：彩色图照旧用来分割，位置改成"掩膜里的像素配上
+节点默认 `use_depth: false`（2026-10-19 实测这条路在本机上不可用）；打开 `use_depth:=true` 时彩色图照旧用来分割，位置改成"掩膜里的像素配上
 深度图，反投影成 3D 点"。这样绕掉了单目那两个假设（物体贴在 `table_z` 平面上、
 立体物体的地面投影等于它的边长）——后者在斜视下**数学上就不可能成立**，
 拟合出的边长永远是沿视线拉长的（24 mm 方块在斜视下恒被量成 65 × 28.6 mm）。
@@ -248,7 +248,7 @@ roll 的话镜头只在 yz 平面里动；写成 `rpy(180°,0,0)` 镜头会保�
 5. **深度相机已到货：Orbbec Gemini 335L**（不是 docs/01 里写的 RealSense）。
    节点已经按它写好：彩色 `/camera/color/image_raw` 用来分割，深度
    `/camera/depth/image_raw`（`depth_registration:=true`，已对齐到彩色）用来定位，
-   `use_depth: true` 是默认。**接进来只需要改 `config/vision.yaml` 的两个话题名**
+   `use_depth` 默认 `false`。**接进来只需要改 `config/vision.yaml` 的两个话题名**
    （文件里有注释好的那两行），节点其余部分不用动。
    深度只有 **2 Hz**（USB 2.0 + VirtualBox 的等时传输，见 docs/03），静止场景够用；
    真要提高得换 USB 3.0 线并把相机直通进虚拟机。

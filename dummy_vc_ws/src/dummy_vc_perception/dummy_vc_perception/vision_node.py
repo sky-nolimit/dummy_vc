@@ -14,10 +14,10 @@
 
 有两条算抓取点的路，`use_depth` 选：
 
-* **深度（默认）**：掩膜里的像素去查深度图，直接得到 3D 点，在顶面上定
+* **深度（`use_depth:=true`）**：掩膜里的像素去查深度图，直接得到 3D 点，在顶面上定
   xy、z 减半个边长。不依赖"相机水平、地面等高处"这两个假设，也就没有
   单目那条路对俯角的病态敏感（本机斜下 33°，1° 就能让落点差 8 mm）。
-* **单目（`use_depth:=false`）**：把像素投到"工作面"平面上（`table_z`，
+* **单目（默认）**：把像素投到"工作面"平面上（`table_z`，
   本机是地面 -0.0405），物体有高度时顶面中心会往外偏十几毫米。留着它
   是为了深度不可用（没接相机、深度流坏了）时还能跑，不是首选。
 
@@ -81,7 +81,10 @@ class VisionNode(Node):
         self.declare_parameter('max_rate_hz', 10.0)
         self.declare_parameter('publish_markers', True)
         # 深度路径。关掉就退回"像素投到平面上"的单目路。
-        self.declare_parameter('use_depth', True)
+        # 默认关：2026-10-19 实测 0.34 m 处的方块在深度图里只有 5% 的像素有
+        # 有效深度（掩膜 3206 px 里 168 点），拟合出的顶面只有 4.7x8.0 mm。
+        # 相机最近 0.25 m、又斜着看低反射的绿色方块，凑不出可用点云。
+        self.declare_parameter('use_depth', False)
         self.declare_parameter('depth_topic', '/camera/depth/image_raw')
         # 0 表示按图像编码自动定（16UC1 -> 毫米，32FC1 -> 米）。
         self.declare_parameter('depth_scale', 0.0)
