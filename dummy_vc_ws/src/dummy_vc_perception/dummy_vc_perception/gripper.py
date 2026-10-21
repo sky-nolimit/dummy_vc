@@ -116,15 +116,17 @@ class FingerOpeningModel:
 def unverified_placeholder_model() -> FingerOpeningModel:
     """一个纯粹用来把数据通路跑通的占位映射 —— 两个方向都可能反。
 
-    0.046 m 开口来自 URDF 的行程 2×0.023 m；0 / 30 deg 来自设备角度范围
-    0~30（docs/04）。A1 说这个几何与实物不符，A2 说 hand.* 会卡死整机，
-    所以这个模型的 command_for_width() 永远抛 UnverifiedGripperModel。
+    0.055 m 开口是 2026-10-21 尺量的实物最大开口（此前用 URDF 的 2x0.023
+    m 推算的 0.046 是错的：A1 说 URDF 那套夹爪几何与实物不符）。0 / 30 deg
+    来自设备角度范围 0~30（docs/04），哪一端对应开、哪一端对应合仍未实测；
+    A2 说 hand.* 会卡死整机。所以这个模型的 command_for_width() 永远抛
+    UnverifiedGripperModel —— 宽度有实测值，角度映射没有。
     """
     return FingerOpeningModel(
         angle_open_deg=Measurement(0.0, 'deg', 'placeholder',
                                    'hand 角度范围 0~30，哪端是开未实测'),
-        width_open_m=Measurement(0.046, 'm', 'placeholder',
-                                 '2 x URDF 行程 0.023 m，实物几何不同（docs/04 A1）'),
+        width_open_m=Measurement(0.055, 'm', 'measured',
+                                 '2026-10-21 尺量实物最大开口 55 mm'),
         angle_closed_deg=Measurement(30.0, 'deg', 'placeholder',
                                      '同 angle_open_deg，方向未实测'),
         width_closed_m=Measurement(0.0, 'm', 'placeholder',

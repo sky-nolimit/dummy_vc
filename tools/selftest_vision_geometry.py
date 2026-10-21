@@ -443,10 +443,13 @@ def check_gripper(gripper, geometry):
         fail('占位映射自称已实测')
     else:
         ok('占位映射 verified=False')
-    if len(placeholder.unmeasured()) == 4:
-        ok('四个端点都标着未实测')
+    # 最大开口 55 mm 已经实测，但角度映射与闭合端没有 —— 只要还有一个端点
+    # 是占位值，就必须继续拒发命令（这才是真正要守的线）。
+    unmeasured = placeholder.unmeasured()
+    if len(unmeasured) == 3:
+        ok('三个端点仍是占位值（最大开口 55 mm 已实测），命令照旧拒发')
     else:
-        fail(f'占位映射未实测的端点有 {len(placeholder.unmeasured())} 个，应该是 4 个')
+        fail(f'占位映射未实测的端点有 {len(unmeasured)} 个，应该是 3 个')
     expect_error('未实测时 command_for_width 拒绝下发',
                  gripper.UnverifiedGripperModel,
                  placeholder.command_for_width, 0.03)
