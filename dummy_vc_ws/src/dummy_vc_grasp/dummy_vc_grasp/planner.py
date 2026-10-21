@@ -28,6 +28,14 @@ class NotGraspable(RuntimeError):
     """这次检测不能抓，原因在消息里。"""
 
 
+#: 两指夹持中心（gripper_tcp）到指尖的距离。2026-10-21 实测：腕部到指尖
+#: 130 mm，其中夹取段 35 mm，夹持中心在指尖往上 17.5 mm（见
+#: dummy2_urdf.xacro 文件头那段注释）。
+DEFAULT_TIP_TO_CENTRE_M = 0.0175
+#: 抓取时指尖离工作面留多少。太小会蹭桌面，太大方块夹不稳。
+DEFAULT_FINGERTIP_CLEARANCE_M = 0.003
+
+
 @dataclass(frozen=True)
 class WorkspaceLimits:
     """抓取工作区（base_link，米/弧度）。默认值按本机臂展与安装位置取。"""
@@ -49,12 +57,16 @@ class GraspPlan:
     #: 夹爪的"角度↔开口"是否已实测。未实测时规划照做（宽度只要算术），
     #: 但状态机不会走到 CLOSE_GRIPPER —— 见 task.TaskMachine。
     gripper_ready: bool = False
+    #: 夹持中心（TCP）比方块中心高多少。手指有 17.5 mm 长，不停高一点就会
+    #: 插进桌子 —— 见 plan_grasp() 的 docstring。
+    tcp_offset_m: float = 0.0
 
     def describe(self):
         wp = self.waypoints
-        return ('目标 ({:.3f}, {:.3f}, {:.3f}) m，抓取点上方 {:.0f} mm 起手，'
-                '开口 {:.1f} mm，水平距离 {:.3f} m'.format(
+        return ('目标 ({:.3f}, {:.3f}, {:.3f}) m，夹持中心抬高 {:.1f} mm，'
+                '抓取点上方 {:.0f} mm 起手，开口 {:.1f} mm，水平距离 {:.3f} m'.format(
                     wp.grasp[0], wp.grasp[1], wp.grasp[2],
+                    self.tcp_offset_m * 1e3,
                     (wp.pre_grasp[2] - wp.grasp[2]) * 1e3,
                     self.open_width_m * 1e3, self.reach_m))
 
@@ -75,8 +87,22 @@ def _object_edge(detection) -> float:
 def plan_grasp(detection, model: gr.FingerOpeningModel,
                limits: WorkspaceLimits = WorkspaceLimits(),
                approach_m: float = 0.08, lift_m: float = 0.10,
-               place_point=None) -> GraspPlan:
-    """由一次检测生成抓取计划；不能抓就抛 NotGraspable，原因写在消息里。"""
+               place_point=None,
+               tip_to_centre_m: float = DEFAULT_TIP_TO_CENTRE_M,
+               fingertip_clearance_m: float = DEFAULT_FINGERTIP_CLEARANCE_M) -> GraspPlan:
+    """由一次检测生成抓取计划；不能抓就抛 NotGraspable，原因写在消息里。
+
+    `detection.position` 是**方块中心**（视觉给的就是这个），而 `gripper_tcp`
+    是**两指夹持中心** —— 它在指尖上方 `tip_to_centre_m`（实测 17.5 mm）。
+    所以 TCP 不能停在方块中心：那样两根指头会插进桌子里
+    （17.5 − 12 = 5.5 mm）。正确的做法是让指尖停在离工作面
+    `fingertip_clearance_m` 的地方，于是
+
+        TCP 高度 = 工作面 + 余量 + tip_to_centre
+                 = 方块中心 + 余量 + tip_to_centre − 边长/2
+
+    对 24 mm 方块就是比中心高 8.5 mm。
+    """
     p = np.asarray(detection.position, float)
     if p.shape != (3,):
         raise NotGraspable('抓取点要 3 个数，收到 {} 个'.format(p.size))
@@ -103,8 +129,17 @@ def plan_grasp(detection, model: gr.FingerOpeningModel,
     # command_for_width()，只有状态机走到合爪那一步才会碰它。
     open_width = model.grasp_width_for(edge)
 
+    # 手指要张得开：开口不能小于方块，也不能超过实测的最大开口。
+    if open_width > model.width_open_m.value + 1e-9:
+        raise NotGraspable(
+            '要 {:.1f} mm 开口，夹爪最大只有 {:.1f} mm'.format(
+                open_width * 1e3, model.width_open_m.value * 1e3))
+
+    tcp_offset = fingertip_clearance_m + tip_to_centre_m - 0.5 * edge
+    grasp_point = np.array([p[0], p[1], p[2] + tcp_offset], float)
+
     try:
-        wp = g.grasp_waypoints(p, float(detection.yaw_rad),
+        wp = g.grasp_waypoints(grasp_point, float(detection.yaw_rad),
                                approach_m=approach_m, lift_m=lift_m,
                                place_point=place_point)
     except g.GeometryError as exc:
@@ -112,7 +147,8 @@ def plan_grasp(detection, model: gr.FingerOpeningModel,
 
     return GraspPlan(waypoints=wp, object_edge_m=edge, open_width_m=open_width,
                      yaw_rad=float(detection.yaw_rad), reach_m=reach,
-                     gripper_ready=bool(model.verified))
+                     gripper_ready=bool(model.verified),
+                     tcp_offset_m=float(tcp_offset))
 
 
 def pick_place_waypoints(plan: GraspPlan, place_xy, table_z, approach_m=0.08,

@@ -503,9 +503,12 @@ def check_measurements(geometry, gripper):
     # 同一个数写在两个地方（xacro 给 MoveIt 用，代码给抓取点用），
     # 改一处不改另一处，规划用的 TCP 和视觉算的抓取点就差几毫米 ——
     # 而这正好是"对准了但没夹住"的样子。
-    xacro_tcp = xacro_property('tcp_offset_y', float('nan'))
+    # xacro 里的 tcp_offset_y 现在是算出来的（腕部→指尖 − 夹取中心到指尖），
+    # 所以这里按同样的两个分量复算，而不是直接读那个属性。
+    wrist_to_tip = xacro_property('gripper_wrist_to_tip_m', float('nan'))
+    tip_to_centre = xacro_property('gripper_tip_to_centre_m', float('nan'))
     close('xacro 的 tcp_offset_y 与代码里的实测值一致',
-          real.tcp_offset_y.value, xacro_tcp, 1e-12)
+          real.tcp_offset_y.value, wrist_to_tip - tip_to_centre, 1e-12)
     # 方块是放在工作面上的，抓取点取它的中心，所以高度是边长的一半。
     close('24 mm 方块的中心在工作面上方 12 mm',
           geometry.object_center_on_table(0.0, 0.0, real.table_z.value,

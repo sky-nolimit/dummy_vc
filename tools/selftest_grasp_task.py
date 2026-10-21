@@ -147,7 +147,11 @@ def check_planner(gripper, planner):
     plan = planner.plan_grasp(good, model)
     wp = plan.waypoints
     ok(f'正常目标：{plan.describe()}')
-    close('抓取点就是检测点', wp.grasp, [0.0, 0.30, ground + 0.012], 1e-12)
+    # 方块中心 z = 地面 + 12 mm；夹持中心要再抬高 3 + 17.5 - 12 = 8.5 mm，
+    # 否则 17.5 mm 长的指头会插进桌面。
+    close('夹持中心比方块中心高 8.5 mm', wp.grasp,
+          [0.0, 0.30, ground + 0.012 + 0.0085], 1e-9)
+    close('plan 记下了这个抬高量', plan.tcp_offset_m, 0.0085, 1e-12)
     close('起手位在抓取点上方 80 mm', wp.pre_grasp - wp.grasp, [0, 0, 0.08], 1e-12)
     close('抬升位在抓取点上方 100 mm', wp.lift - wp.grasp, [0, 0, 0.10], 1e-12)
     close('开口 = 边长 + 2 mm', plan.open_width_m, 0.024 + 0.002, 1e-12)
@@ -178,7 +182,7 @@ def check_planner(gripper, planner):
     else:
         ok(f'跳过 {len(reasons)} 个候选后选中第 3 个')
         close('选中的是同一个抓取点', picked.waypoints.grasp,
-              good.position, 1e-12)
+              [0.0, 0.30, ground + 0.012 + 0.0085], 1e-9)
     if len(reasons) != 2:
         fail(f'拒绝理由应该有 2 条，实际 {len(reasons)} 条')
     none, reasons = planner.first_graspable([far, high], model)
@@ -406,23 +410,38 @@ def check_scene(scene, geometry):
         else:
             ok('地面盒子有厚度（{:.0f} mm）'.format(
                 (ground.top_z - ground.bottom_z) * 1000.0))
-    if 'base_platform' not in by_name:
-        note('没有 base_platform —— 只在地台高度为 0 时才允许缺')
+    # 地台是两层（2026-10-21 实测）：上层和底座一样大、高 1 cm；下层 20x20 cm，
+    # 中心在 +y 4 cm（前沿 +14、后沿 -6）。
+    if 'platform_upper' not in by_name:
+        fail('workspace_boxes() 里没有 platform_upper（第二层）')
     else:
-        platform = by_name['base_platform']
-        if platform.top_z > scene.DEFAULT_BASE_BOTTOM_Z_M:
-            fail('地台顶面 {:.4f} 高过了 base_link 的底面 {:.4f}'.format(
-                platform.top_z, scene.DEFAULT_BASE_BOTTOM_Z_M))
+        upper = by_name['platform_upper']
+        if upper.top_z > scene.DEFAULT_BASE_BOTTOM_Z_M:
+            fail('第二层顶面 {:.4f} 高过了 base_link 的底面 {:.4f}'.format(
+                upper.top_z, scene.DEFAULT_BASE_BOTTOM_Z_M))
         else:
-            ok('地台顶面 {:.4f} 在 base_link 底面之下，不会和底座面接触'.format(
-                platform.top_z))
-        close('地台顶面离 base_link 底面正好留了 1 mm',
-              scene.DEFAULT_BASE_BOTTOM_Z_M - platform.top_z, 0.001, 1e-9)
+            ok('第二层顶面 {:.4f} 在 base_link 底面之下，不会和底座面接触'.format(
+                upper.top_z))
+        close('第二层顶面离 base_link 底面正好留了 1 mm',
+              scene.DEFAULT_BASE_BOTTOM_Z_M - upper.top_z, 0.001, 1e-9)
+        close('第二层和底座一样大（10x10 cm）', upper.size[0], 0.10, 1e-12)
+        close('第二层高 1 cm（那 1 mm 的缝从这里扣）', upper.size[2], 0.010 - 0.001, 1e-12)
+        close('第二层居中（x）', upper.center[0], 0.0, 1e-12)
+        close('第二层居中（y）', upper.center[1], 0.0, 1e-12)
+    if 'platform_lower' not in by_name:
+        fail('workspace_boxes() 里没有 platform_lower（第一层）')
+    else:
+        lower = by_name['platform_lower']
+        close('第一层 20x20 cm', lower.size[0], 0.20, 1e-12)
+        close('第一层高 1.5 cm', lower.size[2], 0.015, 1e-12)
+        close('第一层中心在 +y 4 cm', lower.center[1], 0.04, 1e-12)
+        close('第一层顶面接住第二层底面', lower.top_z, upper.bottom_z, 1e-12)
+        close('第一层底面正好落在工作面上', lower.bottom_z, table_z, 1e-12)
     for msg in notes:
         note(msg)
 
-    if scene.base_platform_box(base_bottom_z=-0.5, table_z=-0.5) is not None:
-        fail('地台与工作面同高时还返回了一个盒子（会是一个零厚度的碰撞体）')
+    if scene.base_platform_boxes(base_bottom_z=-0.5, table_z=-0.5):
+        fail('地台与工作面同高时还返回了盒子（会是一个零厚度的碰撞体）')
     else:
         ok('地台与工作面同高时不产生碰撞体')
     if expect_error('地面尺寸非正时抛 ValueError', ValueError,

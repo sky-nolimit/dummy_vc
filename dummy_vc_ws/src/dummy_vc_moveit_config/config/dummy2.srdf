@@ -48,18 +48,16 @@
        两个 prismatic 手指不是一个链（它们并联到 dummy_hand_v1_1），
        所以用 joint 列表而不是 chain。
 
-       **⚠ 这个组建立在错误的几何上，见 docs/04-已知缺陷与未决问题.md A1。**
-       本文件里的手指关节、行程 (0~0.023 m)、以及 gripper_tcp 都来自原作者
-       的通用夹爪模型，而实物是「舵机 + 齿轮齿条 + 直线导轨 + 打印长手指」，
-       形状和抓取中心都不一样。差异有几十毫米 —— 足以让抓取从"抓住"变成
-       "推倒"。
+       **几何已按实测重建（2026-10-21），docs/04 的 A1 只剩下面这一半。**
+       手指关节、行程 (0~0.0275 m)、夹爪盒体、以及 gripper_tcp 都改成了
+       实测值：腕部到指尖 130 mm、夹取中心在指尖往上 17.5 mm、最大开口
+       55 mm（详见 dummy2_urdf.xacro 文件头那段注释）。原来那套来自原作者
+       通用夹爪模型的网格已经不再被引用（文件仍留在 meshes/ 里）。
 
-       所以这个组的**名字和行程在夹爪几何重建时一定会改**，届时三处要一起改：
-         * 这里（组、组状态 open/closed）
-         * config/joint_limits.yaml（若把手指限位移过去）
-         * gripper_tcp 的 origin（真实抓取中心，需要实测）
+       还没实测的是**手指宽度**（现按 25 mm 占位）和**角度<->开口**的映射
+       （见 dummy_vc_perception/gripper.py，未实测就拒发 hand 命令）。
 
-       **这个组目前也是"声明存在但不可驱动"的。** 设备侧的 hand 接口有三个
+       这个组目前仍是"声明存在但不可驱动"的。设备侧的 hand 接口有三个
        方法但全部永久阻塞（见 docs/04 A2），所以：
          * 这里声明它，是为了让手指出现在 RViz 里、也让 /joint_states 能
            上报它们（驱动发布的是**命令值**，因为夹爪没有回读）
@@ -103,8 +101,8 @@
   </group_state>
 
   <group_state name="open" group="gripper">
-    <joint name="dummy2_finger_joint1" value="0.023"/>
-    <joint name="dummy2_finger_joint2" value="0.023"/>
+    <joint name="dummy2_finger_joint1" value="0.0275"/>
+    <joint name="dummy2_finger_joint2" value="0.0275"/>
   </group_state>
 
   <group_state name="closed" group="gripper">

@@ -472,20 +472,22 @@ def project_scene_measurements() -> SceneMeasurements:
       -15.5 ~ +83.5 mm）。所以地面在 base_link 里是 -(0.0155 + 0.025) =
       -0.0405。方块放在地面上，抓取点的 z 就是 -0.0405 + 半个边长。
       （2026-10-19 用户确认：地台约 2.5 cm、相机中心离地 16 cm、方块在地面上。）
-    - tcp_offset_y = 0.015：link7 端面到两指夹持中心约 15 mm（尺量）。它比
-      hand 关节的 0.052312 小，所以 gripper_tcp 落在 hand 坐标系原点后方
-      y = -0.037312 —— 实物两指是贴着腕部夹的，URDF 里那套手指几何来自
-      原作者模型、与实物不符（docs/04 A1）。
+    - tcp_offset_y = 0.1125：link7 端面到两指夹持中心。2026-10-21 按实测重算：
+      腕部到指尖 130 mm（80 mm 是舵机/驱动板本体 + 50 mm 手指，手指里 15 mm
+      是滑动结构、35 mm 是夹取段），夹取中心在夹取段中点 ⇒ 离指尖 17.5 mm ⇒
+      离腕部 130 - 17.5 = 112.5 mm。旧的 15 mm 是量错了位置（量到的是腕部
+      外壳），它让 URDF 的手指比实物长 100 mm，一开碰撞检查就规划失败。
     - object_edge = 0.024：边长 24 mm 的方形方块。
 
-    注意 tcp_offset_y 已经写进 `dummy2_urdf.xacro` 的 `tcp_offset_y`，两处必须
+    注意 tcp_offset_y 已经写进 `dummy2_urdf.xacro`（那里由
+    `gripper_wrist_to_tip_m - gripper_tip_to_centre_m` 算出来），两处必须
     一致；改一处不改另一处，规划用的 TCP 和这里算的抓取点就会差几毫米。
     """
     return SceneMeasurements(
         table_z=Measurement(-0.0405, 'm', 'measured',
                             '地面：底座底面 z=-0.0155（stl 包围盒）+ 2.5 cm 地台；方块放在地面上'),
-        tcp_offset_y=Measurement(0.015, 'm', 'measured',
-                                 '尺量 link7 端面到两指夹持中心约 15 mm（xacro 里同名常量）'),
+        tcp_offset_y=Measurement(0.1125, 'm', 'measured',
+                                 '腕部→指尖 130 mm 减 夹取中心到指尖 17.5 mm（2026-10-21 尺量）'),
         object_edge=Measurement(0.024, 'm', 'measured',
                                 '方形方块，边长 24 mm'),
     )

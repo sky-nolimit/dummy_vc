@@ -18,13 +18,35 @@
 <!-- 手指伸出的方向：URDF 里手爪挂在 link7 的 +y 方向 -->
 <xacro:property name="hand_axis" value="y"/>
 
-<!-- link7 -> 两指夹持中心(指尖前端中点)，沿 hand_axis 的距离。
-     实测：2026-10-16 尺量，约 15 mm。
-     注意它比 hand 关节的 0.052312 还小，所以 gripper_tcp 落在 hand 坐标系
-     原点的**后方**（y = 0.015 - 0.052312 = -0.037312，即比 hand 原点更靠近
-     link7）—— 实物手爪的两指是贴着腕部夹的。URDF 里那套手指几何来自原作者
-     模型、与实物不符（docs/04 A1），两者不能互相印证。 -->
-<xacro:property name="tcp_offset_y" value="0.015"/>
+<!-- 实物夹爪的实测几何（2026-10-21 用尺子在整机上量的）。
+     ==========================================================
+     腕部(link7 端面) -> 指尖            130 mm
+       其中 80 mm 是舵机 + 驱动板 + 导轨那些不动的结构
+       剩下 50 mm 是可开合的手指（15 mm 滑动结构 + 35 mm 真正夹取段）
+     夹取中心 = 35 mm 夹取段的中点，离指尖 17.5 mm
+              => 离腕部 130 - 17.5 = 112.5 mm
+     最大开口（两指内侧面之间）         55 mm
+     单指板厚：三角截面，最厚 10 mm、最薄约 3 mm，这里按 8 mm 的均值
+     指尖宽度：这次没量，先按 25 mm 占位
+
+     之前这里写的是 15 mm —— 那次量的不是夹取中心（从照片和 130 mm 的
+     总长看，量到的是夹爪本体的某个面），已作废。这个数是 A1 的修复：
+     URDF 原来用的是原作者通用夹爪的网格，指尖落在腕部以下 116 mm，比
+     实物长了约 100 mm —— 于是一开碰撞检查，抓取位姿就整只手埋进桌面，
+     MoveIt 报 "Unable to sample any valid states for goal tree"。 -->
+<xacro:property name="gripper_wrist_to_tip_m" value="0.130"/>
+<xacro:property name="gripper_body_y_m" value="0.080"/>
+<xacro:property name="gripper_finger_y_m" value="0.050"/>
+<xacro:property name="gripper_tip_to_centre_m" value="0.0175"/>
+<xacro:property name="gripper_open_gap_m" value="0.055"/>
+<xacro:property name="gripper_finger_thick_m" value="0.008"/>
+<xacro:property name="gripper_finger_width_m" value="0.025"/>
+<xacro:property name="gripper_body_x_m" value="0.090"/>
+<xacro:property name="gripper_body_z_m" value="0.050"/>
+<!-- 半行程 = 一指从全闭到全开走多远 -->
+<xacro:property name="gripper_finger_travel_m" value="${gripper_open_gap_m/2}"/>
+<!-- link7 端面 -> 两指夹持中心（gripper_tcp 就放在这里） -->
+<xacro:property name="tcp_offset_y" value="${gripper_wrist_to_tip_m - gripper_tip_to_centre_m}"/>
 
 <!-- 相机的安装参数（外置支架，eye-to-hand）定义在文件末尾的相机段落里，
      因为那里有较长的说明。用 grep 搜 camera_offset 可以找到。 -->
@@ -196,17 +218,20 @@
     <mass value="0.16020132187330405"/>
     <inertia ixx="1.6e-05" iyy="0.000181" izz="0.000168" ixy="0.0" iyz="-0.0" ixz="-5e-06"/>
   </inertial>
+  <!-- 手掌/舵机本体：用实测尺寸的盒体，不用原作者网格（见文件上方 A1 注释）。
+       本体从腕部往指尖方向占 80 mm，所以盒心在 hand 坐标系
+       y = 80/2 - 52.312 = -12.3 mm。 -->
   <visual>
-    <origin xyz="-0.012149 -0.316832 -0.345967" rpy="0 0 0"/>
+    <origin xyz="0 ${gripper_body_y_m/2 - 0.052312} 0" rpy="0 0 0"/>
     <geometry>
-      <mesh filename="file://$(find dummy2_urdf_description)/meshes/dummy_hand_v1_1.stl" scale="0.001 0.001 0.001"/>
+      <box size="${gripper_body_x_m} ${gripper_body_y_m} ${gripper_body_z_m}"/>
     </geometry>
     <material name="silver"/>
   </visual>
   <collision>
-    <origin xyz="-0.012149 -0.316832 -0.345967" rpy="0 0 0"/>
+    <origin xyz="0 ${gripper_body_y_m/2 - 0.052312} 0" rpy="0 0 0"/>
     <geometry>
-      <mesh filename="file://$(find dummy2_urdf_description)/meshes/dummy_hand_v1_1.stl" scale="0.001 0.001 0.001"/>
+      <box size="${gripper_body_x_m} ${gripper_body_y_m} ${gripper_body_z_m}"/>
     </geometry>
   </collision>
 </link>
@@ -217,17 +242,19 @@
     <mass value="0.0823609512502398"/>
     <inertia ixx="2.7e-05" iyy="2.2e-05" izz="4.2e-05" ixy="7e-06" iyz="-3e-06" ixz="3e-06"/>
   </inertial>
+  <!-- 指板：盒心就是 link 原点（关节 origin 已经把它摆到正确位置）。
+       x 是板厚（沿开合方向）、y 是指板长度、z 是宽度。 -->
   <visual>
-    <origin xyz="0.036579 -0.320832 -0.335365" rpy="0 0 0"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
     <geometry>
-      <mesh filename="file://$(find dummy2_urdf_description)/meshes/dummy_leftfinger_v1_1.stl" scale="0.001 0.001 0.001"/>
+      <box size="${gripper_finger_thick_m} ${gripper_finger_y_m} ${gripper_finger_width_m}"/>
     </geometry>
     <material name="silver"/>
   </visual>
   <collision>
-    <origin xyz="0.036579 -0.320832 -0.335365" rpy="0 0 0"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
     <geometry>
-      <mesh filename="file://$(find dummy2_urdf_description)/meshes/dummy_leftfinger_v1_1.stl" scale="0.001 0.001 0.001"/>
+      <box size="${gripper_finger_thick_m} ${gripper_finger_y_m} ${gripper_finger_width_m}"/>
     </geometry>
   </collision>
 </link>
@@ -238,17 +265,18 @@
     <mass value="0.08236095125024051"/>
     <inertia ixx="2.7e-05" iyy="2.2e-05" izz="4.2e-05" ixy="-7e-06" iyz="3e-06" ixz="3e-06"/>
   </inertial>
+  <!-- 同 dummy_leftfinger_v1_1。 -->
   <visual>
-    <origin xyz="-0.061406 -0.320832 -0.356601" rpy="0 0 0"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
     <geometry>
-      <mesh filename="file://$(find dummy2_urdf_description)/meshes/dummy_rightfiger_v1_1.stl" scale="0.001 0.001 0.001"/>
+      <box size="${gripper_finger_thick_m} ${gripper_finger_y_m} ${gripper_finger_width_m}"/>
     </geometry>
     <material name="silver"/>
   </visual>
   <collision>
-    <origin xyz="-0.061406 -0.320832 -0.356601" rpy="0 0 0"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
     <geometry>
-      <mesh filename="file://$(find dummy2_urdf_description)/meshes/dummy_rightfiger_v1_1.stl" scale="0.001 0.001 0.001"/>
+      <box size="${gripper_finger_thick_m} ${gripper_finger_y_m} ${gripper_finger_width_m}"/>
     </geometry>
   </collision>
 </link>
@@ -363,31 +391,26 @@
 </joint>
 
 <joint name="dummy2_finger_joint1" type="prismatic">
-  <origin xyz="-0.048728 0.004 -0.010602" rpy="0 0 0"/>
+  <origin xyz="${-gripper_finger_thick_m/2} ${gripper_body_y_m + gripper_finger_y_m/2 - 0.052312} 0" rpy="0 0 0"/>
   <parent link="dummy_hand_v1_1"/>
   <child link="dummy_leftfinger_v1_1"/>
-  <axis xyz="1.0 -0.0 0.000761"/>
+  <axis xyz="-1 0 0"/>
   <!--
-    ⚠ 下面的行程 (0~0.023 m) 和整个夹爪几何都来自**原作者的通用夹爪模型**，
-    与实物不符。实物是舵机 + 齿轮齿条 + 两条直线导轨 + 两个打印长手指。
-
-    这一项记录在本机的 docs/04（A1）。差异有几十毫米，对抓取精度是
-    致命的。
-
-    重建时要一起改：这里、dummy2_finger_joint2、gripper_tcp 的 origin
-    （真实抓取中心）、以及 MoveIt 的 config/dummy2.srdf 里 gripper 组与
-    open/closed 组状态。只改 mesh 不够。
+    行程 27.5 mm = 最大开口 55 mm 的一半，q=0 时两指内侧面刚好接触（全闭），
+    q=27.5 mm 时开口 55 mm（全开）。原来的 0~0.023 与整个夹爪几何都来自
+    原作者的通用夹爪模型，与实物不符（本机 docs/04 的 A1），已按实测重建。
+    SRDF 里 gripper 组的 open/closed 组状态用的是同一个数，改这里要一起改。
   -->
-  <limit upper="0.023" lower="0.0" effort="100" velocity="100"/>
+  <limit upper="${gripper_finger_travel_m}" lower="0.0" effort="100" velocity="100"/>
 </joint>
 
 <joint name="dummy2_finger_joint2" type="prismatic">
-  <origin xyz="0.049257 0.004 0.010634" rpy="0 0 0"/>
+  <origin xyz="${gripper_finger_thick_m/2} ${gripper_body_y_m + gripper_finger_y_m/2 - 0.052312} 0" rpy="0 0 0"/>
   <parent link="dummy_hand_v1_1"/>
   <child link="dummy_rightfiger_v1_1"/>
-  <axis xyz="-1.0 0.0 -0.000761"/>
-  <!-- 同 dummy2_finger_joint1：行程与几何与实物不符，见本机 docs/04 的 A1。 -->
-  <limit upper="0.023" lower="0.0" effort="100" velocity="100"/>
+  <axis xyz="1 0 0"/>
+  <!-- 同 dummy2_finger_joint1，两指沿相反方向同步开合。 -->
+  <limit upper="${gripper_finger_travel_m}" lower="0.0" effort="100" velocity="100"/>
 </joint>
 
 <!-- ==========================================================================

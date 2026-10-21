@@ -32,6 +32,14 @@ DEFAULT_BASE_BOTTOM_Z_M = -0.0155
 #: 把"接触"也算碰撞，于是起始状态永远在碰撞里。
 DEFAULT_BASE_CLEARANCE_M = 0.001
 
+#: 地台是两层（2026-10-21 实测）：上层和底座一样大、高 1 cm，机械臂固定在它
+#: 上面；下层 20x20 cm、高 1.5 cm，中心在 base_link 的 +y 4 cm 处（前沿
+#: +14 cm、后沿 -6 cm，左右各留 5 cm）。
+DEFAULT_PLATFORM_UPPER_HEIGHT_M = 0.010
+DEFAULT_PLATFORM_LOWER_SIZE_M = 0.20
+DEFAULT_PLATFORM_LOWER_HEIGHT_M = 0.015
+DEFAULT_PLATFORM_LOWER_CENTER_Y_M = 0.04
+
 
 @dataclass(frozen=True)
 class Box(object):
@@ -73,28 +81,57 @@ def table_box(table_z=None, size_x=0.8, size_y=0.8, center_x=0.0, center_y=0.30,
                note='工作面顶面在 table_z')
 
 
-def base_platform_box(table_z=None, footprint_m=DEFAULT_BASE_FOOTPRINT_M,
-                      base_bottom_z=DEFAULT_BASE_BOTTOM_Z_M,
-                      clearance_m=DEFAULT_BASE_CLEARANCE_M):
-    """地台：底面坐在地面上，顶面比 `base_link` 的底面低 `clearance_m`。
+def base_platform_boxes(table_z=None, footprint_m=DEFAULT_BASE_FOOTPRINT_M,
+                        base_bottom_z=DEFAULT_BASE_BOTTOM_Z_M,
+                        clearance_m=DEFAULT_BASE_CLEARANCE_M,
+                        upper_height_m=DEFAULT_PLATFORM_UPPER_HEIGHT_M,
+                        lower_size_m=DEFAULT_PLATFORM_LOWER_SIZE_M,
+                        lower_height_m=DEFAULT_PLATFORM_LOWER_HEIGHT_M,
+                        lower_center_y_m=DEFAULT_PLATFORM_LOWER_CENTER_Y_M):
+    """两层地台，2026-10-21 在整机上量出来的。
 
-    返回 `None` 的情况：底座本来就坐在地面上（`base_bottom_z` 不高于
-    `table_z`），或者两者之间只有不到 1 mm 的缝 —— 那种情况下这个盒子没有
-    厚度可给，硬塞一个反而制造接触。
+    上层：和底座（那个 10x10 cm 的黑盒子）一样大，高 1 cm，机械臂整个固定在
+          它上面，所以它就在 base_link 正下方居中。
+    下层：20x20 cm、高 1.5 cm。上层**不居中** —— 下层前沿在 base_link +14 cm、
+          后沿 -6 cm，也就是下层的中心在 +y 4 cm 处；左右各留 5 cm。
+
+    上层顶面比 `base_link` 底面低 `clearance_m`，否则固定底座和它会面贴面，
+    MoveIt 会把"机器人一直在碰撞"当成常态，规划永远失败。
+
+    厚度不足（底座本来就坐在地上）时返回空列表 —— 硬塞一个反而制造接触。
     """
     if table_z is None:
         table_z = DEFAULT_TABLE_Z
     if footprint_m <= 0.0:
         raise ValueError('地台尺寸必须大于 0，收到 {}'.format(footprint_m))
-    top = float(base_bottom_z) - float(clearance_m)
-    height = top - float(table_z)
-    if height <= 0.0:
-        return None
-    return Box(name='base_platform',
-               size=(float(footprint_m), float(footprint_m), height),
-               center=(0.0, 0.0, float(table_z) + 0.5 * height),
-               note='顶面比 base_link 底面低 {:.1f} mm，免得接触被当成碰撞'.format(
-                   clearance_m * 1e3))
+    if lower_size_m <= 0.0:
+        raise ValueError('下层地台尺寸必须大于 0，收到 {}'.format(lower_size_m))
+
+    table_z = float(table_z)
+    # 那 1 mm 的缝从**上层**扣：上层是贴在底座下面、看不见的那面，下层保持
+    # 实测的 1.5 cm，它的底面正好落在工作面上。
+    upper_top = float(base_bottom_z) - float(clearance_m)
+    upper_thick = float(upper_height_m) - float(clearance_m)
+    upper_bottom = upper_top - upper_thick
+    lower_top = upper_bottom
+    lower_bottom = lower_top - float(lower_height_m)
+
+    boxes = []
+    if upper_thick > 0.0 and upper_bottom > table_z:
+        boxes.append(Box(
+            name='platform_upper',
+            size=(float(footprint_m), float(footprint_m), upper_thick),
+            center=(0.0, 0.0, 0.5 * (upper_top + upper_bottom)),
+            note='和底座同大的第二层，顶面比 base_link 底面低 {:.1f} mm'.format(
+                clearance_m * 1e3)))
+    if lower_height_m > 0.0 and lower_bottom >= table_z - 1e-9:
+        boxes.append(Box(
+            name='platform_lower',
+            size=(float(lower_size_m), float(lower_size_m), float(lower_height_m)),
+            center=(0.0, float(lower_center_y_m), 0.5 * (lower_top + lower_bottom)),
+            note='第一层 20x20 cm，中心在 +y {:.0f} mm（前沿 +14、后沿 -6 cm）'.format(
+                lower_center_y_m * 1e3)))
+    return boxes
 
 
 def workspace_boxes(table_z=None, table_size_x=0.8, table_size_y=0.8,
@@ -112,13 +149,13 @@ def workspace_boxes(table_z=None, table_size_x=0.8, table_size_y=0.8,
                        thickness_m=table_thickness_m)]
     notes = []
     if include_platform:
-        platform = base_platform_box(table_z=table_z, footprint_m=footprint_m,
-                                     base_bottom_z=base_bottom_z,
-                                     clearance_m=clearance_m)
-        if platform is None:
+        platform = base_platform_boxes(table_z=table_z, footprint_m=footprint_m,
+                                       base_bottom_z=base_bottom_z,
+                                       clearance_m=clearance_m)
+        if not platform:
             notes.append(
                 '底座底面 z={:.4f} 不高于工作面 z={:.4f}，没有地台可加'.format(
                     base_bottom_z, table_z))
         else:
-            boxes.append(platform)
+            boxes.extend(platform)
     return boxes, notes
