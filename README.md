@@ -192,7 +192,7 @@ ros2 launch dummy_vc_grasp pick_place_demo.launch.py auto_start:=true
 | **2** | **MoveIt 配置** | ✅ 真机 Plan & Execute 已连续可用（含安全退出）；配置见 `docs/08` |
 | 3 | 驱动补强（限速、急停、GripperCommand 动作） | 部分完成（FollowJointTrajectory 动作已完成） |
 | 4 | 视觉感知 | ✅ 单目检测真机跑通：四个已知位置的方块，报出坐标与真值差 ≤1 cm（相机位姿是解出来的，见 `ad2f8ed`）。深度路径在这套安装下不可用（0.34 m 处无回波） |
-| 5 | 抓取规划 + 任务状态机 | 🔸 代码完成并离线自测（`dummy_vc_grasp`：规划 + 状态机 + MoveIt 动作客户端）；默认只规划不执行，夹爪那一步在 A2 未解决前会主动停在 CLOSE_GRIPPER |
+| 5 | 抓取规划 + 任务状态机 | 🔸 代码完成并离线自测（`dummy_vc_grasp`：规划 + 状态机 + MoveIt 动作客户端 + 地面/地台碰撞体 + 笛卡尔竖直下降）；默认只规划不执行，夹爪那一步在 A2 未解决前会主动停在 CLOSE_GRIPPER |
 | 6 | 深度相机接入 + 手眼标定 | 部分：相机已接入并标定到位姿（四点法）；手眼标定本身未做（要机械臂能动） |
 
 ### 已知阻塞：夹爪

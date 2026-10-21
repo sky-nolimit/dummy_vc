@@ -27,6 +27,7 @@ setup(
     entry_points={
         'console_scripts': [
             'pick_place_node = dummy_vc_grasp.pick_place_node:main',
+            'scene_node = dummy_vc_grasp.scene_node:main',
         ],
     },
 )

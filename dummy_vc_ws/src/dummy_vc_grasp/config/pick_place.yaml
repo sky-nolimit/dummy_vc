@@ -37,3 +37,31 @@ pick_place_node:
     action_timeout_s: 40.0               # 单个 MoveIt 目标最多等多久
     max_retries: 2                       # 可重试的步骤失败后最多再来几次
     auto_start: false                    # true = 节点一起来就自动开始一次抓取
+
+    # ---- 下降：笛卡尔直线 ----
+    # 关节空间规划出来的"下降"可能是斜的（RRTConnect 只管可行、不管形状），
+    # 而抓取要求手指从正上方垂直落下。所以这一段单独用 compute_cartesian_path。
+    approach_cartesian: true
+    cartesian_service: "/compute_cartesian_path"
+    execute_trajectory_action: "/execute_trajectory"
+    cartesian_max_step: 0.005            # 直线插值的最大步长（米）
+    cartesian_min_fraction: 0.95         # 直线覆盖率低于这个值就退回关节空间
+
+# scene_node：把地面/地台发进 planning scene。
+# 不放进去，规划器认为脚下什么都没有，最后那段"往下抓"能从地面里穿过去。
+scene_objects:
+  ros__parameters:
+    scene_topic: "/planning_scene"
+    frame_id: "base_link"
+    publish: true                        # false = 只看不发（干跑）
+    clear: false                         # true = 发 REMOVE，把之前发的撤掉
+    republish_s: 2.0                     # 每隔多久重发一次（move_group 晚起来也收得到）
+    table_z: -0.0405                     # 地面高度；和 perception 的实测值同源
+    table_size_x: 0.8
+    table_size_y: 0.8
+    table_center_x: 0.0
+    table_center_y: 0.30                 # 方块在 +y 0.30 附近，所以桌面中心也放那儿
+    table_thickness: 0.02                # 只往地面以下长，顶面严格落在 table_z
+    include_platform: true               # 机械臂底座下面那块地台
+    base_footprint: 0.10                 # base_link.stl 是 100x100 mm
+    base_bottom_z: -0.0155               # 底座最低点（模型包围盒给的）

@@ -6,8 +6,9 @@
 | 文件 | 依赖 | 能不能离线自测 |
 | --- | --- | --- |
 | `planner.py` | numpy + `dummy_vc_perception` 的几何层 | ✅ `tools/selftest_grasp_task.py` |
+| `scene_objects.py` | numpy + `dummy_vc_perception` 的实测值 | ✅ 同上（顶面/留缝/零厚度都验） |
 | `task.py` | 只有标准库 | ✅ 同上（把每条迁移边都走一遍） |
-| `pick_place_node.py` | ROS 2 + `moveit_msgs` | ❌ 只能在 VM 上跑 |
+| `pick_place_node.py` / `scene_node.py` | ROS 2 + `moveit_msgs` | ❌ 只能在 VM 上跑 |
 
 ```bash
 python tools/selftest_grasp_task.py     # 不需要 ROS
@@ -24,9 +25,29 @@ IDLE ─START→ OBSERVE ─看到目标→ MOVE_PRE_GRASP → APPROACH → CLOS
   每一步都用同一个点。这样失败时能分清"看错了"还是"走偏了"。
 - 运动全部走 MoveIt 的 `MoveGroup` 动作（`/move_action`），一个 goal 里
   plan+execute 一起做 —— 碰撞检查和路径插值仍是 MoveIt 的事，节点不自己拼轨迹。
+- **`APPROACH` 是唯一例外**：RRTConnect 只管"可行"、不管形状，关节空间规划出来的
+  下降很可能是斜的，而抓取要求手指从正上方垂直落下。所以这一段改走
+  `compute_cartesian_path`（`/compute_cartesian_path`）算一条竖直直线，再用
+  `/execute_trajectory` 下发；直线覆盖率不到 95% 就退回关节空间并告警。
 - 可重试的步骤（起手位/下探/抬升/移动到放置点/退回）失败后原地重试，默认 2 次。
 - **夹爪那两步不重试**：合爪失败过就说明不确定指头在哪，再试一次可能把方块挤飞
   或把手指别住；开爪失败时方块还在指间，退回起点比撒手更糟。
+
+## 地面和地台：`scene_node`
+
+地面和地台都不在 URDF 里。不把它们发进 planning scene，规划器认为脚下什么都没有，
+最后那段"往下抓"能规划出一条从地面里穿过去的路径 —— 规划成功、执行撞地。
+
+```bash
+ros2 run dummy_vc_grasp scene_node --ros-args \
+  --params-file $(ros2 pkg prefix dummy_vc_grasp)/share/dummy_vc_grasp/config/pick_place.yaml
+```
+
+- 发的是 `PlanningScene(is_diff=True)` 的 `CollisionObject`（`ADD`），每 2 秒重发一次：
+  订阅端 QoS 由 MoveIt 决定，只发一次时"场景节点先起、move_group 后起"会永久收不到。
+- 地面盒子的**顶面严格落在 `table_z`**（默认 `-0.0405`），厚度只往地面以下长。
+- 地台盒子的顶面比 `base_link` 的底面低 1 mm —— 面接触会被判成碰撞。
+- `clear:=true` 改发 `REMOVE`；`publish:=false` 只算不发（干跑看数值）。
 
 ## 夹爪现在还发不出去（A2）
 
@@ -61,6 +82,8 @@ ros2 launch dummy_vc_grasp pick_place_demo.launch.py auto_start:=true
 |---|---|---|
 | `execute` | `false` | true 才真的动；默认只规划（夹爪 A2 还挡着） |
 | `auto_start` | `false` | true 则一启动就开始等目标 |
+| `scene` | `true` | 是否顺带起 `scene_node`（地面/地台碰撞体） |
+| `table_z` | `-0.0405` | 工作面高度，传给 `scene_node` |
 | `vision` | `true` | 视觉那半已经在跑就传 `false` |
 | `camera` | `true` | 传给视觉 launch：是否顺带起相机 |
 | `place_x` / `place_y` | `0.0` / `0.10` | 放置点（base_link 下，米） |
@@ -74,6 +97,9 @@ ros2 run dummy_vc_perception vision_node --ros-args \
   -p image_topic:=/camera/color/image_raw \
   -p camera_info_topic:=/camera/color/camera_info
 
+ros2 run dummy_vc_grasp scene_node --ros-args \
+  --params-file $(ros2 pkg prefix dummy_vc_grasp)/share/dummy_vc_grasp/config/pick_place.yaml
+
 ros2 run dummy_vc_grasp pick_place_node --ros-args \
   --params-file $(ros2 pkg prefix dummy_vc_grasp)/share/dummy_vc_grasp/config/pick_place.yaml \
   -p auto_start:=true
@@ -81,13 +107,16 @@ ros2 run dummy_vc_grasp pick_place_node --ros-args \
 
 **判据**（按顺序）：
 
-1. 日志出现 `抓到目标：目标 (x, y, z) m，抓取点上方 80 mm 起手，开口 26.0 mm...`
-2. 日志出现 `发给 MoveIt：... m，只规划`，随后 `MoveIt 完成（error_code=1）`
+1. `scene_node` 日志里有 `碰撞体 ground ...` 与 `碰撞体 base_platform ...`（各带尺寸与中心）。
+2. 日志出现 `抓到目标：目标 (x, y, z) m，抓取点上方 80 mm 起手，开口 26.0 mm...`
+3. 日志出现 `发给 MoveIt：... m，只规划`，随后 `MoveIt 完成（move_pre_grasp，error_code=1）`
    —— `error_code=1` 是 `SUCCESS`；规划成功说明路点在可达且无碰撞的位置。
-3. 想让它真的动：加 `-p execute:=true`。这时先确认 `ee_link`（`gripper_tcp`）
+4. 日志出现 `竖直下降算出来了：直线覆盖 100%，N 个路点`，随后 `只规划：竖直下降的轨迹已算出（未下发）`
+   —— 这条证明下降是直的；若看到 `只算出 63%…退回关节空间`，说明这一趟的下降可能不直。
+5. 想让它真的动：加 `execute:=true`。这时先确认 `ee_link`（`gripper_tcp`）
    在 xacro 里是可用的 —— 它的偏移 `tcp_offset_y = 0.015` 是尺量的，实物几何
    与 URDF 手指不同（docs/04 A1），碰撞体还是原作者的模型。
-4. 走到合爪时会看到 `夹爪拒绝下发：...未量...`，任务停在 FAULT —— **这是对的**，
+6. 走到合爪时会看到 `夹爪拒绝下发：...未量...`，任务停在 FAULT —— **这是对的**，
    直到阶段 0.5 量完。
 
 ## 已知的坑

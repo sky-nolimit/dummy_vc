@@ -82,17 +82,17 @@ def load_modules():
         if path not in sys.path:
             sys.path.insert(0, path)
     try:
-        from dummy_vc_grasp import planner, task
+        from dummy_vc_grasp import planner, scene_objects, task
         from dummy_vc_perception import geometry, gripper
     except ImportError as exc:
         fail(f'import 失败：{exc}（这两层只依赖 numpy）')
-        return None, None, None, None
-    return geometry, gripper, planner, task
+        return None, None, None, None, None
+    return geometry, gripper, planner, scene_objects, task
 
 
 def check_offline_imports():
     print('\n0. 纯层不许 import ROS / OpenCV')
-    for name in ('planner.py', 'task.py'):
+    for name in ('planner.py', 'scene_objects.py', 'task.py'):
         path = os.path.join(GRASP, 'dummy_vc_grasp', name)
         try:
             with open(path, encoding='utf-8') as fh:
@@ -336,7 +336,7 @@ def check_task(task, gripper):
         ok(f'{len(task.State)} 个状态都能被 ABORT 打断')
 
 
-def check_node_api(geometry, gripper, planner, task):
+def check_node_api(geometry, gripper, planner, scene, task):
     """pick_place_node 不能离线跑，但至少盯着它别把接口名写错。
 
     写错属性名是这类代码最常见的翻车方式：离线看着挺好，到 VM 上一 import 就炸，
@@ -355,7 +355,7 @@ def check_node_api(geometry, gripper, planner, task):
         fail(f'解析 pick_place_node.py 失败：{exc}')
         return
     modules = {'g': geometry, 'gr': gripper, 'grasp_planner': planner,
-               'task_mod': task}
+               'scene': scene, 'task_mod': task}
     referenced = set()
     unknown = []
     for node in ast.walk(tree):
@@ -374,11 +374,12 @@ def check_node_api(geometry, gripper, planner, task):
         ok(f'引用的 {len(referenced)} 个接口都在：{sorted(referenced)}')
     if not referenced:
         fail('一个规划/状态机接口都没引用？节点大概没在干正事')
-    # 三个"必须留在代码里"的安全点：光写在文档里，下一个人会忘。
+    # 四个"必须留在代码里"的安全点：光写在文档里，下一个人会忘。
     for needle, why in (
             ('command_for_width', '夹爪必须先问模型要角度，不能自己算'),
             ('plan_only', 'plan_only 必须跟着 execute 参数走'),
             ('execute', '默认不执行这件事必须写在代码里，不能只写在文档里'),
+            ('GetCartesianPath', '下降必须是笛卡尔直线，退回关节空间只能作为兜底'),
     ):
         if needle in text:
             ok(f'代码里提到 {needle}（{why}）')
@@ -386,15 +387,59 @@ def check_node_api(geometry, gripper, planner, task):
             fail(f'代码里找不到 {needle}（{why}）')
 
 
+def check_scene(scene, geometry):
+    """碰撞体数值：场景里最容易被当成"随便填个大盒子"糊过去的一层。"""
+    print('\n9. 碰撞体（地面 / 地台）')
+    table_z = geometry.project_scene_measurements().table_z.value
+    close('scene_objects 的地面高度与 perception 的实测值一致',
+          scene.DEFAULT_TABLE_Z, table_z, 1e-12)
+
+    boxes, notes = scene.workspace_boxes()
+    by_name = {box.name: box for box in boxes}
+    if 'ground' not in by_name:
+        fail('workspace_boxes() 里没有 ground')
+    else:
+        ground = by_name['ground']
+        close('地面盒子的顶面正好落在 table_z 上', ground.top_z, table_z, 1e-12)
+        if ground.bottom_z >= ground.top_z:
+            fail('地面盒子厚度不为正，规划器会看不见它')
+        else:
+            ok('地面盒子有厚度（{:.0f} mm）'.format(
+                (ground.top_z - ground.bottom_z) * 1000.0))
+    if 'base_platform' not in by_name:
+        note('没有 base_platform —— 只在地台高度为 0 时才允许缺')
+    else:
+        platform = by_name['base_platform']
+        if platform.top_z > scene.DEFAULT_BASE_BOTTOM_Z_M:
+            fail('地台顶面 {:.4f} 高过了 base_link 的底面 {:.4f}'.format(
+                platform.top_z, scene.DEFAULT_BASE_BOTTOM_Z_M))
+        else:
+            ok('地台顶面 {:.4f} 在 base_link 底面之下，不会和底座面接触'.format(
+                platform.top_z))
+        close('地台顶面离 base_link 底面正好留了 1 mm',
+              scene.DEFAULT_BASE_BOTTOM_Z_M - platform.top_z, 0.001, 1e-9)
+    for msg in notes:
+        note(msg)
+
+    if scene.base_platform_box(base_bottom_z=-0.5, table_z=-0.5) is not None:
+        fail('地台与工作面同高时还返回了一个盒子（会是一个零厚度的碰撞体）')
+    else:
+        ok('地台与工作面同高时不产生碰撞体')
+    if expect_error('地面尺寸非正时抛 ValueError', ValueError,
+                    scene.table_box, size_x=0.0):
+        pass
+
+
 def main():
-    geometry, gripper, planner, task = load_modules()
+    geometry, gripper, planner, scene, task = load_modules()
     check_offline_imports()
     if planner is None:
         print('\nFAILED（连模块都 import 不了）')
         return 1
     check_planner(gripper, planner)
     check_task(task, gripper)
-    check_node_api(geometry, gripper, planner, task)
+    check_node_api(geometry, gripper, planner, scene, task)
+    check_scene(scene, geometry)
 
     print()
     if FAILURES:

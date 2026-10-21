@@ -1,13 +1,17 @@
 """一条命令起"看 + 抓"：视觉（含相机、TF）+ 抓取规划/状态机。
 
-它只是把两件事拼起来：
+它只是把三件事拼起来：
 
   1. `dummy_vc_perception/vision_demo.launch.py`（URDF/TF、相机、vision_node）
-  2. `pick_place_node`（抓取规划 + 任务状态机）
+  2. `scene_node`（把地面/地台发进 planning scene）
+  3. `pick_place_node`（抓取规划 + 任务状态机）
 
 **不含机械臂驱动、也不含 MoveIt** —— 按 docs/08 的做法，它们各开一个终端，
 这样每层的日志和退出都各归各的。MoveIt 没起来时 `pick_place_node` 会报
 "MoveIt 动作服务器没连上"（这是它该报的错，不是这个 launch 的问题）。
+
+`scene_node` 不能少：地面和地台不在 URDF 里，没有它们，规划器认为脚下什么
+都没有，最后那段"往下抓"可以规划出一条从地面里穿过去的路径。
 
 `execute:=true` 才会真的下发执行；默认只规划（`plan_only`），因为夹爪还挡着
 （A2：`hand.*` 调用会让整机失去响应），能验到 APPROACH 为止。
@@ -63,7 +67,28 @@ def generate_launch_description():
             'place_x', default_value='0.0', description='放置点 x（base_link 下，米）'),
         DeclareLaunchArgument(
             'place_y', default_value='0.10', description='放置点 y（base_link 下，米）'),
+        DeclareLaunchArgument(
+            'scene', default_value='true',
+            description='是否起 scene_node（把地面/地台发进 planning scene）'),
+        DeclareLaunchArgument(
+            'table_z', default_value='-0.0405',
+            description='工作面的高度（base_link 下的 z，米）'),
     ]
+
+    scene = Node(
+        package='dummy_vc_grasp',
+        executable='scene_node',
+        name='scene_objects',
+        output='screen',
+        parameters=[
+            LaunchConfiguration('params_file'),
+            {
+                'table_z': ParameterValue(LaunchConfiguration('table_z'),
+                                          value_type=float),
+            },
+        ],
+        condition=IfCondition(LaunchConfiguration('scene')),
+    )
 
     pick_place = Node(
         package='dummy_vc_grasp',
@@ -85,4 +110,4 @@ def generate_launch_description():
         ],
     )
 
-    return LaunchDescription(args + [vision, pick_place])
+    return LaunchDescription(args + [vision, scene, pick_place])

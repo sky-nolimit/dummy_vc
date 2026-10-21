@@ -1,12 +1,21 @@
 """阶段 5 的 ROS 接线：订阅检测 -> 生成抓取路点 -> 让 MoveIt 走完 -> 夹爪。
 
-这一层只做四件事，其余全在 `planner.py` / `task.py` 里（那两层能离线自测）：
+这一层只做几件事，其余全在 `planner.py` / `task.py` 里（那两层能离线自测）：
 
   1. 订阅 `/detected_objects`，把 `Detection3D` 转成 `SceneDetection`
   2. 调 MoveIt 的 `MoveGroup` 动作（plan+execute 一个 goal 搞定，碰撞检查与
      路径插值都还是 MoveIt 在管，不用自己拼轨迹）
   3. 把动作结果翻译成状态机事件，按状态机给的 action 决定下一步
   4. 走到合爪那一步时问 `gripper.FingerOpeningModel` 要角度；没实测就停
+
+两处例外值得单独说：
+
+* **下降（APPROACH）不走关节空间规划**，改用 `GetCartesianPath` 算一条竖直
+  直线。关节空间规划只保证"某条无碰撞的关节轨迹存在"，于是最后 8 cm 可以是
+  斜着下去、甚至从侧面绕 —— 抓取恰恰要求从正上方压下去。算出来不够直
+  （`fraction < cartesian_min_fraction`）就退回关节空间并在日志里说清楚。
+* **碰撞体由 `scene_node.py` 负责**，这个节点只管"往哪走"。地面和地台不在
+  URDF 里，没有它们，规划器会认为脚下什么都没有。
 
 **默认不执行，只规划**（`execute:=false`）。理由：夹爪 A2 没解决、相机与机械臂
 还不能同时在线，这条链第一次上机时最该先看的是"它打算往哪儿走"，而不是让一台
@@ -17,11 +26,14 @@ import time
 
 import rclpy
 from geometry_msgs.msg import Pose
-from moveit_msgs.action import MoveGroup
+from moveit_msgs.action import ExecuteTrajectory, MoveGroup
 from moveit_msgs.msg import (BoundingVolume, Constraints, MoveItErrorCodes,
-                             OrientationConstraint, PositionConstraint)
+                             OrientationConstraint, PositionConstraint,
+                             RobotState)
+from moveit_msgs.srv import GetCartesianPath
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from sensor_msgs.msg import JointState
 from shape_msgs.msg import SolidPrimitive
 from vision_msgs.msg import Detection3DArray
 
@@ -31,6 +43,7 @@ from dummy_vc_perception import geometry as g
 from dummy_vc_perception import gripper as gr
 
 from dummy_vc_grasp import planner as grasp_planner
+from dummy_vc_grasp import scene_objects as scene
 from dummy_vc_grasp import task as task_mod
 
 
@@ -75,7 +88,8 @@ class PickPlaceNode(Node):
         self.declare_parameter('lift_m', 0.10)
         self.declare_parameter('place_x', 0.0)
         self.declare_parameter('place_y', 0.10)
-        self.declare_parameter('table_z', -0.0405)
+        # 默认值与 scene_objects / perception 的实测值同源，别在这里写死一个数
+        self.declare_parameter('table_z', scene.DEFAULT_TABLE_Z)
         self.declare_parameter('max_reach_m', 0.45)
         self.declare_parameter('min_reach_m', 0.15)
 
@@ -85,6 +99,16 @@ class PickPlaceNode(Node):
         self.declare_parameter('max_retries', 2)
         #: 调试用：节点一起来就自动开始一次抓取（默认等外部 START）
         self.declare_parameter('auto_start', False)
+
+        # -- 下降那一段（竖直直线） -----------------------------------------
+        #: 下降走笛卡尔直线；关掉就退回关节空间规划（最后几厘米可能是斜的）
+        self.declare_parameter('approach_cartesian', True)
+        self.declare_parameter('cartesian_service', '/compute_cartesian_path')
+        self.declare_parameter('execute_trajectory_action', '/execute_trajectory')
+        #: 直线插值的步长；越小越"直"，但也越容易因为局部奇异算不出来
+        self.declare_parameter('cartesian_max_step', 0.005)
+        #: 算出来的直线覆盖率低于这个值就退回关节空间规划
+        self.declare_parameter('cartesian_min_fraction', 0.95)
 
         self.base_frame = self.get_parameter('base_frame').value
         self.ee_link = self.get_parameter('ee_link').value
@@ -107,9 +131,19 @@ class PickPlaceNode(Node):
         self.action_busy = False
         self.action_started = 0.0
         self.goal_handle = None
+        self.current_label = ''
+        #: 只规划模式下，"到起手位"这条规划出来的轨迹。下降要从它的**末点**
+        #: 起算 —— 只规划时机械臂并没有真的动过去，用"当前状态"算出来的直线
+        #: 是从它真正站着的地方出发的，那不是我们要验的东西。
+        self.planned_pre_grasp = None
 
         self.action_client = ActionClient(
             self, MoveGroup, self.get_parameter('move_action').value)
+        self.cartesian_client = self.create_client(
+            GetCartesianPath, self.get_parameter('cartesian_service').value)
+        self.execute_client = ActionClient(
+            self, ExecuteTrajectory,
+            self.get_parameter('execute_trajectory_action').value)
         self.create_subscription(
             Detection3DArray,
             self.get_parameter('detections_topic').value,
@@ -125,6 +159,11 @@ class PickPlaceNode(Node):
                 '已实测' if self.gripper_model.verified
                 else '模型含占位值，走到合爪会停下（{}）'.format(
                     self.gripper_model.describe())))
+        self.get_logger().info(
+            '下降{}'.format(
+                '走笛卡尔竖直直线（算不出来就退回关节空间）'
+                if bool(self.get_parameter('approach_cartesian').value)
+                else '退回关节空间规划（approach_cartesian=false）'))
         if bool(self.get_parameter('auto_start').value):
             self._decide(task_mod.Event.START)
 
@@ -144,22 +183,22 @@ class PickPlaceNode(Node):
         if action == 'wait_target':
             self.plan = None
             self.last_detection = None
+            self.planned_pre_grasp = None
         elif action == 'move_pre_grasp':
             self._send_goal(self.plan.waypoints.pre_grasp,
-                            self.plan.waypoints.quaternion)
+                            self.plan.waypoints.quaternion, 'move_pre_grasp')
         elif action == 'descend':
-            self._send_goal(self.plan.waypoints.grasp,
-                            self.plan.waypoints.quaternion)
+            self._descend()
         elif action == 'lift':
             self._send_goal(self.plan.waypoints.lift,
-                            self.plan.waypoints.quaternion)
+                            self.plan.waypoints.quaternion, 'lift')
         elif action == 'move_place':
             self._send_goal(self.plan.waypoints.place,
-                            self.plan.waypoints.quaternion)
+                            self.plan.waypoints.quaternion, 'move_place')
         elif action == 'retreat':
             # 退回起手位：拿放置点上方当"退开"，避免直接扫过桌面。
             self._send_goal(self.plan.waypoints.pre_grasp,
-                            self.plan.waypoints.quaternion)
+                            self.plan.waypoints.quaternion, 'retreat')
         elif action == 'close_gripper':
             self._command_gripper(self.plan.open_width_m)
         elif action == 'open_gripper':
@@ -227,7 +266,7 @@ class PickPlaceNode(Node):
     # ------------------------------------------------------------------
     # MoveIt
     # ------------------------------------------------------------------
-    def _send_goal(self, position, quaternion):
+    def _send_goal(self, position, quaternion, label=''):
         if not self.action_client.wait_for_server(timeout_sec=2.0):
             self._decide_failure('MoveIt 的 {} 动作服务端不在（move_group 起了吗？）'.format(
                 self.get_parameter('move_action').value))
@@ -249,6 +288,7 @@ class PickPlaceNode(Node):
 
         self.action_busy = True
         self.action_started = time.time()
+        self.current_label = label
         self.get_logger().info('发给 MoveIt：({:.3f}, {:.3f}, {:.3f}) m，{}'.format(
             position[0], position[1], position[2],
             '执行' if self.execute else '只规划'))
@@ -270,16 +310,179 @@ class PickPlaceNode(Node):
     def _on_goal_result(self, future):
         self.action_busy = False
         self.goal_handle = None
+        label = self.current_label
         try:
             result = future.result().result
         except Exception as exc:                # noqa: BLE001
             self._decide_failure('取结果失败：{}'.format(exc))
             return
         code = result.error_code.val
+        if code != MoveItErrorCodes.SUCCESS:
+            self._decide_failure('MoveIt 失败{}：error_code={}'.format(
+                '（{}）'.format(label) if label else '', code))
+            return
+        # 只规划模式下，把"到起手位"那条轨迹的末点记下来：下降要从这里起算。
+        if label == 'move_pre_grasp' and not self.execute:
+            self._remember_planned_pre_grasp(result)
+        self._decide_success('MoveIt 完成{}（error_code={}）'.format(
+            '（{}）'.format(label) if label else '', code))
+
+    def _remember_planned_pre_grasp(self, result):
+        points = result.planned_trajectory.joint_trajectory.points
+        if not points:
+            self.planned_pre_grasp = None
+            self.get_logger().warn(
+                '只规划模式下 MoveIt 没回轨迹（planned_trajectory 是空的），'
+                '下降会从"当前状态"起算 —— 那个状态没动过，算出来的不是真机上的直线')
+            return
+        self.planned_pre_grasp = result.planned_trajectory
+        self.get_logger().info(
+            '记下起手位轨迹：{} 个点，末点取作为下降的起点'.format(len(points)))
+
+    # ------------------------------------------------------------------
+    # 下降：笛卡尔直线
+    # ------------------------------------------------------------------
+    def _descend(self):
+        if not bool(self.get_parameter('approach_cartesian').value):
+            self._send_goal(self.plan.waypoints.grasp,
+                            self.plan.waypoints.quaternion, 'descend')
+            return
+        service = self.get_parameter('cartesian_service').value
+        if not self.cartesian_client.wait_for_service(timeout_sec=2.0):
+            self.get_logger().warn(
+                '没有 {} 服务，这一趟退回关节空间规划（下降可能不是竖直的）'.format(
+                    service))
+            self._send_goal(self.plan.waypoints.grasp,
+                            self.plan.waypoints.quaternion, 'descend')
+            return
+
+        request = GetCartesianPath.Request()
+        request.header.frame_id = self.base_frame
+        request.header.stamp = self.get_clock().now().to_msg()
+        request.group_name = self.group_name
+        request.link_name = self.ee_link
+        request.max_step = float(self.get_parameter('cartesian_max_step').value)
+        # 0.0 = 不做跳变检查；我们要的是"能不能一直连下去"，不是"跳得远不远"
+        request.jump_threshold = 0.0
+        request.avoid_collisions = True
+        request.max_velocity_scaling_factor = float(
+            self.get_parameter('max_velocity_scaling').value)
+        request.max_acceleration_scaling_factor = float(
+            self.get_parameter('max_acceleration_scaling').value)
+
+        pose = Pose()
+        position = self.plan.waypoints.grasp
+        pose.position.x = float(position[0])
+        pose.position.y = float(position[1])
+        pose.position.z = float(position[2])
+        quaternion = self.plan.waypoints.quaternion
+        pose.orientation.x = float(quaternion[0])
+        pose.orientation.y = float(quaternion[1])
+        pose.orientation.z = float(quaternion[2])
+        pose.orientation.w = float(quaternion[3])
+        # 只要一个路点：起点是"现在"（或规划出来的起手位），终点是抓取点，
+        # 两点之间同姿态 —— 插出来的就是一条竖直直线。
+        request.waypoints = [pose]
+        request.start_state = self._descend_start_state()
+
+        self.action_busy = True
+        self.action_started = time.time()
+        self.current_label = 'descend'
+        self.get_logger().info(
+            '算竖直下降：从起手位 ({:.3f}, {:.3f}, {:.3f}) m 直下到 ({:.3f}, {:.3f}, {:.3f}) m'.format(
+                self.plan.waypoints.pre_grasp[0],
+                self.plan.waypoints.pre_grasp[1],
+                self.plan.waypoints.pre_grasp[2],
+                position[0], position[1], position[2]))
+        self.cartesian_client.call_async(request).add_done_callback(
+            self._on_cartesian)
+
+    def _descend_start_state(self):
+        """下降的起点：执行时用真实当前状态，只规划时用规划出来的起手位。"""
+        state = RobotState()
+        planned = self.planned_pre_grasp
+        if not self.execute and planned is not None:
+            points = planned.joint_trajectory.points
+            if points:
+                joints = JointState()
+                joints.name = list(planned.joint_trajectory.joint_names)
+                joints.position = [float(v) for v in points[-1].positions]
+                state.joint_state = joints
+                state.is_diff = False
+                return state
+        # 机械臂真的站在起手位上（execute）或者没有规划可参照：用当前状态
+        state.is_diff = True
+        return state
+
+    def _on_cartesian(self, future):
+        try:
+            response = future.result()
+        except Exception as exc:                # noqa: BLE001
+            self.action_busy = False
+            self.get_logger().warn('笛卡尔下降算不出来：{}'.format(exc))
+            self._send_goal(self.plan.waypoints.grasp,
+                            self.plan.waypoints.quaternion, 'descend')
+            return
+        fraction = float(response.fraction)
+        points = len(response.solution.joint_trajectory.points)
+        minimum = float(self.get_parameter('cartesian_min_fraction').value)
+        if fraction < minimum or points == 0:
+            self.action_busy = False
+            self.get_logger().warn(
+                '竖直下降只算出 {:.0%}（{} 个路点），退回关节空间规划 —— '
+                '这一趟的下降可能不是直的，日志里会说明'.format(fraction, points))
+            self._send_goal(self.plan.waypoints.grasp,
+                            self.plan.waypoints.quaternion, 'descend')
+            return
+        self.get_logger().info('竖直下降算出来了：直线覆盖 {:.0%}，{} 个路点'.format(
+            fraction, points))
+        if not self.execute:
+            self.action_busy = False
+            self._decide_success('只规划：竖直下降的轨迹已算出（未下发）')
+            return
+        self._send_trajectory(response.solution)
+
+    def _send_trajectory(self, trajectory):
+        if not self.execute_client.wait_for_server(timeout_sec=2.0):
+            self.action_busy = False
+            self._decide_failure(
+                'MoveIt 的 {} 动作服务端不在，算出来的下降轨迹发不出去'.format(
+                    self.get_parameter('execute_trajectory_action').value))
+            return
+        goal = ExecuteTrajectory.Goal()
+        goal.trajectory = trajectory
+        self.action_busy = True
+        self.action_started = time.time()
+        self.get_logger().info('下发竖直下降轨迹')
+        self.execute_client.send_goal_async(goal).add_done_callback(
+            self._on_execute_response)
+
+    def _on_execute_response(self, future):
+        try:
+            handle = future.result()
+        except Exception as exc:                # noqa: BLE001
+            self.action_busy = False
+            self._decide_failure('发下降轨迹失败：{}'.format(exc))
+            return
+        if not handle.accepted:
+            self.action_busy = False
+            self._decide_failure('MoveIt 拒了下降轨迹')
+            return
+        self.goal_handle = handle
+        handle.get_result_async().add_done_callback(self._on_execute_result)
+
+    def _on_execute_result(self, future):
+        self.action_busy = False
+        self.goal_handle = None
+        try:
+            code = future.result().result.error_code.val
+        except Exception as exc:                # noqa: BLE001
+            self._decide_failure('取下降结果失败：{}'.format(exc))
+            return
         if code == MoveItErrorCodes.SUCCESS:
-            self._decide_success('MoveIt 完成（error_code={}）'.format(code))
+            self._decide_success('MoveIt 完成（descend，error_code={}）'.format(code))
         else:
-            self._decide_failure('MoveIt 失败：error_code={}'.format(code))
+            self._decide_failure('下降执行失败：error_code={}'.format(code))
 
     # ------------------------------------------------------------------
     # 节拍
