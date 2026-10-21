@@ -64,6 +64,9 @@ def generate_launch_description():
             'auto_start', default_value='false',
             description='true 则节点一启动就开始等目标（否则等 /pick_place/start）'),
         DeclareLaunchArgument(
+            'observe_timeout_s', default_value='60.0',
+            description='等 /detected_objects 的上限（相机要十几秒才起来，别设太小）'),
+        DeclareLaunchArgument(
             'place_x', default_value='0.0', description='放置点 x（base_link 下，米）'),
         DeclareLaunchArgument(
             'place_y', default_value='0.10', description='放置点 y（base_link 下，米）'),
@@ -106,6 +109,8 @@ def generate_launch_description():
                                           value_type=float),
                 'place_y': ParameterValue(LaunchConfiguration('place_y'),
                                           value_type=float),
+                'observe_timeout_s': ParameterValue(
+                    LaunchConfiguration('observe_timeout_s'), value_type=float),
             },
         ],
     )

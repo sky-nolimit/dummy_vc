@@ -33,7 +33,9 @@ pick_place_node:
     min_reach_m: 0.15
 
     # ---- 节奏 ----
-    observe_timeout_s: 15.0              # 等 /detected_objects 等多久算超时
+    # 等 /detected_objects 等多久算超时。别设太小：Orbbec 的合成节点容器起来
+    # 要十几秒，15 秒会把"相机还没起来"误报成"桌上没方块"（实测踩过）。
+    observe_timeout_s: 60.0
     action_timeout_s: 40.0               # 单个 MoveIt 目标最多等多久
     max_retries: 2                       # 可重试的步骤失败后最多再来几次
     auto_start: false                    # true = 节点一起来就自动开始一次抓取

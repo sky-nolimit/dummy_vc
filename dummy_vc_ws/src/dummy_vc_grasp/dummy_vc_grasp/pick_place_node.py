@@ -94,7 +94,9 @@ class PickPlaceNode(Node):
         self.declare_parameter('min_reach_m', 0.15)
 
         # -- 节奏 -----------------------------------------------------------
-        self.declare_parameter('observe_timeout_s', 15.0)
+        # 等目标的上限。别设太小：相机（合成节点容器）起来要十几秒，
+        # 超时太短会把"相机还没起来"报成"桌上没方块"。
+        self.declare_parameter('observe_timeout_s', 60.0)
         self.declare_parameter('action_timeout_s', 40.0)
         self.declare_parameter('max_retries', 2)
         #: 调试用：节点一起来就自动开始一次抓取（默认等外部 START）
@@ -237,6 +239,7 @@ class PickPlaceNode(Node):
     def _on_detections(self, msg):
         if self.machine.state is not task_mod.State.OBSERVE:
             return
+        self.observe_frames = getattr(self, 'observe_frames', 0) + 1
         dets = []
         for det in msg.detections:
             pos = det.bbox.center.position
@@ -493,9 +496,23 @@ class PickPlaceNode(Node):
             started = getattr(self, '_observe_started', None)
             if started is None:
                 self._observe_started = time.time()
+                self.observe_frames = 0
             elif (time.time() - self._observe_started
                   > float(self.get_parameter('observe_timeout_s').value)):
                 self._observe_started = None
+                if self.observe_frames == 0:
+                    # 一条 /detected_objects 都没收到：这跟"桌上没方块"是两回事。
+                    self.get_logger().error(
+                        '等目标超时：{} 秒里一条 {} 都没收到 —— vision_node 大概没在发。'
+                        '先看它的日志（有没有 listening、有没有"连续 N 帧没找到合格的方块"）'
+                        .format(self.get_parameter('observe_timeout_s').value,
+                                self.get_parameter('detections_topic').value))
+                else:
+                    self.get_logger().error(
+                        '等目标超时：收到 {} 条 {}，但没有一条能抓 —— 看 vision_node 里'
+                        '"被丢掉的 blob"给出的原因'.format(
+                            self.observe_frames,
+                            self.get_parameter('detections_topic').value))
                 self._decide(task_mod.Event.TIMEOUT)
             return
         self._observe_started = None
