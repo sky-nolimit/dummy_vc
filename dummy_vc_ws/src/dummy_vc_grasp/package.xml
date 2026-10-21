@@ -21,7 +21,9 @@
   <depend>shape_msgs</depend>
   <depend>vision_msgs</depend>
   <depend>moveit_msgs</depend>
-  <depend>dummy_vc_perception</depend>
+  <!-- dummy_vc_perception 只在运行时要（import 它的几何/夹爪层），
+       所以下面用 exec_depend，别写成 <depend>：把工作区内部的包声明成
+       构建依赖会让 colcon / rosdep 打一行"解析不到这个 rosdep key"的警告。 -->
 
   <!-- launch/pick_place_demo.launch.py：把视觉那一半（vision_demo.launch.py）
        和 pick_place_node 拼起来。 -->
