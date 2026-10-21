@@ -35,6 +35,7 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from shape_msgs.msg import SolidPrimitive
+from std_msgs.msg import Empty
 from vision_msgs.msg import Detection3DArray
 
 import numpy as np
@@ -101,6 +102,8 @@ class PickPlaceNode(Node):
         self.declare_parameter('max_retries', 2)
         #: 调试用：节点一起来就自动开始一次抓取（默认等外部 START）
         self.declare_parameter('auto_start', False)
+        #: 手动开始一次抓取的话题（发任意一条 std_msgs/Empty 即可）
+        self.declare_parameter('start_topic', '/pick_place/start')
 
         # -- 下降那一段（竖直直线） -----------------------------------------
         #: 下降走笛卡尔直线；关掉就退回关节空间规划（最后几厘米可能是斜的）
@@ -150,6 +153,10 @@ class PickPlaceNode(Node):
             Detection3DArray,
             self.get_parameter('detections_topic').value,
             self._on_detections, 10)
+        # 手动触发：auto_start 会把"相机还没起来"和"桌上没方块"混在一起，
+        # 所以默认留一个由人/上层决定何时开始的入口。
+        self.create_subscription(
+            Empty, self.get_parameter('start_topic').value, self._on_start, 10)
         # 100 ms 的节拍：管超时、也管"上一步完成了该干什么"。
         self.create_timer(0.1, self._tick)
 
@@ -232,6 +239,11 @@ class PickPlaceNode(Node):
     def _decide_failure(self, note):
         self.get_logger().warn(note)
         self._decide(task_mod.Event.FAILED)
+
+    def _on_start(self, _msg):
+        self.get_logger().info('收到开始信号：{}'.format(
+            self.get_parameter('start_topic').value))
+        self._decide(task_mod.Event.START)
 
     # ------------------------------------------------------------------
     # 视觉

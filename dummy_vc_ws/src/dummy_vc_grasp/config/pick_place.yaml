@@ -39,6 +39,7 @@ pick_place_node:
     action_timeout_s: 40.0               # 单个 MoveIt 目标最多等多久
     max_retries: 2                       # 可重试的步骤失败后最多再来几次
     auto_start: false                    # true = 节点一起来就自动开始一次抓取
+    start_topic: "/pick_place/start"     # 发一条空消息就开始一次（std_msgs/Empty）
 
     # ---- 下降：笛卡尔直线 ----
     # 关节空间规划出来的"下降"可能是斜的（RRTConnect 只管可行、不管形状），

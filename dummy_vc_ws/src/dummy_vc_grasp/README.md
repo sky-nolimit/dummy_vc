@@ -81,7 +81,8 @@ ros2 launch dummy_vc_grasp pick_place_demo.launch.py auto_start:=true
 | 参数 | 默认 | 用途 |
 |---|---|---|
 | `execute` | `false` | true 才真的动；默认只规划（夹爪 A2 还挡着） |
-| `auto_start` | `false` | true 则一启动就开始等目标 |
+| `auto_start` | `false` | true 则一启动就开始等目标；否则等 `/pick_place/start` |
+| `observe_timeout_s` | `60.0` | 等 `/detected_objects` 的上限（相机起来要十几秒，别设太小） |
 | `scene` | `true` | 是否顺带起 `scene_node`（地面/地台碰撞体） |
 | `table_z` | `-0.0405` | 工作面高度，传给 `scene_node` |
 | `vision` | `true` | 视觉那半已经在跑就传 `false` |
