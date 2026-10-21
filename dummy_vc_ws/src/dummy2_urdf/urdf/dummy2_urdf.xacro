@@ -45,6 +45,12 @@
 <xacro:property name="gripper_body_z_m" value="0.050"/>
 <!-- 半行程 = 一指从全闭到全开走多远 -->
 <xacro:property name="gripper_finger_travel_m" value="${gripper_open_gap_m/2}"/>
+<!-- 手掌盒子的背面和 link6 的正面正好在同一个平面上（joint6 的 origin y
+     就是 link6 网格的最大 y = 0.1185），FCL 把"面接触"也算碰撞，于是起始
+     状态永远被判成自碰撞：Found a contact between 'link6_v3_1' and
+     'dummy_hand_v1_1' / Start state appears to be in collision。往 +y 挪
+     1 mm 让两个面分开；手指、TCP、抓取点都不受影响（手指在更外面）。 -->
+<xacro:property name="gripper_seam_gap_m" value="0.001"/>
 <!-- link7 端面 -> 两指夹持中心（gripper_tcp 就放在这里） -->
 <xacro:property name="tcp_offset_y" value="${gripper_wrist_to_tip_m - gripper_tip_to_centre_m}"/>
 
@@ -220,16 +226,17 @@
   </inertial>
   <!-- 手掌/舵机本体：用实测尺寸的盒体，不用原作者网格（见文件上方 A1 注释）。
        本体从腕部往指尖方向占 80 mm，所以盒心在 hand 坐标系
-       y = 80/2 - 52.312 = -12.3 mm。 -->
+       y = 80/2 - 52.312 + 1 = -11.3 mm —— 那个 +1 mm 是 gripper_seam_gap_m，
+       把背面和 link6 的正面（同一平面）分开，否则面接触被判成自碰撞。 -->
   <visual>
-    <origin xyz="0 ${gripper_body_y_m/2 - 0.052312} 0" rpy="0 0 0"/>
+    <origin xyz="0 ${gripper_body_y_m/2 - 0.052312 + gripper_seam_gap_m} 0" rpy="0 0 0"/>
     <geometry>
       <box size="${gripper_body_x_m} ${gripper_body_y_m} ${gripper_body_z_m}"/>
     </geometry>
     <material name="silver"/>
   </visual>
   <collision>
-    <origin xyz="0 ${gripper_body_y_m/2 - 0.052312} 0" rpy="0 0 0"/>
+    <origin xyz="0 ${gripper_body_y_m/2 - 0.052312 + gripper_seam_gap_m} 0" rpy="0 0 0"/>
     <geometry>
       <box size="${gripper_body_x_m} ${gripper_body_y_m} ${gripper_body_z_m}"/>
     </geometry>
