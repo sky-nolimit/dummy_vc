@@ -72,16 +72,27 @@ class GraspPlan:
 
 
 def _object_edge(detection) -> float:
-    """方块边长取两条拟合边的均值。
+    """方块边长取拟合矩形的**短边**，不取均值。
 
-    短边判据已经保证了"短边贴着边长或对角线"，但两条边本身是掩膜外接矩形的
-    长短边，长边在斜视下会被拉长。取均值是个折中：它偏向长边一点，而夹爪开口
-    本来就要留 2 mm 余量，宁可大一点也不要夹不进去。
+    为什么长边一个字节都不能信：`detection.detection_from_blob` 是把掩膜的
+    像素投到 z = table_z 的平面上再拟合矩形的，而方块有 24 mm 高 —— 顶面沿
+    视线方向投到地面会被拉出一条"影子"。2026-10-22 真机实测（24 mm 方块，
+    水平 0.302 m，相机离地 0.16 m）：拟合出 **86.2 x 29.5 mm**，长边是方块
+    本身的 3.6 倍；按几何算 (R+e/2)·H/(H−e) − (R−e/2) = 79 mm，再加掩膜肥边
+    约 6 mm，正好 86 mm。短边 29.5 mm = 24 mm 边长 + 肥边，才是挨着真实尺寸
+    的那条。
+
+    之前取两条边的均值，(86.2 + 29.5)/2 = 57.9 mm ⇒ 开口 59.9 mm ⇒ 直接
+    "夹爪最大只有 55 mm" 被拒，方块明明在视野正中却抓不了。
+
+    短边本身落在 [e, e·√2] 之间（见 detection.short_edge_error），直接当边长
+    用是偏大的上界：最坏情况开口 = 24·√2 + 2 = 36 mm，仍小于 55 mm 的最大
+    开口，也仍能夹住 24 mm 的方块（手指从 36 mm 收到 24 mm）。
     """
     a, b = (float(v) for v in detection.extent_m)
     if not (a > 0.0 and b > 0.0):
         raise NotGraspable('拟合边长不合理：{:.1f} x {:.1f} mm'.format(a * 1e3, b * 1e3))
-    return 0.5 * (a + b)
+    return min(a, b)
 
 
 def plan_grasp(detection, model: gr.FingerOpeningModel,

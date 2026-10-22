@@ -400,6 +400,11 @@ class VisionNode(Node):
             if depth_frame is not None:
                 self._log_depth_probe(labels, depth_frame, T)
             self._log_blobs(blobs)
+            if self.hits == 1 and rejects:
+                # 首次命中时也把丢掉的 blob 报出来。只打"取最大的那个"没法判断
+                # 认的是不是方块：2026-10-22 现场视野里另有一块 18192 像素的
+                # 绿东西被尺寸判据拒了，而命中路径原来一个字都不说。
+                self._log_rejects(rejects)
 
         array = self._to_message(detections, msg.header)
         self.pub.publish(array)

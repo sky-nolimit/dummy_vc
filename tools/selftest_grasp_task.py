@@ -155,6 +155,15 @@ def check_planner(gripper, planner):
     close('起手位在抓取点上方 80 mm', wp.pre_grasp - wp.grasp, [0, 0, 0.08], 1e-12)
     close('抬升位在抓取点上方 100 mm', wp.lift - wp.grasp, [0, 0, 0.10], 1e-12)
     close('开口 = 边长 + 2 mm', plan.open_width_m, 0.024 + 0.002, 1e-12)
+    # 2026-10-22 真机实测的形状：长边是方块投到地面的"影子"，被低机位拉长到
+    # 方块的 3.6 倍，只有短边挨着真实尺寸。取均值会算成 57.9 mm、开口 59.9 mm，
+    # 超过 55 mm 的最大开口 —— 方块明明在视野正中却抓不了。
+    shadow = FakeDetection([0.0, 0.302, ground + 0.012],
+                           extent=(0.0862, 0.0295))
+    shadow_plan = planner.plan_grasp(shadow, model)
+    close('短边当边长：开口 = 短边 + 2 mm', shadow_plan.open_width_m,
+          0.0295 + 0.002, 1e-12)
+    ok(f'长边 86.2 mm 不再顶爆开口：{shadow_plan.describe()}')
     if plan.gripper_ready:
         ok('已实测的模型被认成 ready')
     else:
