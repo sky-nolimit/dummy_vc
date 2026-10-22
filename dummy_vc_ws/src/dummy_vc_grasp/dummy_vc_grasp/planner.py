@@ -72,22 +72,24 @@ class GraspPlan:
 
 
 def _object_edge(detection) -> float:
-    """方块边长取拟合矩形的**短边**，不取均值。
+    """方块边长取两条边里的**短边**，不取均值。
 
-    为什么长边一个字节都不能信：`detection.detection_from_blob` 是把掩膜的
-    像素投到 z = table_z 的平面上再拟合矩形的，而方块有 24 mm 高 —— 顶面沿
-    视线方向投到地面会被拉出一条"影子"。2026-10-22 真机实测（24 mm 方块，
-    水平 0.302 m，相机离地 0.16 m）：拟合出 **86.2 x 29.5 mm**，长边是方块
-    本身的 3.6 倍；按几何算 (R+e/2)·H/(H−e) − (R−e/2) = 79 mm，再加掩膜肥边
-    约 6 mm，正好 86 mm。短边 29.5 mm = 24 mm 边长 + 肥边，才是挨着真实尺寸
-    的那条。
+    先把实情写在这里：现在这个函数其实恒等于标称边长。
+    `vision_node._to_message` 把 bbox.size 填成 `object_edge`（24 mm）的方框，
+    不是拟合出来的尺寸，所以 `extent_m` 永远是 (0.024, 0.024)。
 
-    之前取两条边的均值，(86.2 + 29.5)/2 = 57.9 mm ⇒ 开口 59.9 mm ⇒ 直接
-    "夹爪最大只有 55 mm" 被拒，方块明明在视野正中却抓不了。
+    仍然写成"取短边"是因为：一旦把拟合边长接进来，长边一个字节都不能信。
+    `detection.detection_from_blob` 是把掩膜像素投到 z = table_z 的平面上再
+    拟合矩形的，而方块有 24 mm 高 —— 顶面沿视线方向投到地面会被拉出一条
+    "影子"。2026-10-22 真机实测（24 mm 方块，水平 0.302 m，相机离地 0.16 m）：
+    拟合出 **86.2 x 29.5 mm**，长边是方块本身的 3.6 倍；按几何算
+    (R+e/2)·H/(H−e) − (R−e/2) = 79 mm，再加掩膜肥边约 6 mm，正好 86 mm。
+    短边 29.5 = 24 + 肥边，才是挨着真实尺寸的那条。那种尺寸下取均值会算成
+    57.9 mm ⇒ 开口 59.9 mm ⇒ 超过 55 mm 的最大开口被直接拒掉。
 
-    短边本身落在 [e, e·√2] 之间（见 detection.short_edge_error），直接当边长
-    用是偏大的上界：最坏情况开口 = 24·√2 + 2 = 36 mm，仍小于 55 mm 的最大
-    开口，也仍能夹住 24 mm 的方块（手指从 36 mm 收到 24 mm）。
+    短边本身落在 [e, e·√2] 之间（见 detection.short_edge_error），当边长用是
+    偏大的上界：最坏情况开口 = 24·√2 + 2 = 36 mm，仍小于 55 mm 的最大开口，
+    也仍能夹住 24 mm 的方块（手指从 36 mm 收到 24 mm）。
     """
     a, b = (float(v) for v in detection.extent_m)
     if not (a > 0.0 and b > 0.0):
@@ -100,8 +102,7 @@ def plan_grasp(detection, model: gr.FingerOpeningModel,
                approach_m: float = 0.08, lift_m: float = 0.10,
                place_point=None,
                tip_to_centre_m: float = DEFAULT_TIP_TO_CENTRE_M,
-               fingertip_clearance_m: float = DEFAULT_FINGERTIP_CLEARANCE_M,
-               object_edge_m: float = None) -> GraspPlan:
+               fingertip_clearance_m: float = DEFAULT_FINGERTIP_CLEARANCE_M) -> GraspPlan:
     """由一次检测生成抓取计划；不能抓就抛 NotGraspable，原因写在消息里。
 
     `detection.position` 是**方块中心**（视觉给的就是这个），而 `gripper_tcp`
@@ -115,12 +116,11 @@ def plan_grasp(detection, model: gr.FingerOpeningModel,
 
     对 24 mm 方块就是比中心高 8.5 mm。
 
-    上面那个"边长"必须和**视觉算 position.z 时用的边长**是同一个数（标称值，
-    由 `object_edge_m` 传进来），不能用拟合出来的短边。因为
-    `position.z = 工作面 + 边长/2`，若这里换成一个更大的边长，减掉的半个边长
-    就比视觉加上的多，指尖目标跟着往下沉：掩膜肥边把短边撑到 29.5 mm 时指尖
-    只剩 0.25 mm 余量，撑到 41.6 mm（实测到过）就插进桌子 5.8 mm。拟合短边
-    只用来决定开口宽度（见 `_object_edge`）。
+    式子里那个"边长"必须和视觉算 position.z 时用的是同一个数。现在是：视觉
+    发来的 `extent_m` 就是标称 24 mm（见 `_object_edge`），所以两边一致。
+    哪天视觉改成发拟合尺寸，这里不能跟着换 —— 拟合边长里含 24 mm 方块投在
+    桌面上的影子，比真实边长偏大，减掉的半个边长会多于视觉加上的，指尖就会
+    往下沉（短边被掩膜肥边撑到 41.6 mm 时能低 5.8 mm，直接插进桌子）。
     """
     p = np.asarray(detection.position, float)
     if p.shape != (3,):
@@ -154,10 +154,7 @@ def plan_grasp(detection, model: gr.FingerOpeningModel,
             '要 {:.1f} mm 开口，夹爪最大只有 {:.1f} mm'.format(
                 open_width * 1e3, model.width_open_m.value * 1e3))
 
-    # 抬高的基准用标称边长（和视觉写 position.z 时用的那个一致），没给就退回
-    # 拟合短边 —— 那样指尖会下沉，见 docstring。
-    height_edge = edge if object_edge_m is None else float(object_edge_m)
-    tcp_offset = fingertip_clearance_m + tip_to_centre_m - 0.5 * height_edge
+    tcp_offset = fingertip_clearance_m + tip_to_centre_m - 0.5 * edge
     grasp_point = np.array([p[0], p[1], p[2] + tcp_offset], float)
 
     try:

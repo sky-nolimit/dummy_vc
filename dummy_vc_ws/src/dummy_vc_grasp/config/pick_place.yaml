@@ -29,9 +29,6 @@ pick_place_node:
     place_x: 0.0                         # 放置点（首期由参数给定，不由视觉算）
     place_y: 0.10
     table_z: -0.0405                     # 工作面；和 perception 的实测值同源
-    # 标称边长，必须和 perception 的 vision.yaml 里那个 object_edge 一致：
-    # 视觉用它在 position.z 上加了"方块半高"，抬高的基准少了它指尖就会往下压。
-    object_edge: 0.024
     max_reach_m: 0.45
     min_reach_m: 0.15
 

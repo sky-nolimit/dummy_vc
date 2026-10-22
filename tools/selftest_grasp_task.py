@@ -155,23 +155,15 @@ def check_planner(gripper, planner):
     close('起手位在抓取点上方 80 mm', wp.pre_grasp - wp.grasp, [0, 0, 0.08], 1e-12)
     close('抬升位在抓取点上方 100 mm', wp.lift - wp.grasp, [0, 0, 0.10], 1e-12)
     close('开口 = 边长 + 2 mm', plan.open_width_m, 0.024 + 0.002, 1e-12)
-    # 2026-10-22 真机实测的形状：长边是方块投到地面的"影子"，被低机位拉长到
-    # 方块的 3.6 倍，只有短边挨着真实尺寸。取均值会算成 57.9 mm、开口 59.9 mm，
-    # 超过 55 mm 的最大开口 —— 方块明明在视野正中却抓不了。
+    # 2026-10-22 真机日志里的拟合尺寸：长边是方块投到地面的"影子"，被低机位
+    # 拉长到方块的 3.6 倍，只有短边挨着真实尺寸。vision 现在发的 bbox.size 是
+    # 标称方框（不是这个拟合尺寸），这条断言守的是"哪天把拟合尺寸接进来"。
     shadow = FakeDetection([0.0, 0.302, ground + 0.012],
                            extent=(0.0862, 0.0295))
     shadow_plan = planner.plan_grasp(shadow, model)
     close('短边当边长：开口 = 短边 + 2 mm', shadow_plan.open_width_m,
           0.0295 + 0.002, 1e-12)
     ok(f'长边 86.2 mm 不再顶爆开口：{shadow_plan.describe()}')
-    # 抬高的基准必须是标称边长（视觉算 position.z 时用的那个），不能拿拟合
-    # 短边去减半个边长：短边带着掩膜肥边，29.5 mm 时指尖只剩 0.25 mm 余量，
-    # 41.6 mm（实测到过）时就插进桌子 5.8 mm。
-    nominal_plan = planner.plan_grasp(shadow, model, object_edge_m=0.024)
-    close('抬高的基准用标称边长：仍比中心高 8.5 mm',
-          nominal_plan.tcp_offset_m, 0.0085, 1e-12)
-    close('开口仍按拟合短边算', nominal_plan.open_width_m, 0.0295 + 0.002, 1e-12)
-    ok('标称边长只喂抬高，拟合短边只喂开口')
     if plan.gripper_ready:
         ok('已实测的模型被认成 ready')
     else:

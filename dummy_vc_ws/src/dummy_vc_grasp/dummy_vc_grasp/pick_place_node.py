@@ -91,10 +91,6 @@ class PickPlaceNode(Node):
         self.declare_parameter('place_y', 0.10)
         # 默认值与 scene_objects / perception 的实测值同源，别在这里写死一个数
         self.declare_parameter('table_z', scene.DEFAULT_TABLE_Z)
-        # 标称边长：必须和 perception 的 vision.yaml 里那个 object_edge 一致。
-        # 视觉用它在 position.z 上加了"方块半高"，抬高的基准少了它就会把指尖
-        # 往下压（见 grasp_planner.plan_grasp 的 docstring）。
-        self.declare_parameter('object_edge', 0.024)
         self.declare_parameter('max_reach_m', 0.45)
         self.declare_parameter('min_reach_m', 0.15)
 
@@ -270,8 +266,7 @@ class PickPlaceNode(Node):
         plan, reasons = grasp_planner.first_graspable(
             dets, self.gripper_model, limits=self.limits,
             approach_m=float(self.get_parameter('approach_m').value),
-            lift_m=float(self.get_parameter('lift_m').value),
-            object_edge_m=float(self.get_parameter('object_edge').value))
+            lift_m=float(self.get_parameter('lift_m').value))
         for why in reasons:
             self.get_logger().info('跳过：{}'.format(why))
         if plan is None:
