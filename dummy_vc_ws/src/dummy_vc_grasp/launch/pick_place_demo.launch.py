@@ -17,6 +17,17 @@ Code: -6] status:115` / `Resetting device UID:`（`-6` = ENXIO，设备被占用
 还会多一个 `robot_state_publisher` 和 `moveit_hardware.launch.py` 发同名 TF。
 2026-10-22 真机就是这么撞的，见 docs/04 的 G1。
 
+`vision:=false` **只影响这里起不起相机和 vision_node**：`pick_place_node` 照样
+订阅 `/detected_objects`，所以另一个终端里 `vision_demo.launch.py` 起的
+vision_node 会照常喂数据。它自己从来不连相机 —— 别把"没数据"当成"没起相机"，
+先看 `ros2 topic echo --once /detected_objects` 和节点日志里那句
+"收到第 1 条 /detected_objects"。
+
+节点默认**不会自己开始**（`auto_start:=false`）：启动后安静地等
+`/pick_place/start`，这期间不打印状态，很容易被当成卡死。要么发一次
+`ros2 topic pub --once /pick_place/start std_msgs/msg/Empty "{}"`，要么加
+`auto_start:=true`。等 5 秒还没有人触发，节点会自己打一行说明。
+
 `scene_node` 不能少：地面和地台不在 URDF 里，没有它们，规划器认为脚下什么
 都没有，最后那段"往下抓"可以规划出一条从地面里穿过去的路径。
 

@@ -163,6 +163,10 @@ class PickPlaceNode(Node):
         #: 起手位，不再问一遍 IK。
         self.fitted = {}
         self._probe = None
+        #: 收到过多少条检测（不分状态，用来判断视觉链路是否通）
+        self.received_frames = 0
+        #: 数 OBSERVE 里收到多少条（判超时用）
+        self.observe_frames = 0
         #: 预检的流水号：重试时旧的回调可能晚到，靠它丢掉过期的结果
         self._probe_seq = 0
 
@@ -199,6 +203,15 @@ class PickPlaceNode(Node):
                 '走笛卡尔竖直直线（算不出来就退回关节空间）'
                 if bool(self.get_parameter('approach_cartesian').value)
                 else '退回关节空间规划（approach_cartesian=false）'))
+        if not bool(self.get_parameter('auto_start').value):
+            # 不打印这一句的话，节点启动后安静地等触发，看起来就像卡死了
+            # （2026-10-22 真机上被当成"vision:=false 之后卡住"）。
+            self.get_logger().info(
+                '还没开始：等 {} 触发（auto_start=false）。检测从 {} 进来 —— '
+                '本节点不直接连相机，视觉由 vision_node 发；vision:=false 只表示'
+                '这里不再起相机/视觉，不是不再收检测'.format(
+                    self.get_parameter('start_topic').value,
+                    self.get_parameter('detections_topic').value))
         if bool(self.get_parameter('auto_start').value):
             self._decide(task_mod.Event.START)
 
@@ -274,12 +287,24 @@ class PickPlaceNode(Node):
     def _on_start(self, _msg):
         self.get_logger().info('收到开始信号：{}'.format(
             self.get_parameter('start_topic').value))
+        self._idle_since = None
+        self._idle_hinted = False
+        self.observe_frames = 0
+        self._observe_started = None
         self._decide(task_mod.Event.START)
 
     # ------------------------------------------------------------------
     # 视觉
     # ------------------------------------------------------------------
     def _on_detections(self, msg):
+        # 先记一条"视觉这条链是通的"，跟状态机无关：没触发之前也要能看出来
+        # 相机/vision_node 到底有没有在发。
+        self.received_frames += 1
+        if self.received_frames == 1:
+            self.get_logger().info(
+                '收到第 1 条 {}（{} 个目标）—— 视觉这条链是通的'.format(
+                    self.get_parameter('detections_topic').value,
+                    len(msg.detections)))
         if self.machine.state is not task_mod.State.OBSERVE:
             return
         self.observe_frames = getattr(self, 'observe_frames', 0) + 1
@@ -643,8 +668,31 @@ class PickPlaceNode(Node):
     # ------------------------------------------------------------------
     # 节拍
     # ------------------------------------------------------------------
+    def _idle_hint(self):
+        """IDLE 里一声不吭会被当成卡死：等 5 秒还没人触发就说清在等什么。"""
+        started = getattr(self, '_idle_since', None)
+        if started is None:
+            self._idle_since = time.time()
+            return
+        if getattr(self, '_idle_hinted', False):
+            return
+        if time.time() - started < 5.0:
+            return
+        self._idle_hinted = True
+        start_topic = self.get_parameter('start_topic').value
+        topic = self.get_parameter('detections_topic').value
+        self.get_logger().info(
+            '已经在 IDLE 等了 {:.0f} 秒，没收到 {}。视觉是 {} 在发（另一个终端里的 '
+            'vision_node），本节点不直接连相机。确认有数据：ros2 topic echo --once {}；'
+            '触发抓取：ros2 topic pub --once {} std_msgs/msg/Empty "{{}}"'.format(
+                time.time() - started, start_topic, topic, topic, start_topic))
+
     def _tick(self):
         state = self.machine.state
+        if state is task_mod.State.IDLE:
+            self._idle_hint()
+            return
+        self._idle_since = None
         if state is task_mod.State.OBSERVE:
             started = getattr(self, '_observe_started', None)
             if started is None:
