@@ -25,12 +25,13 @@
 import time
 
 import rclpy
+from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import Pose
 from moveit_msgs.action import ExecuteTrajectory, MoveGroup
 from moveit_msgs.msg import (BoundingVolume, Constraints, MoveItErrorCodes,
                              OrientationConstraint, PositionConstraint,
                              RobotState)
-from moveit_msgs.srv import GetCartesianPath
+from moveit_msgs.srv import GetCartesianPath, GetPositionIK
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
@@ -115,6 +116,23 @@ class PickPlaceNode(Node):
         #: 算出来的直线覆盖率低于这个值就退回关节空间规划
         self.declare_parameter('cartesian_min_fraction', 0.95)
 
+        # -- 起手位够不着时往下压 -------------------------------------------
+        #
+        # 2026-10-22 真机：方块在 r≈0.30 m，起手位（抓取点正上方 80 mm）发过去
+        # 之后 MoveIt 回 error_code=99999，ompl 报
+        # "Unable to sample any valid states for goal tree"。原因不是碰撞，是
+        # **顶抓姿态下那个高度够不着**：夹爪 +y 朝下时，这条手臂在 r=0.302 m
+        # 处 z 只能到 0.00 附近（离线 FK/IK 验算，见 docs/04），而 0.060 m 要
+        # 高 60 mm。物体在 r≈0.27 m 以内时 8 cm 起手位是够的，一次改死
+        # approach_m 会牺牲近处的余量，所以这里**运行时问一次 IK**，够不着才
+        # 压低，压到离抓取点 approach_min_m 还不行就报清楚，别让 MoveIt 白等。
+        self.declare_parameter('ik_service', '/compute_ik')
+        self.declare_parameter('ik_timeout_s', 0.2)
+        #: 起手位最多压到离抓取点多高（再低就没法竖直下降了）
+        self.declare_parameter('approach_min_m', 0.005)
+        #: 每次往下压多少
+        self.declare_parameter('approach_step_m', 0.01)
+
         self.base_frame = self.get_parameter('base_frame').value
         self.ee_link = self.get_parameter('ee_link').value
         self.group_name = self.get_parameter('planning_group').value
@@ -141,11 +159,19 @@ class PickPlaceNode(Node):
         #: 起算 —— 只规划时机械臂并没有真的动过去，用"当前状态"算出来的直线
         #: 是从它真正站着的地方出发的，那不是我们要验的东西。
         self.planned_pre_grasp = None
+        #: 经 IK 预检之后真正用的位姿（label -> 位置）。“退开”那一步直接复用
+        #: 起手位，不再问一遍 IK。
+        self.fitted = {}
+        self._probe = None
+        #: 预检的流水号：重试时旧的回调可能晚到，靠它丢掉过期的结果
+        self._probe_seq = 0
 
         self.action_client = ActionClient(
             self, MoveGroup, self.get_parameter('move_action').value)
         self.cartesian_client = self.create_client(
             GetCartesianPath, self.get_parameter('cartesian_service').value)
+        self.ik_client = self.create_client(
+            GetPositionIK, self.get_parameter('ik_service').value)
         self.execute_client = ActionClient(
             self, ExecuteTrajectory,
             self.get_parameter('execute_trajectory_action').value)
@@ -193,21 +219,26 @@ class PickPlaceNode(Node):
             self.plan = None
             self.last_detection = None
             self.planned_pre_grasp = None
+            self.fitted = {}
+            self._probe = None
         elif action == 'move_pre_grasp':
-            self._send_goal(self.plan.waypoints.pre_grasp,
-                            self.plan.waypoints.quaternion, 'move_pre_grasp')
+            self._send_goal_fitted(
+                self.plan.waypoints.pre_grasp, self.plan.waypoints.quaternion,
+                'move_pre_grasp')
         elif action == 'descend':
             self._descend()
         elif action == 'lift':
-            self._send_goal(self.plan.waypoints.lift,
-                            self.plan.waypoints.quaternion, 'lift')
+            # 抬升同样会被"顶抓姿态抬不高"卡住：grasp + lift_m 在远处一样无解
+            self._send_goal_fitted(
+                self.plan.waypoints.lift, self.plan.waypoints.quaternion, 'lift')
         elif action == 'move_place':
             self._send_goal(self.plan.waypoints.place,
                             self.plan.waypoints.quaternion, 'move_place')
         elif action == 'retreat':
             # 退回起手位：拿放置点上方当"退开"，避免直接扫过桌面。
-            self._send_goal(self.plan.waypoints.pre_grasp,
-                            self.plan.waypoints.quaternion, 'retreat')
+            self._send_goal(
+                self.fitted.get('move_pre_grasp', self.plan.waypoints.pre_grasp),
+                self.plan.waypoints.quaternion, 'retreat')
         elif action == 'close_gripper':
             self._command_gripper(self.plan.open_width_m)
         elif action == 'open_gripper':
@@ -310,6 +341,116 @@ class PickPlaceNode(Node):
         self.action_client.send_goal_async(goal).add_done_callback(
             self._on_goal_response)
 
+    # ------------------------------------------------------------------
+    # 可达性预检：顶抓姿态抬不高，够不着就先往下压
+    # ------------------------------------------------------------------
+    def _send_goal_fitted(self, position, quaternion, label):
+        """先问一遍 `/compute_ik`：这个高度够得着吗？够不着就往下压。
+
+        压只改 z（x/y 与姿态不动），所以压完照样能竖直下降，只是下降行程短了；
+        下限是抓取点上方 `approach_min_m`。压到底还无解就报清楚 —— 那说明物体
+        已经出了"顶抓"这个姿态的作业范围，再让 MoveIt 去试也只是白等 5 秒。
+        问不到 IK 服务时按原目标发（和以前完全一样），不因为预检而变保守。
+        """
+        if not self.ik_client.service_is_ready():
+            if not self.ik_client.wait_for_service(timeout_sec=0.5):
+                self.get_logger().warn(
+                    '没有 {} 服务，{} 跳过可达性预检 —— 够不着时 MoveIt 只会回 '
+                    'error_code=99999（goal tree 采不到解），看不出为什么'.format(
+                        self.get_parameter('ik_service').value, label))
+                self._send_goal(position, quaternion, label)
+                return
+        self._probe_seq += 1
+        self._probe = {
+            'label': label,
+            'wanted': np.array(position, float),
+            'position': np.array(position, float),
+            'quaternion': quaternion,
+            'floor_z': float(self.plan.waypoints.grasp[2])
+            + float(self.get_parameter('approach_min_m').value),
+            'steps': 0,
+            'seq': self._probe_seq,
+        }
+        self.action_busy = True
+        self.action_started = time.time()
+        self._probe_ik()
+
+    def _probe_ik(self):
+        probe = self._probe
+        timeout = float(self.get_parameter('ik_timeout_s').value)
+        request = GetPositionIK.Request()
+        request.ik_request.group_name = self.group_name
+        # is_diff：以机械臂当前状态为种子（MoveIt 默认也是这么干的）
+        request.ik_request.robot_state.is_diff = True
+        request.ik_request.avoid_collisions = True
+        request.ik_request.ik_link_name = self.ee_link
+        request.ik_request.pose_stamped.header.frame_id = self.base_frame
+        request.ik_request.pose_stamped.header.stamp = self.get_clock().now().to_msg()
+        pose = Pose()
+        pose.position.x = float(probe['position'][0])
+        pose.position.y = float(probe['position'][1])
+        pose.position.z = float(probe['position'][2])
+        pose.orientation.x = float(probe['quaternion'][0])
+        pose.orientation.y = float(probe['quaternion'][1])
+        pose.orientation.z = float(probe['quaternion'][2])
+        pose.orientation.w = float(probe['quaternion'][3])
+        request.ik_request.pose_stamped.pose = pose
+        request.ik_request.timeout = Duration(
+            sec=int(timeout), nanosec=int((timeout % 1.0) * 1e9))
+        self.ik_client.call_async(request).add_done_callback(
+            lambda f: self._on_ik(f, probe['seq']))
+
+    def _on_ik(self, future, seq):
+        probe = self._probe
+        if probe is None or probe['seq'] != seq or seq != self._probe_seq:
+            return                              # 过期结果（重试/超时之后才回来）
+        feasible = False
+        detail = ''
+        try:
+            response = future.result()
+        except Exception as exc:                # noqa: BLE001
+            detail = '调用失败：{}'.format(exc)
+        else:
+            feasible = response.error_code.val == MoveItErrorCodes.SUCCESS
+            detail = 'error_code={}'.format(response.error_code.val)
+
+        if feasible:
+            self._probe = None
+            self.action_busy = False
+            fitted = tuple(float(v) for v in probe['position'])
+            self.fitted[probe['label']] = fitted
+            dropped = probe['wanted'][2] - probe['position'][2]
+            if dropped > 1e-9:
+                self.get_logger().warn(
+                    '{} 的高度够不着：({:.3f}, {:.3f}, {:+.3f}) m 在顶抓姿态下'
+                    '没有逆解（{}），压低 {:.0f} mm 改成 z={:+.3f} m'
+                    '（离抓取点 {:.0f} mm）'.format(
+                        probe['label'], probe['wanted'][0], probe['wanted'][1],
+                        probe['wanted'][2], detail, dropped * 1e3,
+                        probe['position'][2],
+                        (probe['position'][2]
+                         - float(self.plan.waypoints.grasp[2])) * 1e3))
+            self._send_goal(probe['position'], probe['quaternion'],
+                            probe['label'])
+            return
+
+        step = float(self.get_parameter('approach_step_m').value)
+        lowered = probe['position'][2] - step
+        if lowered < probe['floor_z'] - 1e-9:
+            self._probe = None
+            self.action_busy = False
+            self._decide_failure(
+                '{} 的目标位姿在关节限位内无解（{}）——压低到离抓取点 {:.0f} mm '
+                '还是无解，说明物体已经出了顶抓姿态的作业范围。把方块往近处挪'
+                '（离底座水平距离 r < 0.27 m 时 8 cm 起手位够得着；r≈0.30 m 时'
+                '顶抓最多只能抬到 z≈0.00，也就是抓取点上方约 20 mm）'.format(
+                    probe['label'], detail,
+                    float(self.get_parameter('approach_min_m').value) * 1e3))
+            return
+        probe['position'][2] = lowered
+        probe['steps'] += 1
+        self._probe_ik()
+
     def _on_goal_response(self, future):
         try:
             handle = future.result()
@@ -403,11 +544,11 @@ class PickPlaceNode(Node):
         self.action_busy = True
         self.action_started = time.time()
         self.current_label = 'descend'
+        # 实际站着的起手位可能被压低过（_send_goal_fitted），日志按真实的那个报
+        start = self.fitted.get('move_pre_grasp', self.plan.waypoints.pre_grasp)
         self.get_logger().info(
             '算竖直下降：从起手位 ({:.3f}, {:.3f}, {:.3f}) m 直下到 ({:.3f}, {:.3f}, {:.3f}) m'.format(
-                self.plan.waypoints.pre_grasp[0],
-                self.plan.waypoints.pre_grasp[1],
-                self.plan.waypoints.pre_grasp[2],
+                start[0], start[1], start[2],
                 position[0], position[1], position[2]))
         self.cartesian_client.call_async(request).add_done_callback(
             self._on_cartesian)

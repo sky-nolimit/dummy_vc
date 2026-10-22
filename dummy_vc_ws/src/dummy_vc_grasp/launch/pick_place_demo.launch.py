@@ -10,6 +10,13 @@
 这样每层的日志和退出都各归各的。MoveIt 没起来时 `pick_place_node` 会报
 "MoveIt 动作服务器没连上"（这是它该报的错，不是这个 launch 的问题）。
 
+**相机/视觉已经单独起过时，务必加 `vision:=false`。** 否则这里会再起一套
+`orbbec_camera` + `vision_node`：两个进程抢同一个 UVC 设备，第二个只会每十几秒
+刷一轮 `Failed to initialize device uvc_open failed: [Path: 2-1-2.0, Return
+Code: -6] status:115` / `Resetting device UID:`（`-6` = ENXIO，设备被占用），
+还会多一个 `robot_state_publisher` 和 `moveit_hardware.launch.py` 发同名 TF。
+2026-10-22 真机就是这么撞的，见 docs/04 的 G1。
+
 `scene_node` 不能少：地面和地台不在 URDF 里，没有它们，规划器认为脚下什么
 都没有，最后那段"往下抓"可以规划出一条从地面里穿过去的路径。
 

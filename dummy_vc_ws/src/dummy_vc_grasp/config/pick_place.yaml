@@ -50,6 +50,18 @@ pick_place_node:
     cartesian_max_step: 0.005            # 直线插值的最大步长（米）
     cartesian_min_fraction: 0.95         # 直线覆盖率低于这个值就退回关节空间
 
+    # ---- 可达性预检：顶抓姿态抬不高时往下压 ----
+    # 2026-10-22 真机：方块在 r≈0.30 m，起手位（抓取点 +80 mm）发过去 MoveIt
+    # 回 error_code=99999，ompl 报 "Unable to sample any valid states for goal
+    # tree"。离线 FK/IK 验算的结论是**够不着**、不是碰撞：夹爪 +y 朝下时，
+    # r=0.302 m 处 z 最多到 0.00 附近（抓取点上方约 20 mm），而 0.060 m 要
+    # 抬 60 mm。所以发目标前先问一次 /compute_ik，无解就往下压，压到下限还
+    # 无解就报"物体太远，挪近点"，不再让 MoveIt 白等 5 秒再给个空错误码。
+    ik_service: "/compute_ik"
+    ik_timeout_s: 0.2                    # 单次 IK 最多等多久（秒）
+    approach_min_m: 0.005                # 起手位最多压到离抓取点多高（米）
+    approach_step_m: 0.01                # 每次往下压多少（米）
+
 # scene_node：把地面/地台发进 planning scene。
 # 不放进去，规划器认为脚下什么都没有，最后那段"往下抓"能从地面里穿过去。
 scene_objects:
