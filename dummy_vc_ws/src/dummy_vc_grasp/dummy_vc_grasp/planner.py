@@ -100,7 +100,8 @@ def plan_grasp(detection, model: gr.FingerOpeningModel,
                approach_m: float = 0.08, lift_m: float = 0.10,
                place_point=None,
                tip_to_centre_m: float = DEFAULT_TIP_TO_CENTRE_M,
-               fingertip_clearance_m: float = DEFAULT_FINGERTIP_CLEARANCE_M) -> GraspPlan:
+               fingertip_clearance_m: float = DEFAULT_FINGERTIP_CLEARANCE_M,
+               object_edge_m: float = None) -> GraspPlan:
     """由一次检测生成抓取计划；不能抓就抛 NotGraspable，原因写在消息里。
 
     `detection.position` 是**方块中心**（视觉给的就是这个），而 `gripper_tcp`
@@ -113,6 +114,13 @@ def plan_grasp(detection, model: gr.FingerOpeningModel,
                  = 方块中心 + 余量 + tip_to_centre − 边长/2
 
     对 24 mm 方块就是比中心高 8.5 mm。
+
+    上面那个"边长"必须和**视觉算 position.z 时用的边长**是同一个数（标称值，
+    由 `object_edge_m` 传进来），不能用拟合出来的短边。因为
+    `position.z = 工作面 + 边长/2`，若这里换成一个更大的边长，减掉的半个边长
+    就比视觉加上的多，指尖目标跟着往下沉：掩膜肥边把短边撑到 29.5 mm 时指尖
+    只剩 0.25 mm 余量，撑到 41.6 mm（实测到过）就插进桌子 5.8 mm。拟合短边
+    只用来决定开口宽度（见 `_object_edge`）。
     """
     p = np.asarray(detection.position, float)
     if p.shape != (3,):
@@ -146,7 +154,10 @@ def plan_grasp(detection, model: gr.FingerOpeningModel,
             '要 {:.1f} mm 开口，夹爪最大只有 {:.1f} mm'.format(
                 open_width * 1e3, model.width_open_m.value * 1e3))
 
-    tcp_offset = fingertip_clearance_m + tip_to_centre_m - 0.5 * edge
+    # 抬高的基准用标称边长（和视觉写 position.z 时用的那个一致），没给就退回
+    # 拟合短边 —— 那样指尖会下沉，见 docstring。
+    height_edge = edge if object_edge_m is None else float(object_edge_m)
+    tcp_offset = fingertip_clearance_m + tip_to_centre_m - 0.5 * height_edge
     grasp_point = np.array([p[0], p[1], p[2] + tcp_offset], float)
 
     try:

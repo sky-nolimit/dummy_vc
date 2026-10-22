@@ -164,6 +164,14 @@ def check_planner(gripper, planner):
     close('短边当边长：开口 = 短边 + 2 mm', shadow_plan.open_width_m,
           0.0295 + 0.002, 1e-12)
     ok(f'长边 86.2 mm 不再顶爆开口：{shadow_plan.describe()}')
+    # 抬高的基准必须是标称边长（视觉算 position.z 时用的那个），不能拿拟合
+    # 短边去减半个边长：短边带着掩膜肥边，29.5 mm 时指尖只剩 0.25 mm 余量，
+    # 41.6 mm（实测到过）时就插进桌子 5.8 mm。
+    nominal_plan = planner.plan_grasp(shadow, model, object_edge_m=0.024)
+    close('抬高的基准用标称边长：仍比中心高 8.5 mm',
+          nominal_plan.tcp_offset_m, 0.0085, 1e-12)
+    close('开口仍按拟合短边算', nominal_plan.open_width_m, 0.0295 + 0.002, 1e-12)
+    ok('标称边长只喂抬高，拟合短边只喂开口')
     if plan.gripper_ready:
         ok('已实测的模型被认成 ready')
     else:
