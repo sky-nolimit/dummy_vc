@@ -47,10 +47,13 @@ the fingers stiffen), so park the arm first. If a phase wedges the board you
 must power-cycle -- the arm stays where it is.
 """
 import argparse
+import contextlib
 import os
 import subprocess
 import sys
+import threading
 import time
+import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -64,15 +67,41 @@ RC_NO_DEVICE = 4
 PHASES = ('baseline', 'hand', 'after')
 
 
+@contextlib.contextmanager
+def heartbeat(label):
+    """Print "still waiting" every 5 s while a blocking SDK call runs.
+
+    A silent terminal is the whole problem this script exists to avoid: a call
+    that blocks for 25+ s looks the same as a dead process. This timer runs in
+    the CHILD, so even if the parent is gone the screen still says the call has
+    not returned.
+    """
+    stop = threading.Event()
+
+    def run():
+        waited = 0
+        while not stop.wait(5.0):
+            waited += 5
+            print(f'  ... {label}: still no return after {waited}s', flush=True)
+
+    th = threading.Thread(target=run, daemon=True)
+    th.start()
+    try:
+        yield
+    finally:
+        stop.set()
+
+
 def phase_baseline():
     """Can we talk to it at all right now? Cheapest possible round trip."""
     from device_session import connect, power_on, raw_angles
-    dev, hand = connect()
-    if dev is None:
-        return RC_NO_DEVICE
-    if not power_on(dev):
-        print('  set_enable(True) did not return cleanly', flush=True)
-        return RC_FAIL
+    with heartbeat('connect + enable'):
+        dev, hand = connect()
+        if dev is None:
+            return RC_NO_DEVICE
+        if not power_on(dev):
+            print('  set_enable(True) did not return cleanly', flush=True)
+            return RC_FAIL
     print(f'  angles: {["%+.3f" % a for a in raw_angles(dev)]}', flush=True)
     print('  BASELINE-OK', flush=True)
     return RC_OK
@@ -81,16 +110,18 @@ def phase_baseline():
 def phase_hand():
     """The suspected wedge. The parent kills this process if it hangs."""
     from device_session import connect, power_on
-    dev, hand = connect()
-    if dev is None:
-        return RC_NO_DEVICE
-    if not power_on(dev):
-        print('  set_enable(True) did not return cleanly', flush=True)
-        return RC_FAIL
+    with heartbeat('connect + enable'):
+        dev, hand = connect()
+        if dev is None:
+            return RC_NO_DEVICE
+        if not power_on(dev):
+            print('  set_enable(True) did not return cleanly', flush=True)
+            return RC_FAIL
     print('  calling hand.set_angle(0.0)', flush=True)
     t0 = time.monotonic()
     try:
-        hand.set_angle(0.0)
+        with heartbeat('hand.set_angle'):
+            hand.set_angle(0.0)
     except BaseException as exc:  # noqa: BLE001
         print(f'  RAISED after {time.monotonic() - t0:.1f}s '
               f'{type(exc).__name__}: {exc}', flush=True)
@@ -102,13 +133,14 @@ def phase_hand():
 def phase_after():
     """Fresh process, fresh libusb handle: is the board still answering?"""
     from device_session import connect, power_on, raw_angles
-    dev, hand = connect()
-    if dev is None:
-        return RC_NO_DEVICE
-    if not power_on(dev):
-        print('  set_enable(True) did not return: board is not answering',
-              flush=True)
-        return RC_FAIL
+    with heartbeat('connect + enable'):
+        dev, hand = connect()
+        if dev is None:
+            return RC_NO_DEVICE
+        if not power_on(dev):
+            print('  set_enable(True) did not return: board is not answering',
+                  flush=True)
+            return RC_FAIL
     print(f'  angles: {["%+.3f" % a for a in raw_angles(dev)]}', flush=True)
     print('  ALIVE', flush=True)
     return RC_OK
@@ -128,26 +160,41 @@ def run_phase(name, timeout):
     print(f'    (deadline {timeout:.0f}s; a dot every 2s = still waiting)',
           flush=True)
     t0 = time.monotonic()
-    proc = subprocess.Popen(cmd)  # inherits stdout/stderr: output is live
+    # start_new_session: the child must not share our foreground process group.
+    # Otherwise one Ctrl-C takes the parent down mid-measurement, the run ends
+    # with no verdict, and that looks exactly like "the script died on its own".
+    proc = subprocess.Popen(cmd, start_new_session=True)  # inherits stdio
     last_dot = 0.0
-    while True:
-        rc = proc.poll()
-        el = time.monotonic() - t0
-        if rc is not None:
-            print(flush=True)
-            break
-        if el >= timeout:
-            proc.kill()
-            try:
-                proc.wait(timeout=5.0)
-            except subprocess.TimeoutExpired:
-                print('    (the child did not die after SIGKILL)', flush=True)
-            print(flush=True)
-            return 'HUNG', None, el
-        if el - last_dot >= 2.0:
-            last_dot = el
-            print('.', end='', flush=True)
-        time.sleep(0.2)
+    try:
+        while True:
+            rc = proc.poll()
+            el = time.monotonic() - t0
+            if rc is not None:
+                print(flush=True)
+                break
+            if el >= timeout:
+                proc.kill()
+                try:
+                    proc.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    print('    (the child did not die after SIGKILL)',
+                          flush=True)
+                print(flush=True)
+                return 'HUNG', None, el
+            if el - last_dot >= 2.0:
+                last_dot = el
+                print('.', end='', flush=True)
+            time.sleep(0.2)
+    except KeyboardInterrupt:
+        # Keep the measurement honest: kill the child, say so, and let the
+        # caller decide. Never leave a silent corpse.
+        proc.kill()
+        try:
+            proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            pass
+        print(flush=True)
+        return 'INTERRUPTED', None, time.monotonic() - t0
     if rc == RC_OK:
         return 'OK', rc, el
     if rc == RC_HAND_RAISED:
@@ -205,6 +252,14 @@ def main():
         print(f'    -> {state} after {elapsed:.1f}s')
         print()
         states[name] = state
+        if state == 'INTERRUPTED':
+            print('  The phase was killed by your Ctrl-C, so the run stops')
+            print('  here and proves nothing more. If it was phase 2 that was')
+            print('  cut short, that does NOT mean the board survived --')
+            print('  power-cycle it and run again with the output saved:')
+            print('    python3 tools/probe_hand_wedge.py --claw unplugged \\')
+            print('      2>&1 | tee /tmp/wedge.txt')
+            return 130
         if name == 'baseline' and state != 'OK':
             if rc == RC_NO_DEVICE:
                 print('  VERDICT: inconclusive -- no device (or the client')
@@ -273,4 +328,16 @@ def main():
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    # Always leave an EXIT= line. A run that ends with no message at all is
+    # indistinguishable from a run that was killed, and that ambiguity has
+    # already cost one measurement here.
+    try:
+        code = main()
+    except KeyboardInterrupt:
+        print('\n  INTERRUPTED (Ctrl-C).', flush=True)
+        code = 130
+    except BaseException:  # noqa: BLE001
+        traceback.print_exc()
+        code = 1
+    print(f'EXIT={code}', flush=True)
+    sys.exit(code)
