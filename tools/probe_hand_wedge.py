@@ -115,34 +115,44 @@ def phase_after():
 
 
 def run_phase(name, timeout):
-    """Run one phase in a child process. Returns (state, rc, elapsed, output)."""
+    """Run one phase as a child that inherits our stdio, so its output is live.
+
+    Live output is the point. With `capture_output` a phase that hangs looks
+    exactly like a parent that hangs, and the run reads as "froze, then exited".
+    So the deadline is announced before the wait and a dot is printed every two
+    seconds while it runs: "still waiting" and "given up" must not look alike.
+
+    Returns (state, returncode, elapsed).
+    """
     cmd = [sys.executable, os.path.abspath(__file__), '--phase', name]
+    print(f'    (deadline {timeout:.0f}s; a dot every 2s = still waiting)',
+          flush=True)
     t0 = time.monotonic()
-    try:
-        proc = subprocess.run(cmd, timeout=timeout, capture_output=True,
-                              text=True, errors='replace')
-    except subprocess.TimeoutExpired as exc:
-        elapsed = time.monotonic() - t0
-        out = (exc.stdout or '') + (exc.stderr or '')
-        if isinstance(out, bytes):
-            out = out.decode('utf-8', 'replace')
-        return 'HUNG', None, elapsed, out
-    elapsed = time.monotonic() - t0
-    out = (proc.stdout or '') + (proc.stderr or '')
-    if proc.returncode == RC_OK:
-        return 'OK', proc.returncode, elapsed, out
-    if proc.returncode == RC_HAND_RAISED:
-        return 'RAISED', proc.returncode, elapsed, out
-    return 'FAILED', proc.returncode, elapsed, out
-
-
-def show(state, elapsed, out):
-    print(f'    -> {state} after {elapsed:.1f}s')
-    for line in out.splitlines():
-        line = line.rstrip()
-        if line:
-            print(f'       | {line}')
-    print()
+    proc = subprocess.Popen(cmd)  # inherits stdout/stderr: output is live
+    last_dot = 0.0
+    while True:
+        rc = proc.poll()
+        el = time.monotonic() - t0
+        if rc is not None:
+            print(flush=True)
+            break
+        if el >= timeout:
+            proc.kill()
+            try:
+                proc.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                print('    (the child did not die after SIGKILL)', flush=True)
+            print(flush=True)
+            return 'HUNG', None, el
+        if el - last_dot >= 2.0:
+            last_dot = el
+            print('.', end='', flush=True)
+        time.sleep(0.2)
+    if rc == RC_OK:
+        return 'OK', rc, el
+    if rc == RC_HAND_RAISED:
+        return 'RAISED', rc, el
+    return 'FAILED', rc, el
 
 
 def main():
@@ -191,8 +201,9 @@ def main():
                       args.phase_timeout),
         }[name]
         print(label)
-        state, rc, elapsed, out = run_phase(name, timeout)
-        show(state, elapsed, out)
+        state, rc, elapsed = run_phase(name, timeout)
+        print(f'    -> {state} after {elapsed:.1f}s')
+        print()
         states[name] = state
         if name == 'baseline' and state != 'OK':
             if rc == RC_NO_DEVICE:
