@@ -53,13 +53,28 @@ def connect(timeout=15.0):
     Fibre's `find_any` blocks FOREVER when given no timeout, and with no device
     attached that becomes a silent hang with no output at all -- so the timeout
     is not optional here.
+
+    A device that does not answer discovery RAISES TimeoutError rather than
+    returning None (fibre/discovery.py -> utils.wait). That was learned the hard
+    way: a probe reported a traceback instead of "no device" at exactly the
+    moment the finding was "the board stopped answering", which read as a script
+    bug rather than a measurement.
     """
     try:
         import dummy_cli_tool.ref_tool as ref_tool
     except Exception as exc:  # noqa: BLE001
         print(f'FATAL: cannot use dummy_cli_tool ({exc})')
         return None, None
-    dev = ref_tool.find_any(path='usb', timeout=timeout)
+    try:
+        dev = ref_tool.find_any(path='usb', timeout=timeout)
+    except TimeoutError:
+        print(f'FATAL: nothing answered discovery within {timeout:.0f}s.')
+        print('       Either no device is attached, or the controller is hung')
+        print('       and is not servicing USB at all. Power-cycle it and see')
+        print('       whether discovery comes back.')
+        print('       Stop dummy_controller first -- only one process can hold')
+        print('       the fibre link.')
+        return None, None
     if dev is None:
         print('FATAL: no device found.')
         print('       Stop dummy_controller first -- only one process can hold')

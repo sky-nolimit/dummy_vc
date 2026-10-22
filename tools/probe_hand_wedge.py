@@ -238,6 +238,7 @@ def main():
     print()
 
     states = {}
+    rcs = {}
     for name in PHASES:
         label, timeout = {
             'baseline': ('PHASE 1/3  baseline: read the six angles',
@@ -252,6 +253,7 @@ def main():
         print(f'    -> {state} after {elapsed:.1f}s')
         print()
         states[name] = state
+        rcs[name] = rc
         if state == 'INTERRUPTED':
             print('  The phase was killed by your Ctrl-C, so the run stops')
             print('  here and proves nothing more. If it was phase 2 that was')
@@ -290,6 +292,12 @@ def main():
     if hand == 'HUNG' and after != 'OK':
         print('  VERDICT: the wedge reproduced -- one hand frame still takes')
         print('    the whole CAN path (and therefore the whole board) out.')
+        if rcs.get('after') == RC_NO_DEVICE:
+            print()
+            print('    Note: phase 3 did not merely hang on a call, it could')
+            print('    not even finish USB discovery. The controller is not')
+            print('    servicing its USB interface at all, which is stronger')
+            print('    evidence than a single blocked request.')
         if args.claw == 'unplugged':
             print()
             print('    The claw was UNPLUGGED and nothing changed. So the claw')
