@@ -138,6 +138,9 @@ CHECKS = [
     ('selftest_grasp_task.py',
      'the grasp planner and task machine: retries, gripper gate, no dead ends',
      True, []),
+    ('selftest_gripper_frames.py',
+     'the gripper CAN frame: ids, float32 payload, socketcan header, refusals',
+     True, []),
 ]
 
 
