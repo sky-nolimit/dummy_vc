@@ -55,6 +55,14 @@ this project's worst bugs:
                            failure costs a re-boot and a re-placed block, while
                            the transitions are pure functions that can all be
                            walked here.
+    selftest_fit_grasp_correction
+                           the tool that decides whether the grasp error is a
+                           translation or a rotation -- that answer decides
+                           whether the fix is a calibration number or a joint
+                           zero, so the tool itself has to be checked. A known
+                           transform has to come back out of it, a mirrored
+                           table has to be reported instead of fitted, and
+                           three points must not be enough for a rotation.
 
 Usage:
     python tools/run_checks.py            # everything
@@ -140,6 +148,9 @@ CHECKS = [
      True, []),
     ('selftest_gripper_frames.py',
      'the gripper CAN frame: ids, float32 payload, socketcan header, refusals',
+     True, []),
+    ('selftest_fit_grasp_correction.py',
+     'the fit tool: recovers known transforms, refuses mirrors and too-few points',
      True, []),
 ]
 
