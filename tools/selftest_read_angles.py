@@ -50,8 +50,13 @@ def load_module():
 
 
 def check_config(mod):
-    """配置里那三张表要读得出来，而且就是配置里写的数。"""
-    print('\n[1] 读配置')
+    """配置里那几张表要读得出来，而且互相自洽。
+
+    标定之后不再要求 urdf_offset_deg 全零：真正要守的是"原始角 -> 模型角"在
+    标定 home 处读零。home_reference_deg 与 urdf_offset_deg 是同一批测量的两
+    个面，改了一个忘了另一个，模型就会在 home 处显示一个常数偏置。
+    """
+    print('\n[1] 读配置与自洽')
     sign, joff, off = mod.read_config_lists(CONFIG)
     if sign is None:
         fail('读不出 joint_sign/joint_offset_deg')
@@ -65,10 +70,24 @@ def check_config(mod):
     close('joint_offset_deg[0]', joff[0], 0.215)
     close('joint_offset_deg[1]', joff[1], 74.572)
     close('joint_offset_deg[2]', joff[2], -91.474)
-    if any(abs(v) > TOL for v in off):
-        fail(f'urdf_offset_deg 出厂应为全零，实际 {off}')
+
+    ref = mod.read_home_reference(CONFIG)
+    if ref is None:
+        fail('读不出 home_reference_deg')
+        return
+    model = mod.urdf_angles(ref, sign, joff, off)
+    worst = max(abs(v) for v in model)
+    if worst <= 1e-6:
+        ok(f'标定 home 处模型读零（最大 {worst:.1e}）')
     else:
-        ok('urdf_offset_deg 出厂是全零')
+        fail(f'标定 home 处模型还差 {worst:.3f} 度：home_reference_deg 与 '
+             f'urdf_offset_deg 不同步')
+    implied = mod.offsets_for_home(ref, sign, joff)
+    gap = max(abs(a - b) for a, b in zip(implied, off))
+    if gap <= 1e-6:
+        ok('urdf_offset_deg 正是这组原始角算出来的')
+    else:
+        fail(f'urdf_offset_deg 与原始角算出的值差 {gap:.3f} 度')
 
 
 def check_roundtrip(mod):
@@ -149,6 +168,30 @@ def check_spread(mod):
     close('j2 跳动', got[1], 0.5)
 
 
+def check_home_check(mod):
+    """--check-home 的比较：符号必须是"现在 - 参考"，阈值判定要一致。"""
+    print('\n[7] 与标定 home 比较')
+    ref = [1.435, 74.394, -88.601, 0.389, 1.431, 3.675]
+    same = mod.compare_to_reference(ref, ref)
+    if any(abs(v) > TOL for v in same):
+        fail(f'同一个姿态应当差零，实际 {same}')
+    else:
+        ok('同一姿态差零')
+    # j6 被拧了 +2 度，只有 j6 该报出来。
+    moved = list(ref)
+    moved[5] += 2.0
+    d = mod.compare_to_reference(moved, ref)
+    close('j6 差', d[5], 2.0)
+    if all(abs(v) < TOL for i, v in enumerate(d) if i != 5):
+        ok('其它五个关节不受影响')
+    else:
+        fail(f'只动 j6，别的关节也变了：{d}')
+    if mod.read_home_reference(CONFIG) is None:
+        fail('配置里应当有 home_reference_deg')
+    else:
+        ok('配置里读得到 home_reference_deg')
+
+
 def main():
     print('=' * 68)
     print('读角工具自检：零点算术的符号与闭环')
@@ -165,13 +208,14 @@ def main():
     check_j1_example(mod)
     check_parser(mod)
     check_spread(mod)
+    check_home_check(mod)
 
     print()
     print('=' * 68)
     if FAILURES:
         print(f'{len(FAILURES)} 项失败')
         return 1
-    print('RESULT: 零点算术闭环成立，符号翻转和缺键都有明确行为')
+    print('RESULT: 零点算术闭环成立，符号翻转、home 比较和缺键都有明确行为')
     return 0
 
 

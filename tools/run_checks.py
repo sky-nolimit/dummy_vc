@@ -155,6 +155,9 @@ CHECKS = [
     ('selftest_read_angles.py',
      'the zero-offset arithmetic: closed loop at home, sign flips all six', True,
      []),
+    ('selftest_home_check.py',
+     'the startup pose check: tells "parked elsewhere" from "one joint moved"',
+     True, []),
 ]
 
 

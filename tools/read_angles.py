@@ -20,7 +20,14 @@ Usage
     python3 tools/read_angles.py --limp        # cut torque, pose by hand, read
     python3 tools/read_angles.py --spin-up     # powered pose, read
     python3 tools/read_angles.py --repeat 5    # is the readback stable?
+    python3 tools/read_angles.py --check-home  # still at the calibrated home?
     python3 tools/read_angles.py --config-only # no device; just print the config
+
+`--check-home` compares the live readback with `home_reference_deg` from the
+config and exits 3 when a joint is further than `--home-tol` (1.0 deg) from it.
+That turns "somebody nudged j6 before the driver came up" and "the device frame
+shifted after a power cycle" into a number, instead of a slightly crooked arm
+noticed halfway through a grasp.
 
 `--limp` disables the axes and leaves them disabled: the controller itself stays
 powered (USB), so the encoders keep reporting while the arm can be pushed into
@@ -114,6 +121,21 @@ def offsets_for_home(raw, sign, joff):
     return [s * (o - a) for a, s, o in zip(raw, sign, joff)]
 
 
+def compare_to_reference(raw, reference):
+    """Per-joint (raw - reference), degrees. Positive = past the reference."""
+    return [a - b for a, b in zip(raw, reference)]
+
+
+def read_home_reference(path=DEFAULT_CONFIG):
+    """The raw angles recorded at the calibrated home, or None."""
+    with open(path, encoding='utf-8') as fh:
+        text = fh.read()
+    ref = parse_flow_list(text, 'home_reference_deg')
+    if ref is None or len(ref) != len(JR):
+        return None
+    return ref
+
+
 def spread(readings):
     """Per-joint (max - min) across a list of reading lists, in degrees."""
     return [max(col) - min(col) for col in zip(*readings)]
@@ -144,6 +166,12 @@ def main(argv=None):
                     help='controller config to compare against')
     ap.add_argument('--config-only', dest='config_only', action='store_true',
                     help='print the config tables and exit (no device needed)')
+    ap.add_argument('--check-home', dest='check_home', action='store_true',
+                    help='exit 3 when a joint is off the recorded home')
+    ap.add_argument('--home-tol', dest='home_tol', type=float, default=1.0,
+                    metavar='DEG',
+                    help='how far from the recorded home counts as "not at '
+                         'home" (default 1.0 deg)')
     ap.add_argument('--timeout', type=float, default=15.0,
                     help='device discovery timeout (default 15 s)')
     args = ap.parse_args(argv)
@@ -158,6 +186,8 @@ def main(argv=None):
         print(f'  joint_sign        {sign}')
         print(f'  joint_offset_deg  {joff}')
         print(f'  urdf_offset_deg   {off}')
+        ref = read_home_reference(args.config)
+        print(f'  home_reference_deg {ref if ref else "(absent)"}')
         return 0
 
     sys.path.insert(0, HERE)
@@ -230,11 +260,30 @@ def main(argv=None):
     else:
         print('  (that is what the config already says)')
 
+    rc = 0
+    ref = read_home_reference(args.config)
+    if ref is not None:
+        d = compare_to_reference(raw, ref)
+        worst = max(range(len(d)), key=lambda k: abs(d[k]))
+        print()
+        print('  distance from the recorded home (raw - reference):')
+        print('    ' + ', '.join(f'{JR[i]} {v:+.2f}' for i, v in enumerate(d)))
+        if abs(d[worst]) > args.home_tol:
+            print(f'  WARNING: {JR[worst]} is {d[worst]:+.2f} deg from the '
+                  f'recorded home (tolerance {args.home_tol:.1f}).')
+            print('           If the arm was just homed, that means the '
+                  'device frame moved or the offsets did not apply; if it was '
+                  'posed by hand, it is simply not at home.')
+            rc = 3
+        else:
+            print(f'  all six within {args.home_tol:.1f} deg of the recorded '
+                  f'home')
+
     if args.limp:
         print()
         print('  The axes are still disabled. Run the driver (which enables '
               'them) before expecting the arm to hold a pose.')
-    return 0
+    return rc if args.check_home else 0
 
 
 if __name__ == '__main__':

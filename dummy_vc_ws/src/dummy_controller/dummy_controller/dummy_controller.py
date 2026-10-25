@@ -40,6 +40,41 @@ import dummy_cli_tool.ref_tool
 # 正好是我们要避免的"手臂还在动，使能已经掉了"。
 SHUTDOWN_RETRACT_TIMEOUT_SEC = 6.0
 
+# 日志里用的关节名，顺序与设备一致。
+HOME_JOINT_NAMES = ['joint_1', 'joint_2', 'joint_3',
+                    'joint_4', 'joint_5', 'joint_6']
+
+
+def describe_home_gap(raw, reference, tol_deg):
+    """比较"刚上电读到的六个角"与"标定 home 时记下的六个角"。
+
+    返回 `(deltas, verdict)`：`deltas[i] = raw[i] - reference[i]`（度），
+    `verdict` 是下面之一。
+
+    * `no_reference` 没有 `home_reference_deg`（还没标定过），检查跳过。
+    * `at_home`      六轴都在容差内 —— 手臂就停在标定时的位置。
+    * `one_axis`     只有一两个轴偏了，其余都在容差内。这**不是**"手臂停在
+                     别处"，而是"某个轴被转过/耦合打滑/标定过期"，模型从这一
+                     刻起就是错的，值得警告。
+    * `mixed`        三个以上、但不到六个偏了。说不清哪种，只报数不猜。
+    * `elsewhere`    六个都偏了 —— 多半是把它停在了别的姿态，属于正常。
+
+    为什么要把这几种分开：用户的原话是"不知道什么时候 j6 被旋转了一点点，
+    等驱动上电才发现歪了"。区别就在这里 —— 停错姿态是六轴一起偏，被碰过的
+    是单轴偏。日志里这样说才有用。
+    """
+    if reference is None or len(reference) != 6:
+        return [], 'no_reference'
+    deltas = [float(a) - float(b) for a, b in zip(raw, reference)]
+    off = [i for i, d in enumerate(deltas) if abs(d) > tol_deg]
+    if not off:
+        return deltas, 'at_home'
+    if len(off) <= 2:
+        return deltas, 'one_axis'
+    if len(off) == 6:
+        return deltas, 'elsewhere'
+    return deltas, 'mixed'
+
 class dummy_controller(LifecycleNode):
     def __init__(self):
         super().__init__('dummy_controller')
@@ -183,6 +218,12 @@ class dummy_controller(LifecycleNode):
         self.declare_parameter('joint_offset_deg', default_offset_deg)
         self.declare_parameter('move_j_offset_deg', default_movej_offset_deg)
         self.declare_parameter('urdf_offset_deg', default_urdf_offset_deg)
+        # ---- 启动位姿核对 --------------------------------------------------
+        # 标定 home 时读到的六个原始角（angle 空间，度）。不是参数，是"尺子"：
+        # 每次启动都拿它比一次，好让"某个轴被碰过"在日志里立刻现形。
+        # 空列表 = 还没标定，检查跳过。
+        self.declare_parameter('home_reference_deg', [])
+        self.declare_parameter('home_check_tol_deg', 1.0)
         self.declare_parameter('home_joints_deg', [0.0, 0.0, 90.0, 0.0, 0.0, 0.0])
         self.declare_parameter('reset_joints_deg', [0.0, -75.0, 180.0, 0.0, 0.0, 0.0])
         # ---- 夹爪 ----------------------------------------------------------
@@ -298,6 +339,9 @@ class dummy_controller(LifecycleNode):
             self.get_parameter('move_j_offset_deg').value)
         self.urdf_offset_deg = list(
             self.get_parameter('urdf_offset_deg').value)
+        self.home_reference_deg = self._home_reference()
+        self.home_check_tol_deg = float(
+            self.get_parameter('home_check_tol_deg').value)
         self.home_joints = np.array(self.get_parameter('home_joints_deg').value)
         self.reset_joints = np.array(self.get_parameter('reset_joints_deg').value)
         self.finger_travel_m = float(self.get_parameter('finger_travel_m').value)
@@ -442,6 +486,82 @@ class dummy_controller(LifecycleNode):
                     'it rather than applying a half-specified correction')
             vals = [0.0] * 6
         return vals
+
+    def _home_reference(self):
+        """`home_reference_deg`：标定 home 时的六个原始角，没标定则 None。"""
+        raw = self.get_parameter('home_reference_deg').value
+        try:
+            vals = [float(v) for v in raw]
+        except TypeError:
+            return None
+        if not vals:
+            return None
+        if len(vals) != 6:
+            self.get_logger().error(
+                'home_reference_deg must have exactly 6 elements; skipping the '
+                'startup pose check')
+            return None
+        return vals
+
+    def _check_home_pose(self):
+        """上电第一件事：这六轴现在到底在哪？与标定 home 差多少？
+
+        这一步只读、不发命令、不改状态。放在 homing 之前，是因为 homing 会把
+        手臂拉到一个按当前标定算出来的"home"；如果某个轴被动过，那之后看到
+        的"歪"就再也分不清是标定错还是它本来就歪。先记一笔，日志里就有据可查。
+        """
+        if self.home_reference_deg is None:
+            self.get_logger().info(
+                'startup pose check: no home_reference_deg configured, '
+                'skipping (nothing is known about the calibrated home)')
+            return
+        try:
+            raw = self.read_raw_angles()
+        except Exception as exc:        # noqa: BLE001
+            self.get_logger().warn(
+                f'startup pose check: could not read the angles '
+                f'({type(exc).__name__}: {exc}); skipping -- this is NOT the '
+                f'same as "the pose is fine"')
+            return
+
+        deltas, verdict = describe_home_gap(
+            raw, self.home_reference_deg, self.home_check_tol_deg)
+        table = ', '.join(f'{name} {d:+.2f}'
+                          for name, d in zip(HOME_JOINT_NAMES, deltas))
+        worst = max(range(6), key=lambda i: abs(deltas[i]))
+        self.get_logger().info(
+            f'startup pose check: raw = {[round(v, 3) for v in raw]}')
+        self.get_logger().info(
+            f'startup pose check: raw - home_reference = {table} '
+            f'(tolerance {self.home_check_tol_deg:.1f} deg)')
+
+        if verdict == 'at_home':
+            self.get_logger().info(
+                f'startup pose check: the arm sits on the calibrated home '
+                f'(largest gap {deltas[worst]:+.2f} deg on '
+                f'{HOME_JOINT_NAMES[worst]})')
+        elif verdict == 'one_axis':
+            off = [HOME_JOINT_NAMES[i] for i, d in enumerate(deltas)
+                   if abs(d) > self.home_check_tol_deg]
+            self.get_logger().warn(
+                f'startup pose check: only {"/".join(off)} is off the '
+                f'calibrated home, the other axes are where they should be. '
+                f'That is the signature of a joint that was turned by hand, a '
+                f'coupling that slipped, or a calibration that went stale -- '
+                f'NOT of an arm parked in another pose. The model will be '
+                f'wrong by that amount until it is re-checked '
+                f'(tools/read_angles.py --check-home).')
+        elif verdict == 'elsewhere':
+            self.get_logger().info(
+                'startup pose check: all six axes are off the calibrated home, '
+                'which is what parked-in-another-pose looks like. Homing will '
+                'bring it back.')
+        else:
+            self.get_logger().warn(
+                f'startup pose check: {sum(1 for d in deltas if abs(d) > self.home_check_tol_deg)} '
+                f'of six axes are off the calibrated home ({table}); not '
+                f'enough to tell "parked elsewhere" from "something moved", '
+                f'so just take note of it.')
 
     def angle_to_urdf_deg(self, angle_deg):
         """angle 空间（度）-> URDF 关节角（**度**）。"""
@@ -745,6 +865,9 @@ class dummy_controller(LifecycleNode):
             self.get_logger().info('CONFIGURE 2/4: connecting device')
             self.init_dummy()
             self.get_logger().info('CONFIGURE 2/4: done')
+
+            # 在 homing 之前记一笔"现在到底在哪"。homing 之后就看不出偏差了。
+            self._check_home_pose()
 
             self.get_logger().info(
                 'CONFIGURE 3/4: homing to the 7 pose (the arm should move now)')
