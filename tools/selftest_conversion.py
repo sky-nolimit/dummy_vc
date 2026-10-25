@@ -56,10 +56,15 @@ JOINTS = [f'dummy2_joint{i}' for i in range(1, 7)]
 # 一致，否则锚点校验会失败 —— 而它就是用来保证这一点的。
 ANGLE_7POSE = [0.215, 74.572, -91.474, -0.910, -0.035, -0.040]
 MOVEJ_7POSE = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
-URDF_7POSE = [0.0] * 6
+
+# The URDF angle at the physical anchor is `urdf_offset_deg` from the config,
+# not a constant: a visible zero error ("the arm points a few degrees off the
+# model's zero") is exactly what that parameter is for. With the offset at zero
+# -- the state of the current calibration -- the anchor reads all zeros as
+# before. It used to be a hardcoded URDF_7POSE = [0]*6 here.
 
 # Retracted (power-off) pose: the device reports approximately zero on every
-# channel, so the URDF angles there are sign * (0 - offset).
+# channel, so the URDF angles there are sign * (0 - offset) + urdf_offset_deg.
 ANGLE_RETRACT = [0.0] * 6
 
 XACRO = os.path.join(REPO, 'dummy_vc_ws', 'src', 'dummy2_urdf', 'urdf',
@@ -81,18 +86,23 @@ def wrap(v, lo=0.0):
     return v
 
 
-def make_conversions(joff, mjoff, sign, zero=None):
+def make_conversions(joff, mjoff, sign, zero=None, off=None):
     """Return the conversions, mirroring the driver algebra exactly.
 
     The down-link has ONE constant, `zero` = the move_j value that corresponds
     to URDF all-zeros (the 7 pose). That is `movej_urdf_zero_deg` in the config,
     and it equals home_joints_deg.
 
-        angle -> urdf :  urdf    = sign * (angle - joff)
-        urdf  -> angle:  angle   = urdf / sign + joff
-        urdf  -> move_j: move_j  = urdf / sign + zero
-        move_j -> urdf:  urdf    = sign * (move_j - zero)
+        angle -> urdf :  urdf    = sign * (angle - joff) + off
+        urdf  -> angle:  angle   = (urdf - off) / sign + joff
+        urdf  -> move_j: move_j  = (urdf - off) / sign + zero
+        move_j -> urdf:  urdf    = sign * (move_j - zero) + off
         angle -> move_j: move_j  = angle - joff + zero
+
+    `off` is `urdf_offset_deg`: the URDF angle each joint has when the device
+    sits at the 7 pose. It is the correction for a visible zero error ("the arm
+    points three degrees left of where the model shows it"). It cancels in the
+    angle -> move_j shortcut, which is why that line has no `off` in it.
 
     **`zero` replaces an older pair of terms, `joff + mjoff`.** That older form
     looked reasonable and two chains were built to be mutual inverses around it,
@@ -109,18 +119,20 @@ def make_conversions(joff, mjoff, sign, zero=None):
     """
     if zero is None:
         zero = list(mjoff)
+    if off is None:
+        off = [0.0] * 6
 
     def angle_to_urdf(a):
-        return [sign[i] * (a[i] - joff[i]) for i in range(6)]
+        return [sign[i] * (a[i] - joff[i]) + off[i] for i in range(6)]
 
     def urdf_to_angle(u):
-        return [u[i] / sign[i] + joff[i] for i in range(6)]
+        return [(u[i] - off[i]) / sign[i] + joff[i] for i in range(6)]
 
     def urdf_to_movej(u):
-        return [u[i] / sign[i] + zero[i] for i in range(6)]
+        return [(u[i] - off[i]) / sign[i] + zero[i] for i in range(6)]
 
     def movej_to_urdf(m):
-        return [sign[i] * (m[i] - zero[i]) for i in range(6)]
+        return [sign[i] * (m[i] - zero[i]) + off[i] for i in range(6)]
 
     def angle_to_movej(a):
         return [a[i] - joff[i] + zero[i] for i in range(6)]
@@ -143,17 +155,20 @@ def main():
     joff = get_list(text, 'joint_offset_deg')
     mjoff = get_list(text, 'move_j_offset_deg')
     zero = get_list(text, 'movej_urdf_zero_deg')
+    off = get_list(text, 'urdf_offset_deg', [0.0] * 6)
     sign = ([float(v) for v in args.sign.split(',')] if args.sign
             else get_list(text, 'joint_sign'))
 
     print(f'config: {os.path.relpath(CONFIG, REPO)}')
     print(f'  joint_offset_deg  = {joff}')
     print(f'  move_j_offset_deg = {mjoff}')
+    print(f'  urdf_offset_deg   = {off}')
     print(f'  joint_sign        = {sign}')
     print()
 
     for name, val in (('joint_offset_deg', joff),
-                      ('move_j_offset_deg', mjoff), ('joint_sign', sign)):
+                      ('move_j_offset_deg', mjoff), ('joint_sign', sign),
+                      ('urdf_offset_deg', off)):
         if val is None or len(val) != 6:
             print(f'FATAL: {name} missing or not length 6')
             return 1
@@ -165,7 +180,7 @@ def main():
         print('FATAL: joint_sign contains a zero; the conversion divides by it')
         return 1
 
-    a2u, u2a, u2m, m2u, a2m = make_conversions(joff, mjoff, sign, zero)
+    a2u, u2a, u2m, m2u, a2m = make_conversions(joff, mjoff, sign, zero, off)
     failures = []
 
     def check(label, got, want, tol=1e-6):
@@ -185,10 +200,15 @@ def main():
             failures.append(label)
 
     # ---- 1. anchor ------------------------------------------------------
+    #
+    # With a visible zero error the anchor is NOT all zeros: at the 7 pose the
+    # model must read urdf_offset_deg (that is what the parameter means), and
+    # feeding that same URDF value back must command the 7 pose again.
     print('1. calibration anchor (7 pose)')
-    check('angle_7pose -> URDF == 0', a2u(ANGLE_7POSE), URDF_7POSE, tol=1e-6)
-    check('URDF 0 -> move_j == [0,0,90,...]', u2m(URDF_7POSE), MOVEJ_7POSE,
+    check('angle_7pose -> URDF == urdf_offset_deg', a2u(ANGLE_7POSE), off,
           tol=1e-6)
+    check('URDF urdf_offset_deg -> move_j == [0,0,90,...]', u2m(off),
+          MOVEJ_7POSE, tol=1e-6)
     check('angle_7pose -> move_j == [0,0,90,...]', u2m(a2u(ANGLE_7POSE)),
           MOVEJ_7POSE, tol=1e-6)
     print()

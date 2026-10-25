@@ -76,8 +76,9 @@ DESCRIPTIONS = {
         'Added to the URDF angle (deg) to get the move_j command value. '
         'Equal to the move_j value at the 7 pose.',
     'urdf_offset_deg':
-        'Extra offset applied inside URDF space. Use only when the model '
-        'turns the SAME way but is shifted by a constant angle.',
+        'URDF-space zero offset (deg): the angle each joint really has when '
+        'the device sits at the 7 pose. Applied to BOTH the readback and the '
+        'command chain, so it fixes what the model shows and where it goes.',
     'wrap_min_deg':
         'Lower bound the move_j command is normalised into.',
     'wrap_max_deg':

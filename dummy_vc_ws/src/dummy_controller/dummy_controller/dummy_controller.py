@@ -413,11 +413,43 @@ class dummy_controller(LifecycleNode):
     def _apply_sign(self, sign, vals):
         return np.array([sign[i] * float(vals[i]) for i in range(6)])
 
+    def _urdf_offsets(self):
+        """URDF 空间里的零点偏置（度），逐关节。
+
+        含义：**设备停在 7 姿态（= 模型的零位）时，每个关节在 URDF 空间里的
+        真实角度**。底座装歪两度、腕部少校三度，都属于这里要补的。
+
+        它必须同时进两条链，否则只修一半：
+
+            回读  urdf   = sign * (angle - joint_offset_deg) + off
+            下发  move_j = (urdf - off) / sign + movej_urdf_zero_deg
+
+        只进回读：模型显示对了，手臂仍按老零点走；只进下发：反过来。
+
+        **这个参数在之前的版本里一个函数都没用** —— 声明了、打印了、校验了，
+        但没有任何一条链读它，配置里却写着"转向相同但整体差一个固定角度时
+        使用"。于是"改了这个数没反应"是必然的。
+        """
+        raw = self.get_parameter('urdf_offset_deg').value
+        try:
+            vals = [float(v) for v in raw]
+        except TypeError:
+            vals = []
+        if len(vals) != 6:
+            if vals:
+                self.get_logger().error(
+                    'urdf_offset_deg must have exactly 6 elements; ignoring '
+                    'it rather than applying a half-specified correction')
+            vals = [0.0] * 6
+        return vals
+
     def angle_to_urdf_deg(self, angle_deg):
         """angle 空间（度）-> URDF 关节角（**度**）。"""
+        off = self._urdf_offsets()
         shifted = [float(angle_deg[i]) - self.joint_offset_deg[i]
                    for i in range(6)]
-        return self._apply_sign(self.joint_sign, shifted)
+        signed = self._apply_sign(self.joint_sign, shifted)
+        return np.array([float(signed[i]) + off[i] for i in range(6)])
 
     def angle_to_urdf(self, angle_deg):
         """angle 空间（度）-> URDF 关节角（**弧度**）。
@@ -428,8 +460,10 @@ class dummy_controller(LifecycleNode):
 
     def urdf_to_angle(self, urdf_rad):
         """URDF 关节角（弧度）-> angle 空间（度）。angle_to_urdf 的逆。"""
+        off = self._urdf_offsets()
         urdf_deg = np.degrees(np.asarray(urdf_rad, dtype=float))
-        signed = [float(urdf_deg[i]) / self._safe_sign(i) for i in range(6)]
+        signed = [(float(urdf_deg[i]) - off[i]) / self._safe_sign(i)
+                  for i in range(6)]
         return np.array([signed[i] + self.joint_offset_deg[i]
                          for i in range(6)])
 
@@ -599,8 +633,9 @@ class dummy_controller(LifecycleNode):
                 'movej_urdf_zero_deg must have exactly 6 elements; using the '
                 '7 pose values instead')
             zero = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
-        out = np.array([float(urdf_deg[i]) / self._safe_sign(i) + zero[i]
-                        for i in range(6)])
+        off = self._urdf_offsets()
+        out = np.array([(float(urdf_deg[i]) - off[i]) / self._safe_sign(i)
+                        + zero[i] for i in range(6)])
         return self.normalize_movej(out, current_deg)
 
     def movej_to_angle(self, movej_deg):
@@ -635,6 +670,11 @@ class dummy_controller(LifecycleNode):
             move_j = angle - joff + zero
 
         其中 `zero = movej_urdf_zero_deg`（URDF 全零时下发的 move_j，即 7 姿态）。
+
+        `urdf_offset_deg` 在这一步**相消**（回读时加、下发时减），所以本函数
+        与它无关。这不是巧合，而是"两条链共用同一个 URDF 空间"的必然结果；
+        检验它的是 check_conversions.py 的 D 与 F 两条断言：F 会把偏置设成
+        非零再跑一遍全部恒等式，一旦有人只把偏置接进一条链就会红。
 
         **这里改过两次，两次都是同一个毛病：凭"看起来该相消"写公式。**
 
@@ -686,7 +726,8 @@ class dummy_controller(LifecycleNode):
             zero = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
         urdf_deg = [self._safe_sign(i) * (float(movej_deg[i]) - zero[i])
                     for i in range(6)]
-        return np.radians(np.array(urdf_deg))
+        off = self._urdf_offsets()
+        return np.radians(np.array([urdf_deg[i] + off[i] for i in range(6)]))
 
     # ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓ Lifecycle node callback ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓
     def on_configure(self, state: State) -> TransitionCallbackReturn:

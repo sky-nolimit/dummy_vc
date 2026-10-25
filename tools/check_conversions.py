@@ -90,6 +90,7 @@ def load_methods():
         'angle_to_urdf_deg', 'angle_to_urdf', 'urdf_to_angle',
         'urdf_to_movej', 'movej_to_angle', 'angle_to_movej',
         'movej_to_urdf', 'normalize_movej', '_safe_sign', '_apply_sign',
+        '_urdf_offsets',
     }
     cls = next(n for n in ast.walk(tree)
                if isinstance(n, ast.ClassDef) and n.name == 'dummy_controller')
@@ -253,14 +254,72 @@ def main():
     print()
 
     print('E. anchors')
-    chk('angle_7pose -> URDF == 0',
-        list(c.angle_to_urdf_deg(ANGLE_7POSE)), [0.0] * 6, tol=1e-6)
+    off = list(c.urdf_offset_deg)
+    chk('angle_7pose -> URDF == urdf_offset_deg',
+        list(c.angle_to_urdf_deg(ANGLE_7POSE)), off, tol=1e-6)
     chk('angle_7pose -> move_j == [0,0,90,0,0,0]',
         [wrap(v) for v in c.angle_to_movej(ANGLE_7POSE)],
         [wrap(v) for v in MOVEJ_7POSE], tol=1e-6)
-    chk('URDF 0 -> move_j == [0,0,90,0,0,0]',
-        list(c.urdf_to_movej([0.0] * 6)),
+    chk('URDF == urdf_offset_deg -> move_j == [0,0,90,0,0,0]',
+        [wrap(v) for v in c.urdf_to_movej([math.radians(v) for v in off])],
         [wrap(v) for v in MOVEJ_7POSE], tol=1e-6)
+    print()
+
+    # F. the same identities with a NON-ZERO urdf_offset_deg.
+    #
+    # urdf_offset_deg used to be a dead parameter: declared, logged, validated,
+    # and read by nothing. Wiring it into only one of the two chains would still
+    # leave A-E green (they all run with the offset at zero), so this section
+    # exists to make that half-fix fail loudly.
+    print('F. identities still hold with urdf_offset_deg != 0')
+    c2 = Conv()
+    c2.joint_offset_deg = joff
+    c2.move_j_offset_deg = mjoff
+    c2.joint_sign = sign
+    c2.urdf_offset_deg = [7.0, -3.0, 5.0, -11.0, 2.0, -9.0]
+    c2.wrap_min_deg = 0.0
+    c2.wrap_max_deg = 360.0
+    bad_f = 0
+    for a in cases + rand:
+        u = [float(v) for v in c2.angle_to_urdf_deg(a)]
+        # urdf_to_angle takes radians and returns DEGREES, so no extra
+        # conversion on the way out (section A above relies on the same thing).
+        back = [float(v) for v in c2.urdf_to_angle(
+            [math.radians(v) for v in u])]
+        if any(abs(back[i] - a[i]) > 1e-6 for i in range(6)):
+            bad_f += 1
+            print(f'  [FAIL] A: angle {[round(v,1) for v in a]} -> URDF -> '
+                  f'angle gave {[round(v,4) for v in back]}')
+        # the readback must actually move by the offset
+        want_u = [sign[i] * (a[i] - joff[i]) + c2.urdf_offset_deg[i]
+                  for i in range(6)]
+        if any(abs(u[i] - want_u[i]) > 1e-6 for i in range(6)):
+            bad_f += 1
+            print(f'  [FAIL] readback ignores urdf_offset_deg for '
+                  f'angle {[round(v,1) for v in a]}')
+        m = c2.urdf_to_movej([math.radians(v) for v in u])
+        backu = [math.degrees(v) for v in c2.movej_to_urdf(m)]
+        norm = [backu[i] + 360.0 * round((u[i] - backu[i]) / 360.0)
+                for i in range(6)]
+        if any(abs(norm[i] - u[i]) > 1e-6 for i in range(6)):
+            bad_f += 1
+            print(f'  [FAIL] B: URDF {[round(v,1) for v in u]} -> move_j -> '
+                  f'URDF gave {[round(v,4) for v in norm]}')
+        chain = list(c2.urdf_to_movej(c2.angle_to_urdf(a)))
+        direct = list(c2.angle_to_movej(a))
+        for i in range(6):
+            d = (chain[i] - direct[i] + 180.0) % 360.0 - 180.0
+            if abs(d) > 1e-6:
+                bad_f += 1
+                if bad_f <= 3:
+                    print(f'  [FAIL] D with offset: angle '
+                          f'{[round(v,1) for v in a]} j{i+1}: '
+                          f'chain={chain[i]:.4f} direct={direct[i]:.4f}')
+    ok = bad_f == 0
+    print(f'  [{"ok  " if ok else "FAIL"}] {len(cases)+len(rand)} inputs: '
+          'readback carries the offset, and every round trip still closes')
+    if not ok:
+        failures.append('F: urdf_offset_deg is not applied symmetrically')
     print()
 
     print('=' * 62)
