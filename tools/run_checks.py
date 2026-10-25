@@ -152,6 +152,9 @@ CHECKS = [
     ('selftest_fit_grasp_correction.py',
      'the fit tool: recovers known transforms, refuses mirrors and too-few points',
      True, []),
+    ('selftest_read_angles.py',
+     'the zero-offset arithmetic: closed loop at home, sign flips all six', True,
+     []),
 ]
 
 
