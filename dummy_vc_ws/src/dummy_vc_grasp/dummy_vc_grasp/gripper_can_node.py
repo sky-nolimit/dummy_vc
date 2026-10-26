@@ -33,6 +33,11 @@
    （`Ctrl/Motor/motor.cpp:96-103`）会让输出恒为零，位置命令一点反应都没有，
    而回读照样在动——这看起来像"命令没进去"，其实是被闸挡了。
 2. 位置是**绝对电机圈数**，不是相对量。断电再上电，同一圈数对应同一开口。
+
+还有一条会打架的地方：主控的 `power_on()` 会发 0x381 带一个 float（`maxCurrent`），
+而这块板只认 uint32 == 1 才是使能，其余一律 `MODE_STOP` —— **主控一启动就把夹爪
+置停**。所以 `enable_before_move` 默认开着，每次下位置前补一帧使能；主控重启过
+也不用管它。主控那边绝不能再调 `hand.*`。
 """
 
 import argparse
@@ -59,11 +64,16 @@ class GripperCanNode(Node):
         #: 主动问一次位置（板子自己也会被主控轮询，这里只是不依赖主控）
         self.declare_parameter('poll_hz', 5.0)
         self.declare_parameter('enable_on_start', True)
+        #: 每次下位置前再补一帧使能。主控的 power_on 会把夹爪置停（见下方
+        #: `_on_width` 的注释），所以这个默认开着。
+        self.declare_parameter('enable_before_move', True)
         #: 只打印不发送：用来在没开 can0 的机器上先看一眼要发什么。
         self.declare_parameter('dry_run', False)
 
         self.channel = str(self.get_parameter('channel').value)
         self.dry_run = bool(self.get_parameter('dry_run').value)
+        self._enable_before_move = bool(
+            self.get_parameter('enable_before_move').value)
         self.sock = None if self.dry_run else self._open_socket(self.channel)
 
         self.frames_sent = 0
@@ -190,6 +200,12 @@ class GripperCanNode(Node):
                 '要 {:.2f} mm，机械行程只有 {:g}~{:g} mm，按 {:.2f} mm 发'.format(
                     raw, gf.MIN_WIDTH_MM, gf.MAX_WIDTH_MM, width))
         revs = gf.width_to_revs(width)
+        # 每发一次位置都补一帧使能。原因：主控固件的 power_on 会调
+        # hand.set_enable(true)，而它发的是 0x381 带一个 float（如 0.5A），
+        # 35 板那边只认 uint32 == 1 才是使能，其余一律 MODE_STOP —— 主控
+        # 一启动就会把夹爪置停。所以不能信任"节点启动时那一次使能"。
+        if self._enable_before_move:
+            self._send(gf.ENABLE_FRAME_ID, gf.encode_enable(True))
         self._send(gf.POSITION_FRAME_ID, gf.encode_position(revs))
         self.get_logger().info(
             '开口 {:.2f} mm → 位置 {:.4f} 圈'.format(width, revs))
