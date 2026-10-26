@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
-"""离线自查：夹爪 CAN 帧的编解码，以及"节点有没有绕开这一层自己拼字节"。
+"""离线自查：夹爪 CAN 帧的编解码、宽度↔圈数换算，以及节点有没有绕开这一层。
 
 它要防的故障是这一类：
 
-    字节摆错了（大小端、补零、帧 ID 拼错），可板子上什么都不说 ——
-    夹爪不动，和"没供电""板子不认这套协议"看起来一模一样
+    字节摆错了（大小端、补零、帧 ID 拼错），板子上什么都不说 ——
+    夹爪不动，和"没供电""没标定""板子不认这套协议"看起来一模一样
 
-真板子要等到 USB-CAN 的线到了才能试，而"字节对不对"是纯算术，在这里就能把
-每一种情况钉死。另外两项也不是凑数：
+2026-10-26 这份自查跟着 `gripper_frames.py` 一起重写：原来钉的 0x382（角度）在
+真板子上是**触发标定**，按下去会把标定表擦掉、位置模式从此不输出。现在钉的是
+35 板固件真正的三帧：0x381 使能、0x385 位置、0x3A3 回读。
+
+另外两项也不是凑数：
 
   * SocketCAN 那 16 字节的 `struct can_frame`（id/dlc/对齐）最容易写错，
     错了 `send()` 不报错，只是发出去一帧没人认
-  * 节点必须走 `gripper_frames` 这一层。节点里自己写 `0x382` 就意味着有两份
+  * 节点必须走 `gripper_frames` 这一层。节点里自己写 `0x385` 就意味着有两份
     定义，改了一处忘了另一处，症状同上
 
     python tools/selftest_gripper_frames.py
@@ -27,6 +30,9 @@ NODE = os.path.join(GRASP, 'dummy_vc_grasp', 'gripper_can_node.py')
 
 #: 纯层允许 import 的东西。多一个 ROS/socket 进来，这个自测就没了。
 PURE_IMPORTS = {'math', 'struct'}
+
+#: 2026-10-26 量尺实测的三个点：圈数 → 开口（mm）
+MEASURED = ((0.10, 12.5), (0.25, 10.5), (0.50, 8.0))
 
 FAILURES = []
 
@@ -45,6 +51,14 @@ def same(label, got, want):
         ok(label)
         return True
     fail(f'{label}: 拿到 {got!r}，应该是 {want!r}')
+    return False
+
+
+def close(label, got, want, tol):
+    if abs(got - want) <= tol:
+        ok(f'{label}（{got:.3f} vs {want:.3f}）')
+        return True
+    fail(f'{label}: 拿到 {got:.3f}，应该是 {want:.3f} ± {tol}')
     return False
 
 
@@ -94,62 +108,82 @@ def check_pure_layer():
 
 
 def check_ids(gf):
-    print('\n1. 帧 ID 与参考固件一致（node 7、mode 1/2）')
-    same('电流上限帧 0x381', gf.CURRENT_LIMIT_FRAME_ID, 0x381)
-    same('角度帧 0x382', gf.ANGLE_FRAME_ID, 0x382)
+    print('\n1. 帧 ID 与 35 板固件一致（node 7，mode 0x01 / 0x05 / 0x23）')
+    same('使能帧 0x381', gf.ENABLE_FRAME_ID, 0x381)
+    same('位置帧 0x385', gf.POSITION_FRAME_ID, 0x385)
+    same('回读帧 0x3A3', gf.POSITION_FEEDBACK_ID, 0x3A3)
     same('负载长度 8', gf.DLC, 8)
+    same('回帧请求字节 0x01', gf.ACK_REQUEST, 0x01)
 
 
 def check_payload(gf):
-    print('\n2. 负载就是 float32 小端 + 4 字节补零')
-    same('5.0 度', gf.encode_angle(5.0).hex(' '), '00 00 a0 40 00 00 00 00')
-    same('10.0 度', gf.encode_angle(10.0).hex(' '), '00 00 20 41 00 00 00 00')
-    same('0.0 度', gf.encode_angle(0.0).hex(' '), '00 00 00 00 00 00 00 00')
-    same('0.5 A', gf.encode_current(0.5).hex(' '), '00 00 00 3f 00 00 00 00')
-    same('回读 10.0', gf.decode(gf.encode_angle(10.0)), 10.0)
-    same('回读 0.25 A', gf.decode(gf.encode_current(0.25)), 0.25)
+    print('\n2. 负载字节：使能是 uint32，位置是 float32 小端 + 第 5 字节 1')
+    same('使能', gf.encode_enable(True).hex(' '), '01 00 00 00 00 00 00 00')
+    same('停', gf.encode_enable(False).hex(' '), '00 00 00 00 00 00 00 00')
+    same('0.1 圈（真机实测过的那一帧）',
+         gf.encode_position(0.1).hex(' '), 'cd cc cc 3d 01 00 00 00')
+    same('0.25 圈', gf.encode_position(0.25).hex(' '), '00 00 80 3e 01 00 00 00')
+    same('0.5 圈', gf.encode_position(0.5).hex(' '), '00 00 00 3f 01 00 00 00')
+    same('读位置用全零负载', gf.encode_position_query().hex(' '),
+         '00 00 00 00 00 00 00 00')
+
+    print('\n3. 回帧解码：float32 圈数 + 第 5 字节"到位"')
+    revs, finished = gf.decode_position(bytes.fromhex('e17a763d00000000'))
+    close('真机那一帧 0.0602 圈', revs, 0.0602, 1e-4)
+    same('第 5 字节 0 = 未到位', finished, False)
+    revs, finished = gf.decode_position(bytes.fromhex('e17a763d01000000'))
+    same('第 5 字节 1 = 到位', finished, True)
 
 
 def check_socketcan(gf):
-    print('\n3. SocketCAN 的 16 字节 can_frame：id / dlc / 对齐')
-    frame = gf.to_socketcan(gf.ANGLE_FRAME_ID, gf.encode_angle(5.0))
+    print('\n4. SocketCAN 的 16 字节 can_frame：id / dlc / 对齐')
+    frame = gf.to_socketcan(gf.POSITION_FRAME_ID, gf.encode_position(0.1))
     same('总长 16', len(frame), 16)
     # id 小端 4 字节、dlc 1 字节、3 字节对齐、然后 8 字节负载
-    same('id = 82 03 00 00', frame[:4].hex(' '), '82 03 00 00')
+    same('id = 85 03 00 00', frame[:4].hex(' '), '85 03 00 00')
     same('dlc = 08', frame[4:5].hex(), '08')
     same('中间 3 字节对齐补零', frame[5:8].hex(), '000000')
-    same('负载跟在后面', frame[8:].hex(' '), '00 00 a0 40 00 00 00 00')
+    same('负载跟在后面', frame[8:].hex(' '), 'cd cc cc 3d 01 00 00 00')
     expect_error('负载长度不对要拒绝', ValueError,
-                 gf.to_socketcan, gf.ANGLE_FRAME_ID, b'\x00' * 4)
+                 gf.to_socketcan, gf.POSITION_FRAME_ID, b'\x00' * 4)
     expect_error('扩展帧 ID 要拒绝', ValueError,
-                 gf.to_socketcan, 0x800, gf.encode_angle(0.0))
+                 gf.to_socketcan, 0x800, gf.encode_position(0.0))
+
+
+def check_mapping(gf):
+    print('\n5. 宽度↔圈数：实测三点都要落在 0.5 mm 内')
+    for revs, width in MEASURED:
+        close('{:.2f} 圈 → 开口'.format(revs), gf.revs_to_width(revs), width, 0.5)
+    for width in (0.0, 8.0, 12.5, 30.0, 55.0):
+        back = gf.revs_to_width(gf.width_to_revs(width))
+        close('{:.1f} mm 来回一趟'.format(width), back, width, 1e-6)
+    close('满开 55 mm 的圈数是负的（正常）', gf.width_to_revs(55.0), -3.733, 0.01)
 
 
 def check_rejections(gf):
-    print('\n4. 越界与非法值：抛异常，不静默夹紧')
-    same('0 度可以', len(gf.encode_angle(0.0)), 8)
-    same('30 度可以', len(gf.encode_angle(gf.MAX_ANGLE_DEG)), 8)
-    same('1.0 A 可以', len(gf.encode_current(1.0)), 8)
-    expect_error('30.1 度', gf.OutOfRange, gf.encode_angle, 30.1)
-    expect_error('-0.1 度', gf.OutOfRange, gf.encode_angle, -0.1)
-    expect_error('NaN 度', gf.OutOfRange, gf.encode_angle, float('nan'))
-    expect_error('inf 度', gf.OutOfRange, gf.encode_angle, float('inf'))
-    expect_error('1.5 A', gf.OutOfRange, gf.encode_current, 1.5)
-    expect_error('bool 不是数字', TypeError, gf.encode_angle, True)
-    expect_error('字符串不是数字', TypeError, gf.encode_angle, '5')
-    expect_error('4 字节负载解码要拒绝', ValueError, gf.decode, b'\x00' * 4)
+    print('\n6. 越界与非法值：抛异常，不静默夹紧')
+    ok('0 mm 算得出圈数（{:.3f}）'.format(gf.width_to_revs(0.0)))
+    close('55 mm 可以', gf.width_to_revs(55.0), -3.733, 0.002)
+    expect_error('55.1 mm', gf.OutOfRange, gf.width_to_revs, 55.1)
+    expect_error('-0.1 mm', gf.OutOfRange, gf.width_to_revs, -0.1)
+    expect_error('NaN 宽度', gf.OutOfRange, gf.width_to_revs, float('nan'))
+    expect_error('inf 宽度', gf.OutOfRange, gf.width_to_revs, float('inf'))
+    expect_error('NaN 位置', gf.OutOfRange, gf.encode_position, float('nan'))
+    expect_error('bool 不是数字', TypeError, gf.encode_position, True)
+    expect_error('字符串不是数字', TypeError, gf.width_to_revs, '15')
+    expect_error('4 字节回帧解不开', ValueError, gf.decode_position, b'\x00' * 4)
 
 
 def check_clamp(gf):
-    print('\n5. 夹紧要留痕：返回 (值, 有没有夹)')
-    same('7.5 度不用夹', gf.clamp_angle(7.5), (7.5, False))
-    same('-1 度夹到 0', gf.clamp_angle(-1.0), (0.0, True))
-    same('40 度夹到 30', gf.clamp_angle(40.0), (30.0, True))
-    expect_error('NaN 夹不了，要拒绝', gf.OutOfRange, gf.clamp_angle, float('nan'))
+    print('\n7. 夹紧要留痕：返回 (值, 有没有夹)')
+    same('15 mm 不用夹', gf.clamp_width(15.0), (15.0, False))
+    same('-1 mm 夹到 0', gf.clamp_width(-1.0), (0.0, True))
+    same('60 mm 夹到 55', gf.clamp_width(60.0), (55.0, True))
+    expect_error('NaN 夹不了，要拒绝', gf.OutOfRange, gf.clamp_width, float('nan'))
 
 
 def check_node_uses_frames():
-    print('\n6. 节点不许自己拼字节，也不许漏进 setup.py')
+    print('\n8. 节点不许自己拼字节，也不许漏进 setup.py')
     try:
         with open(NODE, encoding='utf-8') as fh:
             source = fh.read()
@@ -172,9 +206,9 @@ def check_node_uses_frames():
     hardcoded = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, int) \
-                and node.value in (0x381, 0x382):
-            hardcoded.append(node.value)
-    same('节点里没有写死的 0x381/0x382', hardcoded, [])
+                and node.value in (0x381, 0x385, 0x382, 0x3A3):
+            hardcoded.append(hex(node.value))
+    same('节点里没有写死的 0x381/0x385/0x3A3', hardcoded, [])
 
     try:
         with open(os.path.join(GRASP, 'setup.py'), encoding='utf-8') as fh:
@@ -194,6 +228,7 @@ def main():
         check_ids(gf)
         check_payload(gf)
         check_socketcan(gf)
+        check_mapping(gf)
         check_rejections(gf)
         check_clamp(gf)
     check_node_uses_frames()
@@ -205,7 +240,8 @@ def main():
             print(f'  - {msg}')
         return 1
     print('SUMMARY')
-    print('  [ ok ] gripper_frames.py      frame ids and float32 payload match the firmware')
+    print('  [ ok ] gripper_frames.py      enable/position/feedback frames match the 35-board firmware')
+    print('  [ ok ] gripper_frames.py      width <-> revs mapping reproduces the three measured points')
     print('  [ ok ] gripper_can_node.py    goes through the codec, and is registered')
     print('RESULT: every byte of the gripper frame is pinned down offline')
     return 0
