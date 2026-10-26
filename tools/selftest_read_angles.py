@@ -71,17 +71,22 @@ def check_config(mod):
     close('joint_offset_deg[1]', joff[1], 74.572)
     close('joint_offset_deg[2]', joff[2], -91.474)
 
-    ref = mod.read_home_reference(CONFIG)
-    if ref is None:
-        fail('读不出 home_reference_deg')
-        return
+    ref = mod.home_reference(sign, joff, off)
+    # 手摆 home 那天实测到的原始角。它由上面三张表反推得出，所以顺带守住了
+    # "配置里的偏置确实来自那次手摆"——换了偏置这行就红。
+    measured = [1.435, 74.394, -88.601, 0.389, 1.431, 3.675]
+    gap = max(abs(a - b) for a, b in zip(ref, measured))
+    if gap <= 5e-4:
+        ok(f'反推出的 home 原始角 = 10-25 手摆实测（最大差 {gap:.1e}）')
+    else:
+        fail(f'反推出的 home 原始角与实测差 {gap:.3f} 度：{ref} vs {measured}')
     model = mod.urdf_angles(ref, sign, joff, off)
     worst = max(abs(v) for v in model)
     if worst <= 1e-6:
         ok(f'标定 home 处模型读零（最大 {worst:.1e}）')
     else:
-        fail(f'标定 home 处模型还差 {worst:.3f} 度：home_reference_deg 与 '
-             f'urdf_offset_deg 不同步')
+        fail(f'标定 home 处模型还差 {worst:.3f} 度：偏置表与'
+             f' joint_offset_deg 不同步')
     implied = mod.offsets_for_home(ref, sign, joff)
     gap = max(abs(a - b) for a, b in zip(implied, off))
     if gap <= 1e-6:
@@ -186,10 +191,12 @@ def check_home_check(mod):
         ok('其它五个关节不受影响')
     else:
         fail(f'只动 j6，别的关节也变了：{d}')
-    if mod.read_home_reference(CONFIG) is None:
-        fail('配置里应当有 home_reference_deg')
+    sign, joff, off = mod.read_config_lists(CONFIG)
+    derived = mod.home_reference(sign, joff, off)
+    if max(abs(a - b) for a, b in zip(derived, ref)) > 1e-3:
+        fail(f'反推出的 home 应当是 {ref}，实际 {derived}')
     else:
-        ok('配置里读得到 home_reference_deg')
+        ok('home 参考角由配置反推得出，不需要单独存一份')
 
 
 def main():

@@ -79,11 +79,10 @@ DESCRIPTIONS = {
         'URDF-space zero offset (deg): the angle each joint really has when '
         'the device sits at the 7 pose. Applied to BOTH the readback and the '
         'command chain, so it fixes what the model shows and where it goes.',
-    'home_reference_deg':
-        'Raw device angles (deg) read at the calibrated home. tools/read_'
-        'angles.py --check-home compares the live readback against these, so '
-        'a joint that drifted or a frame that shifted after a power cycle '
-        'shows up as a number instead of as a slightly crooked arm.',
+    'home_check_tol_deg':
+        'How far (deg) a joint may sit from the calibrated home before the '
+        'startup pose check calls it out. The reference itself is derived from '
+        'joint_offset_deg and urdf_offset_deg, not stored separately.',
     'wrap_min_deg':
         'Lower bound the move_j command is normalised into.',
     'wrap_max_deg':

@@ -122,10 +122,18 @@ def check_wired():
         ok('调用在 homing 之前（homing 之后就分不清是谁歪了）')
     else:
         fail('调用在 homing 之后，那时已经看不出上电时的位姿了')
-    if "'home_reference_deg'" in src:
-        ok('参数 home_reference_deg 已声明')
+    if 'def _home_reference(' in src:
+        ok('参考姿态由 _home_reference 反推')
     else:
-        fail('驱动没声明 home_reference_deg，检查会永远跳过')
+        fail('驱动里没有 _home_reference，检查会永远跳过')
+    # 回归：它曾经是独立参数、默认值写成 []，rclpy 把空列表推成 BYTE_ARRAY，
+    # YAML 里的 double array 直接让 on_configure 抛
+    # InvalidParameterTypeException。反推就不该再有这个参数。
+    if "declare_parameter('home_reference_deg'" in src:
+        fail('又把 home_reference_deg 声明成参数了：它会和偏置表不同步，'
+             '而且空列表默认值会被 rclpy 当成 BYTE_ARRAY')
+    else:
+        ok('没有把 home_reference_deg 再声明成参数')
 
 
 def main():

@@ -23,11 +23,12 @@ Usage
     python3 tools/read_angles.py --check-home  # still at the calibrated home?
     python3 tools/read_angles.py --config-only # no device; just print the config
 
-`--check-home` compares the live readback with `home_reference_deg` from the
-config and exits 3 when a joint is further than `--home-tol` (1.0 deg) from it.
-That turns "somebody nudged j6 before the driver came up" and "the device frame
-shifted after a power cycle" into a number, instead of a slightly crooked arm
-noticed halfway through a grasp.
+`--check-home` compares the live readback with the raw angles the calibrated home
+should read, computed from `joint_sign` / `joint_offset_deg` / `urdf_offset_deg`
+(the driver uses the same expression), and exits 3 when a joint is further than
+`--home-tol` (1.0 deg) from it. That turns "somebody nudged j6 before the driver
+came up" and "the device frame shifted after a power cycle" into a number,
+instead of a slightly crooked arm noticed halfway through a grasp.
 
 `--limp` disables the axes and leaves them disabled: the controller itself stays
 powered (USB), so the encoders keep reporting while the arm can be pushed into
@@ -126,14 +127,17 @@ def compare_to_reference(raw, reference):
     return [a - b for a, b in zip(raw, reference)]
 
 
-def read_home_reference(path=DEFAULT_CONFIG):
-    """The raw angles recorded at the calibrated home, or None."""
-    with open(path, encoding='utf-8') as fh:
-        text = fh.read()
-    ref = parse_flow_list(text, 'home_reference_deg')
-    if ref is None or len(ref) != len(JR):
-        return None
-    return ref
+def home_reference(sign, joff, off):
+    """The raw angles the calibrated home should read — derived, not stored.
+
+    URDF all-zero means `angle = (0 - off) / sign + joint_offset_deg`, which is
+    the same expression the driver's `_home_reference()` uses. Keeping a copy in
+    the YAML would only create a second thing to forget to update.
+    """
+    out = []
+    for s, o, f in zip(sign, joff, off):
+        out.append((0.0 - f) / (s if abs(s) > 1e-12 else 1.0) + o)
+    return out
 
 
 def spread(readings):
@@ -186,8 +190,8 @@ def main(argv=None):
         print(f'  joint_sign        {sign}')
         print(f'  joint_offset_deg  {joff}')
         print(f'  urdf_offset_deg   {off}')
-        ref = read_home_reference(args.config)
-        print(f'  home_reference_deg {ref if ref else "(absent)"}')
+        ref = home_reference(sign, joff, off)
+        print(f'  -> home reads  {["%+.3f" % v for v in ref]}')
         return 0
 
     sys.path.insert(0, HERE)
@@ -261,23 +265,22 @@ def main(argv=None):
         print('  (that is what the config already says)')
 
     rc = 0
-    ref = read_home_reference(args.config)
-    if ref is not None:
-        d = compare_to_reference(raw, ref)
-        worst = max(range(len(d)), key=lambda k: abs(d[k]))
-        print()
-        print('  distance from the recorded home (raw - reference):')
-        print('    ' + ', '.join(f'{JR[i]} {v:+.2f}' for i, v in enumerate(d)))
-        if abs(d[worst]) > args.home_tol:
-            print(f'  WARNING: {JR[worst]} is {d[worst]:+.2f} deg from the '
-                  f'recorded home (tolerance {args.home_tol:.1f}).')
-            print('           If the arm was just homed, that means the '
-                  'device frame moved or the offsets did not apply; if it was '
-                  'posed by hand, it is simply not at home.')
-            rc = 3
-        else:
-            print(f'  all six within {args.home_tol:.1f} deg of the recorded '
-                  f'home')
+    ref = home_reference(sign, joff, off)
+    d = compare_to_reference(raw, ref)
+    worst = max(range(len(d)), key=lambda k: abs(d[k]))
+    print()
+    print('  distance from the calibrated home (raw - reference):')
+    print('    ' + ', '.join(f'{JR[i]} {v:+.2f}' for i, v in enumerate(d)))
+    if abs(d[worst]) > args.home_tol:
+        print(f'  WARNING: {JR[worst]} is {d[worst]:+.2f} deg from the '
+              f'calibrated home (tolerance {args.home_tol:.1f}).')
+        print('           If the arm was just homed, that means the device '
+              'frame moved or the offsets did not apply; if it was posed by '
+              'hand, it is simply not at home.')
+        rc = 3
+    else:
+        print(f'  all six within {args.home_tol:.1f} deg of the calibrated '
+              f'home')
 
     if args.limp:
         print()

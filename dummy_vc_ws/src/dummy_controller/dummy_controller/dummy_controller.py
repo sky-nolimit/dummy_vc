@@ -219,10 +219,11 @@ class dummy_controller(LifecycleNode):
         self.declare_parameter('move_j_offset_deg', default_movej_offset_deg)
         self.declare_parameter('urdf_offset_deg', default_urdf_offset_deg)
         # ---- 启动位姿核对 --------------------------------------------------
-        # 标定 home 时读到的六个原始角（angle 空间，度）。不是参数，是"尺子"：
-        # 每次启动都拿它比一次，好让"某个轴被碰过"在日志里立刻现形。
-        # 空列表 = 还没标定，检查跳过。
-        self.declare_parameter('home_reference_deg', [])
+        # 标定 home 时的六个原始角不单独存成参数，而是由 joint_offset_deg /
+        # joint_sign / urdf_offset_deg 反推（见 _home_reference）。曾经把它做成
+        # 参数、默认值写 []，rclpy 把空列表推成 BYTE_ARRAY，YAML 里传 double
+        # array 就让 on_configure 抛 InvalidParameterTypeException；而且它本来
+        # 就是上面三张表的函数，存一份只是多一个会不同步的地方。
         self.declare_parameter('home_check_tol_deg', 1.0)
         self.declare_parameter('home_joints_deg', [0.0, 0.0, 90.0, 0.0, 0.0, 0.0])
         self.declare_parameter('reset_joints_deg', [0.0, -75.0, 180.0, 0.0, 0.0, 0.0])
@@ -488,20 +489,26 @@ class dummy_controller(LifecycleNode):
         return vals
 
     def _home_reference(self):
-        """`home_reference_deg`：标定 home 时的六个原始角，没标定则 None。"""
-        raw = self.get_parameter('home_reference_deg').value
-        try:
-            vals = [float(v) for v in raw]
-        except TypeError:
-            return None
-        if not vals:
-            return None
-        if len(vals) != 6:
-            self.get_logger().error(
-                'home_reference_deg must have exactly 6 elements; skipping the '
-                'startup pose check')
-            return None
-        return vals
+        """标定 home 时的六个原始角（度）—— 由三张表反推，不单独存。
+
+        URDF 全零时 `angle = (0 - off) / sign + joint_offset_deg`，所以这组数
+        完全由 joint_offset_deg / joint_sign / urdf_offset_deg 决定。
+
+        为什么不做成参数：它和那三张表是同一个东西的两种写法，存一份就多一个
+        会不同步的地方 —— 改了 urdf_offset_deg 忘了改它，启动核对就会天天报
+        "某个轴被碰过"，而实际上什么都没发生。之前把它做成参数、默认值写成
+        `[]`，rclpy 还会把空列表推成 BYTE_ARRAY，YAML 里的 double array 直接
+        让 on_configure 抛异常。
+        """
+        off = self._urdf_offsets()
+        ref = []
+        for i in range(6):
+            try:
+                joff = float(self.joint_offset_deg[i])
+            except (TypeError, ValueError):
+                return None
+            ref.append((0.0 - off[i]) / self._safe_sign(i) + joff)
+        return ref
 
     def _check_home_pose(self):
         """上电第一件事：这六轴现在到底在哪？与标定 home 差多少？
@@ -511,9 +518,10 @@ class dummy_controller(LifecycleNode):
         的"歪"就再也分不清是标定错还是它本来就歪。先记一笔，日志里就有据可查。
         """
         if self.home_reference_deg is None:
-            self.get_logger().info(
-                'startup pose check: no home_reference_deg configured, '
-                'skipping (nothing is known about the calibrated home)')
+            self.get_logger().warn(
+                'startup pose check: could not derive the calibrated home from '
+                'joint_offset_deg / urdf_offset_deg (a table is malformed); '
+                'skipping -- this is NOT the same as "the pose is fine"')
             return
         try:
             raw = self.read_raw_angles()
