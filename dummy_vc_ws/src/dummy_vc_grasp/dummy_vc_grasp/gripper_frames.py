@@ -54,6 +54,11 @@ CALIBRATION_FRAME_ID = (NODE_ID << 7) | 0x02                     # 0x382
 ACK_REQUEST = 0x01
 
 #: 开口宽度（mm）与电机圈数的线性关系：开口 = 13.48 - 11.12 * 圈数
+#:
+#: **重新标定过夹爪就一定要重测这两个数**：标定改的是 `encoderHomeOffset`，
+#: 同一圈数对应的物理位置整体平移，旧数据直接作废。重测用
+#: `tools/gripper_sweep.py`（自己走点、问你卡尺读数）+ `tools/fit_gripper_width.py`
+#: （拟合出这两个常数并打印成可直接粘贴的格式）。
 REV_AT_ZERO_WIDTH_MM = 13.48
 MM_PER_REV = 11.12
 

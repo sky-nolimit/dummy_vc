@@ -158,6 +158,8 @@ CHECKS = [
     ('selftest_home_check.py',
      'the startup pose check: tells "parked elsewhere" from "one joint moved"',
      True, []),
+    ('selftest_fit_gripper_width.py',
+     'the width fit: recovers a known line, skips unmeasured rows', True, []),
 ]
 
 
