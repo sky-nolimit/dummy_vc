@@ -79,7 +79,14 @@ def have_frame(sock):
 
 
 def read_position(sock, timeout):
-    """等一帧位置回读。超时返回 None（板子没在说话）。"""
+    """问一次位置再等回帧。
+
+    **必须主动问**：这块板不会自己广播 `0x3A3`，只有收到查询（同样是 `0x3A3`
+    这个 ID，载荷无所谓）或者带 ACK 位的位置帧才回一帧。candump 里"3A3 很少见"
+    就是这个原因 —— 主控没在跑，没人轮询它。
+    """
+    sock.send(gf.to_socketcan(gf.POSITION_FEEDBACK_ID,
+                              gf.encode_position_query()))
     deadline = time.time() + timeout
     while time.time() < deadline:
         got = have_frame(sock)
@@ -119,7 +126,10 @@ def sweep(args):
     try:
         now = read_position(sock, args.timeout)
         if now is None:
-            print('一帧 0x3A3 都没收到：板子没上电 / can0 没 up / 没接终端电阻。')
+            print('查询发了，{} 秒内没等到 0x3A3 回帧。'.format(args.timeout))
+            print('依次查：①夹爪板通电了吗（板上有灯/手推有阻力）'
+                  '②can0 起了吗（ip -br link show can0 要是 UP）'
+                  '③终端电阻 120Ω ④`candump can0` 里能看到你这句查询发出去吗')
             return 2
         print('当前位置 {:.4f} 圈 = 开口约 {:.1f} mm'.format(
             now[0], gf.revs_to_width(now[0])))
@@ -132,7 +142,7 @@ def sweep(args):
             time.sleep(args.settle)
             got = read_position(sock, args.timeout)
             if got is None:
-                print('{:>10.4f} {}'.format(target, '没等到回读'))
+                print('{:>10.4f} 没等到回读（查询已发，板子没答）'.format(target))
                 continue
             revs, finished = got
             width = gf.revs_to_width(revs)
