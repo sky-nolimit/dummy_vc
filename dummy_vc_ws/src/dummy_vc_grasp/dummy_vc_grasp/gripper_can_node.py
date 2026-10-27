@@ -49,7 +49,7 @@ import time
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float64
+from std_msgs.msg import Float64, String
 
 from dummy_vc_grasp import gripper_frames as gf
 from dummy_vc_grasp import gripper_home as gh
@@ -88,6 +88,15 @@ class GripperCanNode(Node):
         self.declare_parameter('park_on_shutdown', True)
         #: 退出时合拢要等多久再读回读（手指走 0~50 mm 约 1 s）。
         self.declare_parameter('park_settle_s', 1.5)
+        #: 找零点之前先等板子回一帧位置，最多等这么久（刚开 socket 时板子可能
+        #: 正在上电/重启，第一帧要一两百毫秒才到）。
+        self.declare_parameter('home_board_timeout_s', 2.0)
+        #: 零点没量成时，要不要退回出厂合拢点继续用。**默认不要**：出厂值是别的
+        #: 板子的状态，在这块板上整体偏了 12.6 mm（实测），拿它张爪会顶到限位、
+        #: 拿它合爪会留 11 mm 缝 —— 比"一步不动"更难查。
+        self.declare_parameter('home_allow_default', False)
+        #: 零点状态发在这里：ready / default_zero / no_zero。
+        self.declare_parameter('status_topic', '/gripper/status')
 
         self.channel = str(self.get_parameter('channel').value)
         self.dry_run = bool(self.get_parameter('dry_run').value)
@@ -99,9 +108,12 @@ class GripperCanNode(Node):
         self.rev_closed = None
         #: 现场量到的两头行程（圈）。None = 还没量过，按齿条节距换算。
         self.span_revs = None
-        if self.sock is not None and bool(
-                self.get_parameter('home_on_start').value):
-            self._home_on_start()
+        #: 零点量准了吗（量准了才敢按毫米指挥）。
+        self.zero_known = False
+        #: 允不允许动夹爪。零点没量成、又没被允许退回出厂值时为 False：
+        #: 张爪、合爪、收手全部跳过，并且每次收到命令都说明原因。
+        self._may_move = True
+        self._last_refusal = 0.0
 
         self.frames_sent = 0
         self._stop = threading.Event()
@@ -114,6 +126,16 @@ class GripperCanNode(Node):
         self.sub = self.create_subscription(
             Float64, str(self.get_parameter('width_topic').value),
             self._on_width, 10)
+        self.status_pub = self.create_publisher(
+            String, str(self.get_parameter('status_topic').value), 10)
+
+        # 找零点放在"发布器/接收器都建好、接收线程还没起"的位置：那时没人抢帧，
+        # 而状态话题已经能发了。
+        if self.sock is not None and bool(
+                self.get_parameter('home_on_start').value):
+            self._home_on_start()
+        # 状态每秒重发一次：抓取节点可能比夹爪节点晚起，晚订阅也能收到。
+        self.create_timer(1.0, self._publish_status)
 
         if not self.dry_run:
             self._reader = threading.Thread(target=self._read_loop, daemon=True)
@@ -135,7 +157,9 @@ class GripperCanNode(Node):
                 gf.POSITION_FEEDBACK_ID,
                 self.get_parameter('position_topic').value,
                 self.anchor,
-                '' if self.rev_closed is not None else '，出厂值，没量过'))
+                '' if self.rev_closed is not None else (
+                    '，出厂值 —— 零点没量出来，本节点不接受移动命令'
+                    if not self._may_move else '，出厂值，没量过')))
 
     # -- 找零点 -----------------------------------------------------------
     @property
@@ -149,11 +173,19 @@ class GripperCanNode(Node):
         """两头止位之间差多少圈（没量过就 None，退回固定的齿条节距换算）。"""
         return self.span_revs
 
-    def _read_revs(self, timeout=0.3):
+    def _read_revs(self, timeout=0.3, attempts=1):
         """同步读一次位置（圈），读不到返回 None。
 
-        只在找零点时用 —— 那会儿接收线程还没起来，没人跟它抢帧。
+        只在找零点时用 —— 那会儿接收线程还没起来，没人跟它抢帧。`attempts > 1`
+        时会连着重发查询：刚打开 socket 的那一瞬间板子往往还没答上来。
         """
+        for _ in range(max(1, int(attempts))):
+            revs = self._read_revs_once(timeout)
+            if revs is not None:
+                return revs
+        return None
+
+    def _read_revs_once(self, timeout=0.3):
         try:
             self.sock.send(gf.to_socketcan(
                 gf.POSITION_FEEDBACK_ID, gf.encode_position_query()))
@@ -179,19 +211,40 @@ class GripperCanNode(Node):
             return revs
         return None
 
+    def _wait_for_board(self, timeout=None):
+        """等板子第一次回位置。刚开 socket 时它可能正在上电，别立刻判死刑。"""
+        if timeout is None:
+            timeout = float(self.get_parameter('home_board_timeout_s').value)
+        waited = 0.0
+        while waited < float(timeout):
+            if self._read_revs(timeout=0.4) is not None:
+                if waited > 0.0:
+                    self.get_logger().info(
+                        '{:.1f} 秒后板子开始回位置了'.format(waited))
+                return True
+            waited += 0.4
+        return False
+
     def _home_on_start(self):
         """启动时先把手指推到合拢，量出"开口 0"在哪一圈。
 
         这一步是宽度映射可靠的前提：截距跟着编码器零点走，而零点会被一次重新
-        标定平移掉。量不到就退回出厂值并明确告警 —— 不假装没事。
+        标定平移掉。量不到就**不动**（除非显式允许退回出厂值）—— 用错零点张爪
+        会顶到限位、合爪会留缝，比不动作更难查。
         """
         log = self.get_logger()
 
         def _send(frame_id, payload):
             self.sock.send(gf.to_socketcan(frame_id, payload))
 
+        if not self._wait_for_board():
+            log.error(
+                '夹爪板 {:.1f} 秒里一帧位置都没回。先确认 can0 UP、夹爪板通电、'
+                'channel 写对了；这次不会量零点'.format(
+                    float(self.get_parameter('home_board_timeout_s').value)))
+
         result = gh.home(
-            _send, self._read_revs,
+            _send, lambda: self._read_revs(timeout=0.3, attempts=3),
             span_revs=float(self.get_parameter('home_span_revs').value),
             stroke_tol_revs=float(
                 self.get_parameter('home_stroke_tol_revs').value),
@@ -199,14 +252,28 @@ class GripperCanNode(Node):
         if result.ok:
             self.rev_closed = result.rev_closed
             self.span_revs = result.span_revs
+            self.zero_known = True
+            self._may_move = True
             log.info('合拢点 {:.4f} 圈、张开点 {:.4f} 圈，行程 {:.1f} mm；'
                      '宽度就按这两头之间插值'.format(
                          result.rev_closed, result.rev_open,
                          result.span_revs * gf.MM_PER_REV))
         else:
-            log.warn('没量成：{}。先按出厂合拢点 {:.4f} 圈算，宽度可能整体偏；'
-                     '要用工具单独量一次：tools/gripper_home.py'.format(
-                         result.reason, gf.DEFAULT_REV_CLOSED))
+            allow = bool(self.get_parameter('home_allow_default').value)
+            self.zero_known = False
+            self._may_move = allow
+            if allow:
+                log.warn('没量成：{}。按要求退回出厂合拢点 {:.4f} 圈继续 —— '
+                         '宽度会整体偏（这块板实测偏 12.6 mm），别拿它夹东西'
+                         .format(result.reason, gf.DEFAULT_REV_CLOSED))
+            else:
+                log.error(
+                    '没量成：{}。零点未知，**这次不会动夹爪**（张/合/收手都跳过），'
+                    '抓取会在合爪那一步失败。先跑 tools/gripper_home.py 量一次；'
+                    '硬要用出厂值就把 home_allow_default 设成 true（不推荐）'
+                    .format(result.reason))
+        if not self._may_move:
+            return
         # 量完（或者没量成）都别让手指顶在止位上。
         width, _ = gf.clamp_width(
             float(self.get_parameter('idle_width_mm').value))
@@ -219,6 +286,27 @@ class GripperCanNode(Node):
             log.info('张到 {:.1f} mm 待命'.format(width))
         except OSError as exc:
             log.warn('张开命令没发出去：{}'.format(exc))
+
+    def _publish_status(self):
+        """把"零点准不准"发出去，让抓取节点在动之前就能看见。"""
+        if self.dry_run:
+            return
+        if self.zero_known:
+            text = 'ready'
+        elif self._may_move:
+            text = 'default_zero'
+        else:
+            text = 'no_zero'
+        self.status_pub.publish(String(data=text))
+
+    def _refuse(self, note):
+        """零点不可用时的统一回绝：说清楚原因，但别每 100 ms 刷一遍。"""
+        now = time.time()
+        if now - self._last_refusal >= 2.0:
+            self._last_refusal = now
+            self.get_logger().error(
+                '不动夹爪：{}。先跑 tools/gripper_home.py 量零点'
+                '（或把 home_allow_default 设成 true 强行用出厂值）'.format(note))
 
     # -- 传输层 -----------------------------------------------------------
     def _open_socket(self, channel):
@@ -307,6 +395,11 @@ class GripperCanNode(Node):
         if math.isnan(raw) or math.isinf(raw):
             self.get_logger().warn('收到 {}，丢掉'.format(raw))
             return
+        if not self._may_move:
+            # 零点没量出来：宁可一步不动，也不要拿出厂值把手指顶到限位上。
+            self._refuse('零点没量出来（/gripper/status={}）'.format(
+                'ready' if self.zero_known else 'no_zero'))
+            return
         width, clamped = gf.clamp_width(raw)
         if clamped:
             self.get_logger().warn(
@@ -330,6 +423,9 @@ class GripperCanNode(Node):
         再发一帧使能 + 位置，等 settle，最后发停（不长期保持力矩）。
         """
         width = float(self.get_parameter('park_width_mm').value)
+        if not self._may_move:
+            self.get_logger().info('零点没量出来，退出时不收手（手指停在原地）')
+            return
         revs = gf.width_to_revs(width, self.anchor, self.span)
         try:
             time.sleep(0.6)

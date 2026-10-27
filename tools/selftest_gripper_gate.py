@@ -128,6 +128,12 @@ def check_no_hand_commands():
         fail('只规划模式下会去动夹爪',
              'execute=false 时 _open_gripper/_close_gripper 要各自早退')
 
+    # 夹爪零点没量出来时，伸手下去只会空跑：动之前先看 /gripper/status。
+    if '_gripper_ready_to_move' in src and 'gripper_status_topic' in src:
+        ok('动之前先确认夹爪零点（/gripper/status）')
+    else:
+        fail('不检查夹爪零点就动手', 'MOVE_PRE_GRASP 之前要调 _gripper_ready_to_move')
+
 
 def main():
     print('gripper_gate 自测')

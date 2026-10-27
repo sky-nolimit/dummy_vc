@@ -276,6 +276,20 @@ def check_node_uses_frames():
     same('能关掉合拢（park_on_shutdown）',
          "declare_parameter('park_on_shutdown'" in node_src, True)
 
+    # 零点没量出来时不许动夹爪。这条是 2026-10-27 真机上踩出来的：那时节点
+    # 静默退回出厂值（2.9513 圈，比这块板的真零点少 1.08 圈），结果启动时张爪
+    # 顶到限位、退出时合爪留了 11 mm 缝。
+    same('零点没量成不会静默退回出厂值（home_allow_default）',
+         "declare_parameter('home_allow_default'" in node_src, True)
+    same('没有零点就不动夹爪（_may_move 拦在 _on_width）',
+         'if not self._may_move:' in node_src, True)
+    same('零点状态会发出去（status_topic + _publish_status）',
+         "declare_parameter('status_topic'" in node_src
+         and 'def _publish_status' in node_src, True)
+    same('找零点前先等板子回话（_wait_for_board）',
+         'def _wait_for_board' in node_src and '_wait_for_board()' in node_src,
+         True)
+
 
 def main():
     gf = load_frames()

@@ -72,6 +72,9 @@ pick_place_node:
     gripper_enabled: false               # true = 真的合爪；false = 走到竖直下降就停
     gripper_cmd_topic: "/gripper/width"
     gripper_state_topic: "/gripper/position"
+    # 夹爪节点自报零点准不准（ready / default_zero / no_zero）。零点没量出来时
+    # 夹爪节点会拒绝移动命令，这里就在伸手之前先拦掉，别白跑一趟。
+    gripper_status_topic: "/gripper/status"
     gripper_open_m: 0.050                # 张开到 50 mm；55 是满开但会顶本体堵转
     gripper_clearance_m: 0.002           # 闭到"方块宽 − 2 mm"，有这点预压才夹得住
     gripper_min_close_m: 0.004           # 再窄就是在夹手指自己

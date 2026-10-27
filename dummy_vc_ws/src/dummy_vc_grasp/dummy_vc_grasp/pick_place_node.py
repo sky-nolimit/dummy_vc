@@ -36,7 +36,7 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from shape_msgs.msg import SolidPrimitive
-from std_msgs.msg import Empty, Float64
+from std_msgs.msg import Empty, Float64, String
 from vision_msgs.msg import Detection3DArray
 
 import numpy as np
@@ -98,6 +98,9 @@ class PickPlaceNode(Node):
         self.declare_parameter('gripper_enabled', False)
         self.declare_parameter('gripper_cmd_topic', '/gripper/width')
         self.declare_parameter('gripper_state_topic', '/gripper/position')
+        #: 夹爪节点自报的零点状态（ready / default_zero / no_zero）。零点没量出来
+        #: 时它会拒绝一切移动命令，这里就在"开始动"之前先拦掉。
+        self.declare_parameter('gripper_status_topic', '/gripper/status')
         #: 张开到多宽。55 是机械满开，但 53 以上会顶到本体堵转，留一点余量
         self.declare_parameter('gripper_open_m', 0.050)
         #: 闭合时比方块窄多少（有这点预压才有夹持力）
@@ -191,6 +194,8 @@ class PickPlaceNode(Node):
         self._probe = None
         #: 夹爪最近一次回读的开口（米）。None = 还没收到过 `/gripper/position`
         self.gripper_width_m = None
+        #: 夹爪节点自报的零点状态（ready / default_zero / no_zero）。None = 还没收到。
+        self.gripper_status = None
         #: 合爪/张爪等待的结束时刻与目标开口（秒 / 米）
         self._gripper_deadline = 0.0
         self._gripper_target = 0.0
@@ -226,6 +231,10 @@ class PickPlaceNode(Node):
         self.create_subscription(
             Float64, self.get_parameter('gripper_state_topic').value,
             self._on_gripper_width, 10)
+        #: 夹爪节点自报的零点状态：ready / default_zero / no_zero。None = 还没收到。
+        self.create_subscription(
+            String, self.get_parameter('gripper_status_topic').value,
+            self._on_gripper_status, 10)
         # 100 ms 的节拍：管超时、也管"上一步完成了该干什么"。
         self.create_timer(0.1, self._tick)
 
@@ -277,6 +286,8 @@ class PickPlaceNode(Node):
             self._probe = None
             self._gripper_mode = ''
         elif action == 'move_pre_grasp':
+            if not self._gripper_ready_to_move():
+                return
             self._send_goal_fitted(
                 self.plan.waypoints.pre_grasp, self.plan.waypoints.quaternion,
                 'move_pre_grasp')
@@ -306,6 +317,25 @@ class PickPlaceNode(Node):
                 self.goal_handle = None
             self.action_busy = False
             self._gripper_mode = ''
+
+    def _gripper_ready_to_move(self):
+        """动手之前先确认夹爪知道自己的零在哪。
+
+        零点没量出来时，夹爪节点会拒绝一切移动命令；如果还照常伸手、下探，最后
+        一定是"合爪没夹到 → FAULT"，手臂白跑一趟还停在方块上。所以在这里先拦。
+        返回 False 表示已经判失败、不要继续。
+        """
+        if not bool(self.get_parameter('gripper_enabled').value):
+            return True
+        if self.gripper_status in (None, 'ready', 'default_zero'):
+            return True
+        self._decide_failure(
+            '夹爪的零点没量出来（{}={}）：夹爪节点拒绝移动命令，现在伸手下去只会'
+            '空跑一趟。先停掉重来，确认夹爪节点启动时量到了合拢/张开两个止位；'
+            '量不到就跑 tools/gripper_home.py 单独量一次'.format(
+                self.get_parameter('gripper_status_topic').value,
+                self.gripper_status))
+        return False
 
     def _publish_gripper(self, width_m):
         self.gripper_cmd.publish(Float64(data=float(width_m) * 1e3))
@@ -408,6 +438,23 @@ class PickPlaceNode(Node):
     def _on_gripper_width(self, msg):
         """夹爪开口回读（毫米）。只存下来，判断在 `_check_gripper` 里做。"""
         self.gripper_width_m = float(msg.data) * 1e-3
+
+    def _on_gripper_status(self, msg):
+        """夹爪节点自报零点准不准。只在变化时说一句，别每秒钟刷。"""
+        status = str(msg.data).strip()
+        if status == self.gripper_status:
+            return
+        self.gripper_status = status
+        if status == 'ready':
+            self.get_logger().info('夹爪零点已量准（/gripper/status=ready）')
+        elif status == 'default_zero':
+            self.get_logger().warn(
+                '夹爪零点没量出来，用的是出厂值（/gripper/status=default_zero）'
+                ' —— 开口会整体偏，夹取高度别信绝对值')
+        else:
+            self.get_logger().error(
+                '夹爪零点没量出来（/gripper/status={}）：夹爪节点会拒绝移动命令，'
+                '这次抓取走不到"夹住"。先跑 tools/gripper_home.py'.format(status))
 
     def _on_start(self, _msg):
         self.get_logger().info('收到开始信号：{}'.format(
