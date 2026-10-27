@@ -314,6 +314,11 @@ class PickPlaceNode(Node):
         """张到 `gripper_open_m`。张开不需要证据，等一小会儿让它动完就行。"""
         if not bool(self.get_parameter('gripper_enabled').value):
             return
+        if not self.execute:
+            # 只规划模式下不去动夹爪：手臂根本没动，张/合都是在空气里演一遍，
+            # 徒增困惑（而且合爪会因为没夹到东西直接判 EMPTY 失败）。
+            self.get_logger().info('只规划（execute=false）：不动夹爪')
+            return
         width = float(self.get_parameter('gripper_open_m').value)
         self._gripper_target = width
         self._gripper_deadline = time.time() + float(
@@ -328,6 +333,13 @@ class PickPlaceNode(Node):
             self._decide_failure(
                 '合爪这一步没开：gripper_enabled=false。夹爪走的是 USB-CAN 旁路'
                 '（gripper_can_node + /gripper/width），不是驱动里的 hand.*')
+            return
+        if not self.execute:
+            # 只规划：不去夹（也没东西可夹），直接放行，让四个路点都能规划一遍。
+            self.get_logger().info(
+                '只规划（execute=false）：不夹，直接放行到抬升')
+            self._gripper_mode = ''
+            self._decide_success('只规划模式：跳过了合爪')
             return
         try:
             target = gripper_gate_mod.close_width(

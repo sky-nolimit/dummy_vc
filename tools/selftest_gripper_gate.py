@@ -120,6 +120,14 @@ def check_no_hand_commands():
     else:
         fail('没有接新的旁路通道（gripper_enabled / gripper_gate）')
 
+    # 只规划（execute=false）时不许去动夹爪：那时手臂没动，在空气里张/合只会
+    # 让人以为"夹过了"，合爪还会因为没夹到东西直接判 EMPTY 失败。
+    if src.count('if not self.execute:') >= 2:
+        ok('张爪/合爪都挡住了"只规划"模式')
+    else:
+        fail('只规划模式下会去动夹爪',
+             'execute=false 时 _open_gripper/_close_gripper 要各自早退')
+
 
 def main():
     print('gripper_gate 自测')
