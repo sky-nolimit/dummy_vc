@@ -133,6 +133,15 @@ def cmd_open(args, sock):
     return _move(args, sock, args.mm)
 
 
+def cmd_park(args, sock):
+    """闭合待命：合拢到 0 mm，然后发一帧停（不长期保持力矩）。"""
+    code = _move(args, sock, 0.0)
+    send(sock, gf.ENABLE_FRAME_ID, gf.encode_enable(False), args.dry_run)
+    if code == 0 and not args.dry_run:
+        print('已闭合，并发了停（手指现在不受力）')
+    return code
+
+
 def cmd_revs(args, sock):
     send(sock, gf.ENABLE_FRAME_ID, gf.encode_enable(True),
          args.dry_run)
@@ -184,6 +193,7 @@ def main(argv=None):
 
     sub.add_parser('read', help='读一次位置')
     sub.add_parser('enable', help='发一帧使能')
+    sub.add_parser('park', help='闭合到 0 mm 待命，然后发停')
     p_open = sub.add_parser('open', help='开口开到多少毫米')
     p_open.add_argument('mm', type=float)
     p_revs = sub.add_parser('revs', help='直接给电机圈数')
@@ -194,7 +204,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     sock = None if args.dry_run else open_socket(args.channel)
     try:
-        handler = {'read': cmd_read, 'enable': cmd_enable, 'open': cmd_open,
+        handler = {'read': cmd_read, 'enable': cmd_enable, 'park': cmd_park,
+                   'open': cmd_open,
                    'revs': cmd_revs, 'watch': cmd_watch}[args.cmd]
         return handler(args, sock)
     finally:

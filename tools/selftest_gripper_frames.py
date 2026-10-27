@@ -266,6 +266,16 @@ def check_node_uses_frames():
          'gripper_can_node = dummy_vc_grasp.gripper_can_node:main' in setup_src,
          True)
 
+    # 退出时合拢：这是"每次用完手指收回去"的那一步，别在重构里被悄悄删掉。
+    node_src = open(os.path.join(GRASP, 'dummy_vc_grasp',
+                                 'gripper_can_node.py'), encoding='utf-8').read()
+    same('退出时会合拢（shutdown 里调 _park）',
+         'self._park()' in node_src, True)
+    same('合拢宽度是参数，不是写死的',
+         "declare_parameter('park_width_mm'" in node_src, True)
+    same('能关掉合拢（park_on_shutdown）',
+         "declare_parameter('park_on_shutdown'" in node_src, True)
+
 
 def main():
     gf = load_frames()

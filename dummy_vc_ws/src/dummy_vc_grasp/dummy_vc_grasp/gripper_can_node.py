@@ -81,6 +81,13 @@ class GripperCanNode(Node):
                                gh.DEFAULT_STROKE_TOL_REVS)
         #: 量完之后张到多宽（不要让手指一直顶在止位上）。
         self.declare_parameter('idle_width_mm', 50.0)
+        #: 退出时合拢到多宽。0 = 完全闭合：手指收回去更不容易磕碰、也不容易
+        #: 进灰；想停在半开就改这个数。
+        self.declare_parameter('park_width_mm', 0.0)
+        #: 退出时要不要做上面那步。
+        self.declare_parameter('park_on_shutdown', True)
+        #: 退出时合拢要等多久再读回读（手指走 0~50 mm 约 1 s）。
+        self.declare_parameter('park_settle_s', 1.5)
 
         self.channel = str(self.get_parameter('channel').value)
         self.dry_run = bool(self.get_parameter('dry_run').value)
@@ -316,8 +323,43 @@ class GripperCanNode(Node):
         self.get_logger().info(
             '开口 {:.2f} mm → 位置 {:.4f} 圈'.format(width, revs))
 
+    def _park(self):
+        """退出前合拢，让手指停在一个确定的、收起来的位置。
+
+        这一步只在"正常退出"时做：先等接收线程退出去（否则两边抢同一帧），
+        再发一帧使能 + 位置，等 settle，最后发停（不长期保持力矩）。
+        """
+        width = float(self.get_parameter('park_width_mm').value)
+        revs = gf.width_to_revs(width, self.anchor, self.span)
+        try:
+            time.sleep(0.6)
+            self._send(gf.ENABLE_FRAME_ID, gf.encode_enable(True))
+            self._send(gf.POSITION_FRAME_ID, gf.encode_position(revs))
+            settle = float(self.get_parameter('park_settle_s').value)
+            time.sleep(max(0.0, settle))
+            now = self._read_revs(timeout=0.2)
+        except OSError as exc:
+            self.get_logger().warning('退出时合拢失败（{}），手指停在原地'
+                                      .format(exc))
+            return
+        finally:
+            try:
+                self._send(gf.ENABLE_FRAME_ID, gf.encode_enable(False))
+            except OSError:
+                pass
+        if now is None:
+            self.get_logger().info('退出前已合拢到 {:.1f} mm（没读到回帧）'
+                                   .format(width))
+        else:
+            self.get_logger().info(
+                '退出前已合拢：目标 {:.1f} mm，实测 {:.1f} mm'.format(
+                    width, gf.revs_to_width(now, self.anchor, self.span)))
+
     def shutdown(self):
         self._stop.set()
+        if (self.sock is not None and not self.dry_run
+                and bool(self.get_parameter('park_on_shutdown').value)):
+            self._park()
         if self.sock is not None:
             try:
                 self.sock.close()
