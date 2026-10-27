@@ -42,11 +42,17 @@ NODE_ID = 7
 MODE_ENABLE = 0x01
 MODE_POSITION = 0x05
 MODE_POSITION_FEEDBACK = 0x23
+MODE_CURRENT_FEEDBACK = 0x21
+MODE_OFFSET_FEEDBACK = 0x24
 
 #: 使能帧、位置帧、位置回读帧
 ENABLE_FRAME_ID = (NODE_ID << 7) | MODE_ENABLE                  # 0x381
 POSITION_FRAME_ID = (NODE_ID << 7) | MODE_POSITION              # 0x385
 POSITION_FEEDBACK_ID = (NODE_ID << 7) | MODE_POSITION_FEEDBACK  # 0x3A3
+
+#: 电流回读（`case 0x21`，float32，单位没标定）与零点偏移回读（`case 0x24`，int32）
+CURRENT_FEEDBACK_ID = (NODE_ID << 7) | MODE_CURRENT_FEEDBACK    # 0x3A1
+OFFSET_FEEDBACK_ID = (NODE_ID << 7) | MODE_OFFSET_FEEDBACK      # 0x3A4
 
 #: 三种帧都是固定 8 字节
 DLC = 8
@@ -125,12 +131,44 @@ def encode_position_query():
     return b'\x00' * DLC
 
 
+def encode_current_query():
+    """读电流：同位置查询，`case 0x21` 不看载荷。"""
+    return b'\x00' * DLC
+
+
+def encode_offset_query():
+    """读零点偏移：`case 0x24` 回 `encoderHomeOffset`（int32 计数）。
+
+    用它判断"板子有没有偷偷重标定"：重标定会改这个值，位置曲线整体平移。
+    """
+    return b'\x00' * DLC
+
+
 def decode_position(payload):
     """把 8 字节位置回帧解成 `(圈数, 是否到位)`。"""
     if len(payload) != DLC:
         raise ValueError('负载必须是 {} 字节，拿到 {}'.format(DLC, len(payload)))
     revs = struct.unpack('<f', payload[:4])[0]
     return revs, payload[4] != 0
+
+
+def decode_current(payload):
+    """把 8 字节电流回帧解成 `(电流, 是否到位)`。
+
+    `interface_can.cpp` 的 `case 0x21` 回的是 `GetFocCurrent()`，float32。
+    **单位没标定过**，只当相对量用：同一个动作下比一比大小，别当安培读数。
+    """
+    if len(payload) != DLC:
+        raise ValueError('负载必须是 {} 字节，拿到 {}'.format(DLC, len(payload)))
+    current = struct.unpack('<f', payload[:4])[0]
+    return current, payload[4] != 0
+
+
+def decode_offset(payload):
+    """把 8 字节零点偏移回帧解成 int32（`case 0x24`，不是 float）。"""
+    if len(payload) != DLC:
+        raise ValueError('负载必须是 {} 字节，拿到 {}'.format(DLC, len(payload)))
+    return struct.unpack('<i', payload[:4])[0]
 
 
 def width_to_revs(width_mm):

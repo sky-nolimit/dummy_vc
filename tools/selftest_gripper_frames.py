@@ -21,6 +21,7 @@
 """
 import ast
 import os
+import struct
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -126,6 +127,20 @@ def check_ids(gf):
     for fid in (gf.ENABLE_FRAME_ID, gf.POSITION_FRAME_ID, gf.POSITION_FEEDBACK_ID):
         gf.check_frame_id(fid)
     ok('0x381 / 0x385 / 0x3A3 都放行')
+
+    print('\n1c. 电流（0x3A1，float32）与零点偏移（0x3A4，int32）的回读')
+    same('电流回读 ID', gf.CURRENT_FEEDBACK_ID, 0x3A1)
+    same('零点回读 ID', gf.OFFSET_FEEDBACK_ID, 0x3A4)
+    amps, finished = gf.decode_current(struct.pack('<f', 0.75) + bytes([1, 0, 0, 0]))
+    close('电流按 float32 解', amps, 0.75, 1e-9)
+    if finished:
+        ok('电流回帧的到位标志读得对')
+    else:
+        fail('电流回帧的到位标志读错了')
+    if gf.decode_offset(struct.pack('<i', -1234) + b'\x00' * 4) == -1234:
+        ok('零点偏移按有符号 int32 解，不是 float')
+    else:
+        fail('零点偏移解错了')
 
 
 def check_payload(gf):
