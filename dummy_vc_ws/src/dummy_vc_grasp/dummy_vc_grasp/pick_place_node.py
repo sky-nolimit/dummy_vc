@@ -36,7 +36,7 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from shape_msgs.msg import SolidPrimitive
-from std_msgs.msg import Empty
+from std_msgs.msg import Empty, Float64
 from vision_msgs.msg import Detection3DArray
 
 import numpy as np
@@ -44,6 +44,7 @@ import numpy as np
 from dummy_vc_perception import geometry as g
 from dummy_vc_perception import gripper as gr
 
+from dummy_vc_grasp import gripper_gate as gripper_gate_mod
 from dummy_vc_grasp import planner as grasp_planner
 from dummy_vc_grasp import scene_objects as scene
 from dummy_vc_grasp import task as task_mod
@@ -84,6 +85,31 @@ class PickPlaceNode(Node):
         self.declare_parameter('max_velocity_scaling', 0.15)
         self.declare_parameter('max_acceleration_scaling', 0.15)
         self.declare_parameter('planning_time_s', 5.0)
+
+        # -- 夹爪 -----------------------------------------------------------
+        #
+        # 夹爪**不走驱动**：驱动里那条 `hand.*` 会把 0x382 当"设角度"发出去，而
+        # 在真板子上 0x382 是**触发标定**（详见 docs/04 的 A2 与 gripper_frames）。
+        # 现在走旁路：`gripper_can_node` 把 `/gripper/width`（毫米）编成 0x385，
+        # 把 0x3A3 回读发到 `/gripper/position`。这条通道 2026-10-27 真机验过。
+        #
+        # 默认 `gripper_enabled=False`：没有 USB-CAN 适配器的人跑这个 demo，
+        # 照样能验到"竖直下降"那一步，然后在合爪处停下 —— 与以前的默认行为一致。
+        self.declare_parameter('gripper_enabled', False)
+        self.declare_parameter('gripper_cmd_topic', '/gripper/width')
+        self.declare_parameter('gripper_state_topic', '/gripper/position')
+        #: 张开到多宽。55 是机械满开，但 53 以上会顶到本体堵转，留一点余量
+        self.declare_parameter('gripper_open_m', 0.050)
+        #: 闭合时比方块窄多少（有这点预压才有夹持力）
+        self.declare_parameter('gripper_clearance_m', 0.002)
+        #: 闭合目标的下限（再窄就是夹手指自己）
+        self.declare_parameter('gripper_min_close_m', 0.004)
+        #: 实测比目标宽多少才算"被方块挡住"
+        self.declare_parameter('gripper_blocked_m', 0.0008)
+        #: 合爪后等回读的时间；超时还没等到就判空夹/无回读
+        self.declare_parameter('gripper_close_timeout_s', 2.5)
+        #: 张爪后等多久再往下走（张开不需要证据，只要给它时间动）
+        self.declare_parameter('gripper_open_settle_s', 0.8)
 
         # -- 抓取几何 -------------------------------------------------------
         self.declare_parameter('approach_m', 0.08)
@@ -147,7 +173,7 @@ class PickPlaceNode(Node):
 
         self.machine = task_mod.TaskMachine(
             max_retries=int(self.get_parameter('max_retries').value),
-            gripper_ready=self.gripper_model.verified)
+            gripper_ready=bool(self.get_parameter('gripper_enabled').value))
 
         self.plan = None
         self.last_detection = None
@@ -163,6 +189,13 @@ class PickPlaceNode(Node):
         #: 起手位，不再问一遍 IK。
         self.fitted = {}
         self._probe = None
+        #: 夹爪最近一次回读的开口（米）。None = 还没收到过 `/gripper/position`
+        self.gripper_width_m = None
+        #: 合爪/张爪等待的结束时刻与目标开口（秒 / 米）
+        self._gripper_deadline = 0.0
+        self._gripper_target = 0.0
+        #: 'close' / 'open' / ''（没在等）
+        self._gripper_mode = ''
         #: 收到过多少条检测（不分状态，用来判断视觉链路是否通）
         self.received_frames = 0
         #: 数 OBSERVE 里收到多少条（判超时用）
@@ -187,6 +220,12 @@ class PickPlaceNode(Node):
         # 所以默认留一个由人/上层决定何时开始的入口。
         self.create_subscription(
             Empty, self.get_parameter('start_topic').value, self._on_start, 10)
+        # 夹爪：只走旁路话题（`gripper_can_node` 那一路），不碰驱动里的 `hand.*`。
+        self.gripper_cmd = self.create_publisher(
+            Float64, self.get_parameter('gripper_cmd_topic').value, 10)
+        self.create_subscription(
+            Float64, self.get_parameter('gripper_state_topic').value,
+            self._on_gripper_width, 10)
         # 100 ms 的节拍：管超时、也管"上一步完成了该干什么"。
         self.create_timer(0.1, self._tick)
 
@@ -195,9 +234,11 @@ class PickPlaceNode(Node):
             '夹爪{}'.format(
                 self.group_name, self.ee_link, self.base_frame,
                 'true' if self.execute else 'false（只规划不执行）',
-                '已实测' if self.gripper_model.verified
-                else '模型含占位值，走到合爪会停下（{}）'.format(
-                    self.gripper_model.describe())))
+                '走旁路 {} -> {}（合爪会真的夹，靠回读判）'.format(
+                    self.get_parameter('gripper_cmd_topic').value,
+                    self.get_parameter('gripper_state_topic').value)
+                if bool(self.get_parameter('gripper_enabled').value)
+                else '没开（gripper_enabled=false）：能走到竖直下降，然后在合爪处停下'))
         self.get_logger().info(
             '下降{}'.format(
                 '走笛卡尔竖直直线（算不出来就退回关节空间）'
@@ -234,11 +275,14 @@ class PickPlaceNode(Node):
             self.planned_pre_grasp = None
             self.fitted = {}
             self._probe = None
+            self._gripper_mode = ''
         elif action == 'move_pre_grasp':
             self._send_goal_fitted(
                 self.plan.waypoints.pre_grasp, self.plan.waypoints.quaternion,
                 'move_pre_grasp')
         elif action == 'descend':
+            # 下降前先把手指张开，否则是攥着拳往下压
+            self._open_gripper()
             self._descend()
         elif action == 'lift':
             # 抬升同样会被"顶抓姿态抬不高"卡住：grasp + lift_m 在远处一样无解
@@ -253,27 +297,92 @@ class PickPlaceNode(Node):
                 self.fitted.get('move_pre_grasp', self.plan.waypoints.pre_grasp),
                 self.plan.waypoints.quaternion, 'retreat')
         elif action == 'close_gripper':
-            self._command_gripper(self.plan.open_width_m)
+            self._close_gripper(self.plan.object_edge_m)
         elif action == 'open_gripper':
-            self._command_gripper(self.gripper_model.width_open_m.value)
+            self._open_gripper()
         elif action == 'stop':
             if self.goal_handle is not None:
                 self.goal_handle.cancel_goal_async()
                 self.goal_handle = None
             self.action_busy = False
+            self._gripper_mode = ''
 
-    def _command_gripper(self, width_m):
-        """唯一会碰 `hand.*` 的地方。未实测时 command_for_width 会抛。"""
-        try:
-            angle = self.gripper_model.command_for_width(width_m)
-        except gr.UnverifiedGripperModel as exc:
-            self._decide_failure('夹爪拒绝下发：{}'.format(exc))
+    def _publish_gripper(self, width_m):
+        self.gripper_cmd.publish(Float64(data=float(width_m) * 1e3))
+
+    def _open_gripper(self):
+        """张到 `gripper_open_m`。张开不需要证据，等一小会儿让它动完就行。"""
+        if not bool(self.get_parameter('gripper_enabled').value):
             return
-        # 走到这里只说明"角度↔开口"已实测；驱动侧仍然没有夹爪接口
-        # （A2：`hand.set_angle` 会让整机失去响应），所以不许谎报成功。
-        self._decide_failure(
-            '夹爪映射已实测（{:.1f} mm -> {:.2f} deg），但驱动侧没有夹爪接口'
-            '（A2 未解决），这一步没有真正下发'.format(width_m * 1e3, angle))
+        width = float(self.get_parameter('gripper_open_m').value)
+        self._gripper_target = width
+        self._gripper_deadline = time.time() + float(
+            self.get_parameter('gripper_open_settle_s').value)
+        self._gripper_mode = 'open'
+        self._publish_gripper(width)
+        self.get_logger().info('张爪：下发 {:.1f} mm'.format(width * 1e3))
+
+    def _close_gripper(self, edge_m):
+        """合爪：按方块宽度算目标，发出去，再靠回读判"夹住没有"。"""
+        if not bool(self.get_parameter('gripper_enabled').value):
+            self._decide_failure(
+                '合爪这一步没开：gripper_enabled=false。夹爪走的是 USB-CAN 旁路'
+                '（gripper_can_node + /gripper/width），不是驱动里的 hand.*')
+            return
+        try:
+            target = gripper_gate_mod.close_width(
+                edge_m,
+                float(self.get_parameter('gripper_clearance_m').value),
+                float(self.get_parameter('gripper_min_close_m').value))
+        except ValueError as exc:
+            self._decide_failure('夹爪拒绝合爪：{}'.format(exc))
+            return
+        self._gripper_target = target
+        self._gripper_deadline = time.time() + float(
+            self.get_parameter('gripper_close_timeout_s').value)
+        self._gripper_mode = 'close'
+        self._publish_gripper(target)
+        self.get_logger().info(
+            '合爪：方块 {:.1f} mm，下发 {:.1f} mm（窄 {:.1f} mm 预压），等回读…'
+            .format(edge_m * 1e3, target * 1e3, (edge_m - target) * 1e3))
+
+    def _check_gripper(self):
+        """合爪/张爪的等待逻辑。由 `_tick` 每 100 ms 调一次。"""
+        mode = getattr(self, '_gripper_mode', '')
+        if not mode:
+            return
+        timed_out = time.time() >= self._gripper_deadline
+        if mode == 'open':
+            if timed_out:
+                self._gripper_mode = ''
+                if self.gripper_width_m is None:
+                    self.get_logger().warn(
+                        '张爪：{} 一直没有回读，继续往下走（张开没有证据也能接受）'
+                        .format(self.get_parameter('gripper_state_topic').value))
+                else:
+                    self.get_logger().info('张爪：实测 {:.1f} mm'.format(
+                        self.gripper_width_m * 1e3))
+            return
+        result = gripper_gate_mod.verdict(
+            self._gripper_target, self.gripper_width_m,
+            float(self.get_parameter('gripper_blocked_m').value),
+            timed_out=timed_out)
+        if result is None:
+            return
+        self._gripper_mode = ''
+        detail = gripper_gate_mod.describe(
+            result, self._gripper_target, self.gripper_width_m)
+        if result == gripper_gate_mod.HELD:
+            self._decide_success('夹住了：{}'.format(detail))
+        elif result == gripper_gate_mod.EMPTY:
+            self._decide_failure(
+                '手指合到头了，中间没有东西：{}。方块没在两指之间，或者检测给的位置'
+                '偏了'.format(detail))
+        else:
+            self._decide_failure(
+                '夹爪没有回读（{} 没消息）：判不了夹没夹住，不往下走。'
+                '先看 gripper_can_node 还在不在'.format(
+                    self.get_parameter('gripper_state_topic').value))
 
     def _decide_success(self, note=''):
         if note:
@@ -283,6 +392,10 @@ class PickPlaceNode(Node):
     def _decide_failure(self, note):
         self.get_logger().warn(note)
         self._decide(task_mod.Event.FAILED)
+
+    def _on_gripper_width(self, msg):
+        """夹爪开口回读（毫米）。只存下来，判断在 `_check_gripper` 里做。"""
+        self.gripper_width_m = float(msg.data) * 1e-3
 
     def _on_start(self, _msg):
         self.get_logger().info('收到开始信号：{}'.format(
@@ -717,6 +830,7 @@ class PickPlaceNode(Node):
                 self._decide(task_mod.Event.TIMEOUT)
             return
         self._observe_started = None
+        self._check_gripper()
         if self.action_busy and (time.time() - self.action_started
                                  > float(self.get_parameter('action_timeout_s').value)):
             self.get_logger().warn('动作超时，取消目标')

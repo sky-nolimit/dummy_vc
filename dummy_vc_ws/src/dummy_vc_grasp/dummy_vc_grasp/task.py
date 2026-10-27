@@ -96,9 +96,14 @@ class Decision:
 class TaskMachine:
     """带重试计数的状态机。调用方只负责把事件喂进 `decide()`。
 
-    `gripper_ready=False` 表示夹爪的"角度<->开口"还没实测：这时**执行动作照走**
+    `gripper_ready=False` 表示**没有可用的夹爪通道**：这时执行动作照走
     （起手位、下探都能验），但走到 CLOSE_GRIPPER 会直接进 FAULT 并说明原因。
-    这样在夹爪没标定之前也能真机验证前面四步，而不是整条链一起干等。
+    这样在没有 USB-CAN 适配器的时候也能真机验证前面四步，而不是整条链一起干等。
+
+    2026-10-27 起 `gripper_ready` 的含义变了：以前指"角度<->开口映射实测过"，
+    现在指"有能下发的通道"（`pick_place_node` 把它接到 `gripper_enabled`）。
+    驱动里的 `hand.*` 已经确认不能用（`0x382` 在真板子上是触发标定），
+    夹爪改走 `gripper_can_node` 的 `/gripper/width`。
     """
 
     def __init__(self, max_retries=2, gripper_ready=False):
@@ -132,8 +137,8 @@ class TaskMachine:
     def _enter(self, state, note):
         if state is State.CLOSE_GRIPPER and not self.gripper_ready:
             return self._fault(
-                '夹爪的"角度<->开口"映射还没实测，不发 hand 命令（docs/02 阶段 0.5 量完'
-                '再填成 measured）；前四步能验，合爪不能')
+                '没有可用的夹爪通道（gripper_enabled=false），合爪这一步不下发；'
+                '前四步能验，合爪不能')
         self.state = state
         self.retries = 0 if state in (State.OBSERVE, State.DONE) else self.retries
         return Decision(state, ACTIONS[state], note, self.retries)

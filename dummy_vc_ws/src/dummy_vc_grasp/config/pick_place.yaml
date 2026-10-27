@@ -62,6 +62,23 @@ pick_place_node:
     approach_min_m: 0.005                # 起手位最多压到离抓取点多高（米）
     approach_step_m: 0.01                # 每次往下压多少（米）
 
+    # ---- 夹爪：走 USB-CAN 旁路 ----
+    # 2026-10-27 定案：驱动里那条 `hand.*` 不能用。`hand.set_angle` 发的是
+    # 0x382，而在这块板子上 0x382 是**触发标定**（真机上把夹爪的编码器表擦了，
+    # 见 docs/04 的 A2-补充5）。现在夹爪由 `gripper_can_node` 直接走适配器：
+    #   /gripper/width   (std_msgs/Float64，毫米) —— 手指目标开口
+    #   /gripper/position(std_msgs/Float64，毫米) —— 0x3A3 回读
+    # 打开前先确认 can0 起来了（`ip -br link show can0`），否则合爪会一直报警。
+    gripper_enabled: false               # true = 真的合爪；false = 走到竖直下降就停
+    gripper_cmd_topic: "/gripper/width"
+    gripper_state_topic: "/gripper/position"
+    gripper_open_m: 0.050                # 张开到 50 mm；55 是满开但会顶本体堵转
+    gripper_clearance_m: 0.002           # 闭到"方块宽 − 2 mm"，有这点预压才夹得住
+    gripper_min_close_m: 0.004           # 再窄就是在夹手指自己
+    gripper_blocked_m: 0.0008            # 实测比目标宽这么多才算被方块挡住
+    gripper_close_timeout_s: 2.5         # 等回读判"夹住没有"的上限
+    gripper_open_settle_s: 0.8           # 张爪后给它多久动完
+
 # scene_node：把地面/地台发进 planning scene。
 # 不放进去，规划器认为脚下什么都没有，最后那段"往下抓"能从地面里穿过去。
 scene_objects:

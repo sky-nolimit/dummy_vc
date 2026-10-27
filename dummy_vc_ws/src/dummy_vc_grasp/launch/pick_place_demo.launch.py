@@ -31,8 +31,13 @@ vision_node 会照常喂数据。它自己从来不连相机 —— 别把"没�
 `scene_node` 不能少：地面和地台不在 URDF 里，没有它们，规划器认为脚下什么
 都没有，最后那段"往下抓"可以规划出一条从地面里穿过去的路径。
 
-`execute:=true` 才会真的下发执行；默认只规划（`plan_only`），因为夹爪还挡着
-（A2：`hand.*` 调用会让整机失去响应），能验到 APPROACH 为止。
+`execute:=true` 才会真的下发执行；默认只规划（`plan_only`）。
+
+夹爪是**另一条链路**（2026-10-27 起）：驱动里的 `hand.*` 不能用（`0x382` 在
+真板子上是触发标定），所以夹爪由 `gripper_can_node` 走 USB-CAN 适配器，话题
+`/gripper/width`（毫米）与 `/gripper/position`（回读）。`gripper:=true` 才会
+把那个节点一起起来；不起的话 `pick_place_node` 照样能走到竖直下降，然后在
+合爪处停下（这是默认，安全）。
 """
 import os
 
@@ -94,6 +99,12 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'table_z', default_value='-0.0405',
             description='工作面的高度（base_link 下的 z，米）'),
+        DeclareLaunchArgument(
+            'gripper', default_value='false',
+            description='true 则顺带起 gripper_can_node（夹爪走 USB-CAN 旁路）'),
+        DeclareLaunchArgument(
+            'gripper_channel', default_value='can0',
+            description='gripper_can_node 用的 SocketCAN 接口（没接适配器时用 vcan0 干跑）'),
     ]
 
     scene = Node(
@@ -129,8 +140,23 @@ def generate_launch_description():
                                           value_type=float),
                 'observe_timeout_s': ParameterValue(
                     LaunchConfiguration('observe_timeout_s'), value_type=float),
+                'gripper_enabled': ParameterValue(
+                    LaunchConfiguration('gripper'), value_type=bool),
             },
         ],
     )
 
-    return LaunchDescription(args + [vision, scene, pick_place])
+    # 夹爪旁路：只在 gripper:=true 时起来。它需要 can0 已经 up（适配器挂着），
+    # 起不来会在自己的日志里说清楚要跑哪条 ip 命令。
+    gripper_node = Node(
+        package='dummy_vc_grasp',
+        executable='gripper_can_node',
+        name='gripper_can_node',
+        output='screen',
+        parameters=[{
+            'channel': LaunchConfiguration('gripper_channel'),
+        }],
+        condition=IfCondition(LaunchConfiguration('gripper')),
+    )
+
+    return LaunchDescription(args + [vision, scene, pick_place, gripper_node])

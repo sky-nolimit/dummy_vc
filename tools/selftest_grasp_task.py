@@ -388,8 +388,13 @@ def check_node_api(geometry, gripper, planner, scene, task):
     if not referenced:
         fail('一个规划/状态机接口都没引用？节点大概没在干正事')
     # 四个"必须留在代码里"的安全点：光写在文档里，下一个人会忘。
+    #
+    # 2026-10-27 改了第三条：以前要求节点必须问 `gripper_model.command_for_width`
+    # 要角度 —— 那条路在真机上走不通（`hand.set_angle` 发的是 0x382，而 0x382 在
+    # 这块板子上是**触发标定**）。现在夹爪走旁路话题，所以守卫反过来：不许再回头
+    # 去调那个模型。
     for needle, why in (
-            ('command_for_width', '夹爪必须先问模型要角度，不能自己算'),
+            ('gripper_gate', '合爪的判定（闭到多宽 / 夹住没有）必须走纯函数，别现场算'),
             ('plan_only', 'plan_only 必须跟着 execute 参数走'),
             ('execute', '默认不执行这件事必须写在代码里，不能只写在文档里'),
             ('GetCartesianPath', '下降必须是笛卡尔直线，退回关节空间只能作为兜底'),
@@ -398,6 +403,14 @@ def check_node_api(geometry, gripper, planner, scene, task):
             ok(f'代码里提到 {needle}（{why}）')
         else:
             fail(f'代码里找不到 {needle}（{why}）')
+    for banned, why in (
+            ('command_for_width', '夹爪不许再回头走驱动里的 hand.*（0x382 = 触发标定）'),
+            ('set_angle', '夹爪不许再回头走驱动里的 hand.*（0x382 = 触发标定）'),
+    ):
+        if banned in text:
+            fail(f'代码里还有 {banned}（{why}）')
+        else:
+            ok(f'代码里没有 {banned}（{why}）')
 
 
 def check_scene(scene, geometry):
