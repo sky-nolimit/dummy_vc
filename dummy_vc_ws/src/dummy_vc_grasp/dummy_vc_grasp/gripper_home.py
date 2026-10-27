@@ -1,35 +1,36 @@
-"""现场量零点：把手指开到合拢，用它当"开口 0"。
+"""现场量零点：把手指推到两头，用"合拢"那一头当"开口 0"。
 
 ## 为什么需要这一步
 
 `gripper_frames` 里那条 `开口 = 34.294 − 11.620 × 圈数` 的**截距跟着编码器零点走**。
-零点在板子的 flash 里，每次重新标定都会平移一次（实测平移过 0.22 圈 ≈ 2.5 mm），
-而且被手动掰过、或者换过一块板子，同一个圈数对应的开口就完全不是一回事。
+零点在板子的 flash 里，每次重新标定都会平移一次（实测平移过 0.22 圈 ≈ 2.5 mm，
+2026-10-27 又遇到一次 1.08 圈 ≈ 12.5 mm），而且被手动掰过、或者换过一块板子，
+同一个圈数对应的开口就完全不是一回事。
 
-所以"发多少圈"这件事**本身不可靠**。可靠的锚点只有一个：**手指完全合拢的位置**
-——那是机械上限，不管之前发生过什么，它都在同一个物理位置上。量出那一刻的圈数，
-之后所有命令都按"离合拢点多少圈"来算。
+所以"发多少圈"这件事**本身不可靠**。可靠的锚点只有机械止位：**手指完全合拢**那
+一点不管之前发生过什么都在同一个物理位置上。
 
-## 怎么量
+## 怎么量（必须两头都量）
 
-命令一个明显超过合拢点的目标，然后一路盯着位置：位置连续几次不动了，就是顶到
-合拢的机械止位了。这时候立刻发一帧"停"，别继续顶着（电机堵转要发热）。
+1. 往合拢方向推，位置连续几次不动 ⇒ 合拢止位，记 `rev_closed`；
+2. 往张开方向推，同样判停 ⇒ 张开止位，记 `rev_open`；
+3. 两个止位之间的距离是**机械行程**（55 mm ≈ 4.73 圈），与编码器零点无关。
+   拿它当判据：量出来明显短了，就说明两指之间卡着东西，拒绝。
 
-两条保护：
+只量一头不行：一个 24 mm 的方块卡在两指之间时，"合拢止位"会被量成"方块止位"，
+而这个错值看起来完全正常。只有把两头的距离和机械行程对上，才能排除这种情况。
 
-* **位置连续不动就停**，不靠"转够多少圈"来猜；
-* 量出来的合拢点必须落在默认值 ±`plausible_revs` 内，否则**拒绝**（说明两指之间
-  卡了东西、或者板子的零点已经挪得太多，需要重新拟合常数）。
+## 这个模块不碰 ROS
 
-这个模块不碰 ROS，socket 由调用方传进来（`send` / `read_revs`），所以在 Windows
-上也能用假的板子测整套时序。
+socket 由调用方传进来（`send` / `read_revs`），所以在 Windows 上也能用假板子测整套
+时序。
 """
 import time
 
 from dummy_vc_grasp import gripper_frames as gf
 from dummy_vc_grasp import gripper_gate as gg
 
-#: 命令目标超过合拢点多少圈。整段行程才 4.7 圈，6 圈足够从任何位置盖过去。
+#: 命令目标超出止位多少圈。整段行程才 4.7 圈，6 圈足够从任何位置盖过去。
 DEFAULT_SPAN_REVS = 6.0
 
 #: 位置两次采样差小于这个值就算"没动"（圈）。编码器分辨力约 4.5e-5 圈。
@@ -38,14 +39,19 @@ DEFAULT_STALL_REVS = 3e-4
 #: 连续几次采样都没动，才认定顶住了。
 DEFAULT_STALL_SAMPLES = 3
 
-#: 最多盯多久（秒）。整段 4.7 圈、默认速度下应该在 2 s 内顶到。
+#: 每一头最多盯多久（秒）。整段 4.7 圈、默认速度下应该在 2 s 内顶到。
 DEFAULT_TIMEOUT_S = 8.0
 
 #: 采样频率（Hz）。
 DEFAULT_RATE_HZ = 20.0
 
-#: 量出来的合拢点离默认值超过这么多圈就拒绝（1 圈 ≈ 11.6 mm 开口）。
-DEFAULT_PLAUSIBLE_REVS = 1.0
+#: 机械行程（圈）= 满开 55 mm ÷ 11.62 mm/圈 ≈ 4.733。这是**机械常数**，与编码器
+#: 零点无关 —— 正因为无关，它才能用来验证两头的止位是不是真的量到了。
+DEFAULT_STROKE_REVS = gf.MAX_WIDTH_MM / gf.MM_PER_REV
+
+#: 量出来的两头距离与机械行程差多少圈就拒绝。0.4 圈 ≈ 4.6 mm：卡一个 5 mm 以上
+#: 的东西就会超差；机械本身的松旷（1~2 mm）不会误判。
+DEFAULT_STROKE_TOL_REVS = 0.4
 
 #: 一开始就完全不动时，等这么久才认定"它本来就在止位上"。
 DEFAULT_STILL_S = 1.0
@@ -57,26 +63,30 @@ DEFAULT_MISS_LIMIT = 10
 class HomeResult(object):
     """一次找零点的结果。`ok=False` 时 `reason` 说人话。"""
 
-    def __init__(self, ok, rev_closed=None, samples=None, reason='', target=None):
+    def __init__(self, ok, rev_closed=None, rev_open=None, span_revs=None,
+                 samples=None, reason=''):
         self.ok = bool(ok)
         self.rev_closed = rev_closed if ok else None
+        self.rev_open = rev_open if ok else None
+        self.span_revs = span_revs
         self.samples = list(samples or [])
         self.reason = reason
-        self.target = target
 
     def __repr__(self):
-        return 'HomeResult(ok={}, rev_closed={!r}, n={}, reason={!r})'.format(
-            self.ok, self.rev_closed, len(self.samples), self.reason)
+        return 'HomeResult(ok={}, rev_closed={!r}, rev_open={!r}, span={!r}, ' \
+               'reason={!r})'.format(self.ok, self.rev_closed, self.rev_open,
+                                     self.span_revs, self.reason)
 
 
 def home(send, read_revs, span_revs=DEFAULT_SPAN_REVS,
          stall_revs=DEFAULT_STALL_REVS, stall_samples=DEFAULT_STALL_SAMPLES,
          timeout_s=DEFAULT_TIMEOUT_S, rate_hz=DEFAULT_RATE_HZ,
          rev_closed_guess=gf.DEFAULT_REV_CLOSED,
-         plausible_revs=DEFAULT_PLAUSIBLE_REVS, still_s=DEFAULT_STILL_S,
+         stroke_revs=DEFAULT_STROKE_REVS,
+         stroke_tol_revs=DEFAULT_STROKE_TOL_REVS, still_s=DEFAULT_STILL_S,
          miss_limit=DEFAULT_MISS_LIMIT, log=None, sleep=time.sleep,
          now=time.time):
-    """把手指推到合拢止位，返回量到的圈数。
+    """把手指推到两头，校验行程，返回"开口 0"对应的圈数。
 
     参数
     ----
@@ -91,10 +101,55 @@ def home(send, read_revs, span_revs=DEFAULT_SPAN_REVS,
     if rev0 is None:
         return HomeResult(False, reason='读不到位置：板子没答，先确认 can0 UP、'
                                        '夹爪板通电、以及 `--channel` 写对了')
-    target = max(float(rev0), float(rev_closed_guess)) + float(span_revs)
-    log('起点 {:.4f} 圈（开口约 {:.1f} mm），往 {:.4f} 圈推'.format(
-        rev0, gf.revs_to_width(rev0), target))
+    log('起点 {:.4f} 圈，先往合拢方向推'.format(rev0))
 
+    closed = _push(send, read_revs, max(float(rev0), float(rev_closed_guess))
+                   + float(span_revs), float(rev0), stall_revs, stall_samples,
+                   timeout_s, rate_hz, still_s, miss_limit, log, sleep, now,
+                   '合拢')
+    if not closed[0]:
+        return HomeResult(False, samples=closed[2], reason=closed[3])
+    rev_closed = closed[1]
+
+    opened = _push(send, read_revs, rev_closed - float(span_revs), rev_closed,
+                   stall_revs, stall_samples, timeout_s, rate_hz, still_s,
+                   miss_limit, log, sleep, now, '张开')
+    if not opened[0]:
+        return HomeResult(False, rev_closed=rev_closed, samples=opened[2],
+                          reason=opened[3])
+    rev_open = opened[1]
+
+    span = rev_closed - rev_open
+    if span <= 0.0:
+        return HomeResult(False, rev_closed=rev_closed, rev_open=rev_open,
+                          span_revs=span, samples=closed[2],
+                          reason='两头的读数没拉开（合拢 {:.3f}、张开 {:.3f}）：'
+                                 '板子的回读可能是冻住的'.format(rev_closed, rev_open))
+    if abs(span - float(stroke_revs)) > float(stroke_tol_revs):
+        return HomeResult(
+            False, rev_closed=rev_closed, rev_open=rev_open, span_revs=span,
+            samples=closed[2],
+            reason='两头只差 {:.3f} 圈 ≈ {:.1f} mm，机械行程应该是 {:.1f} mm'
+                   '（{:.3f} 圈）。短了这么多，只可能是两指之间卡着东西'
+                   .format(span, span * gf.MM_PER_REV,
+                           float(stroke_revs) * gf.MM_PER_REV,
+                           float(stroke_revs)))
+
+    log('合拢 {:.4f} 圈、张开 {:.4f} 圈，行程 {:.3f} 圈 ≈ {:.1f} mm（机械 '
+        '{:.1f} mm）'.format(rev_closed, rev_open, span,
+                            span * gf.MM_PER_REV,
+                            float(stroke_revs) * gf.MM_PER_REV))
+    return HomeResult(True, rev_closed, rev_open, span, closed[2],
+                      '两头的止位都对上了')
+
+
+def _push(send, read_revs, target, rev0, stall_revs, stall_samples, timeout_s,
+          rate_hz, still_s, miss_limit, log, sleep, now, label):
+    """朝 `target` 推，直到位置连续几次不动。
+
+    返回 `(ok, rev_final, samples, reason)`。开头就把使能补一帧 —— 主控的
+    `power_on()` 会发 0x381 带 float，板子收到就 MODE_STOP。
+    """
     send(gf.ENABLE_FRAME_ID, gf.encode_enable(True))
     send(gf.POSITION_FRAME_ID, gf.encode_position(target))
 
@@ -109,8 +164,8 @@ def home(send, read_revs, span_revs=DEFAULT_SPAN_REVS,
             misses += 1
             if misses >= int(miss_limit):
                 send(gf.ENABLE_FRAME_ID, gf.encode_enable(False))
-                return HomeResult(False, samples=samples, target=target,
-                                  reason='连续 {} 次读不到位置'.format(misses))
+                return (False, None, samples,
+                        '{}这一头连续 {} 次读不到位置'.format(label, misses))
             continue
         misses = 0
         samples.append(float(rev))
@@ -118,30 +173,14 @@ def home(send, read_revs, span_revs=DEFAULT_SPAN_REVS,
             moved = True
         if moved and gg.stall_detected(samples, stall_revs, stall_samples):
             send(gf.ENABLE_FRAME_ID, gf.encode_enable(False))
-            return _finish(samples[-1], samples, target, plausible_revs, log)
+            log('{}止位：{:.4f} 圈'.format(label, samples[-1]))
+            return True, samples[-1], samples, ''
         if not moved and now() - started > float(still_s) and len(samples) > 3:
-            # 一开始就完全不动：要么它本来就在止位上，要么根本没使能。
-            log('推了 {:.1f} 秒位置一点都不动，按"本来就在止位上"处理'
-                .format(now() - started))
+            log('{}方向推了 {:.1f} 秒一点都不动，按"本来就在止位上"处理'
+                .format(label, now() - started))
             send(gf.ENABLE_FRAME_ID, gf.encode_enable(False))
-            return _finish(samples[-1], samples, target, plausible_revs, log)
+            return True, samples[-1], samples, ''
     send(gf.ENABLE_FRAME_ID, gf.encode_enable(False))
-    return HomeResult(False, samples=samples, target=target,
-                      reason='{:.1f} 秒里一直没停：是不是两指之间是空的、'
-                             '而且命令没生效？'.format(float(timeout_s)))
-
-
-def _finish(rev_closed, samples, target, plausible_revs, log):
-    """停下来之后做一次合理性检查 —— 宁可报错，也不要拿一个错零点去算宽度。"""
-    delta = float(rev_closed) - float(gf.DEFAULT_REV_CLOSED)
-    if abs(delta) > float(plausible_revs):
-        return HomeResult(
-            False, samples=samples, target=target,
-            reason='量到 {:.3f} 圈，比默认的 {:.3f} 圈偏了 {:+.3f} 圈（≈{:+.1f} mm）。'
-                   '这不像"手指合拢"：要么两指之间卡着东西，要么板子的零点挪了。'
-                   '把东西拿走重试；多次都偏 → 用 tools/gripper_sweep.py 重新拟合'
-                   .format(rev_closed, gf.DEFAULT_REV_CLOSED, delta,
-                           -delta * gf.MM_PER_REV))
-    log('顶到合拢止位：{:.4f} 圈（默认 {:.4f} 圈，偏 {:+.4f} 圈 ≈ {:+.1f} mm）'.format(
-        rev_closed, gf.DEFAULT_REV_CLOSED, delta, -delta * gf.MM_PER_REV))
-    return HomeResult(True, rev_closed, samples, '顶到合拢止位', target)
+    return (False, None, samples,
+            '{}方向 {:.1f} 秒里一直没停：命令没生效？'.format(
+                label, float(timeout_s)))

@@ -16,10 +16,11 @@
 
 ## 安全
 
-* 推的过程只持续到"位置连续几次不动"，然后立刻发停；
-* 量到的合拢点必须落在默认值 ±1 圈内，否则拒绝（两指之间卡了东西、或者零点已经
-  挪得太多）。拒绝时什么都不改，把原因写出来；
-* 量完自动张到 `--open-to`（默认 50 mm），不让手指一直顶在止位上。
+* 两头都是"位置连续几次不动就停"，然后立刻发停；
+* **两头的距离**必须和机械行程（55 mm ≈ 4.73 圈）对得上，否则拒绝 —— 这是为了
+  排除"两指之间卡着东西"（那种情况下合拢止位会被量成"方块止位"，看起来很正
+  常）。行程是机械常数，与编码器零点无关；
+* 量完自动张到 `--open-to`（默认 50 mm）待命。
 """
 import argparse
 import os
@@ -89,9 +90,11 @@ def main(argv=None):
                         help='最多盯多久，默认 %(default)s 秒')
     parser.add_argument('--rate', type=float, default=gh.DEFAULT_RATE_HZ,
                         help='采样频率，默认 %(default)s Hz')
-    parser.add_argument('--plausible', type=float,
-                        default=gh.DEFAULT_PLAUSIBLE_REVS,
-                        help='偏离默认合拢点超过多少圈就拒绝，默认 %(default)s')
+    parser.add_argument('--plausible', type=float, default=None,
+                        help='（旧参数，已废弃：改用 --stroke-tol）')
+    parser.add_argument('--stroke-tol', type=float,
+                        default=gh.DEFAULT_STROKE_TOL_REVS,
+                        help='两头行程与机械行程差多少圈就拒绝，默认 %(default)s')
     parser.add_argument('--open-to', type=float, default=50.0,
                         help='量完之后张到多宽，默认 %(default)s mm')
     parser.add_argument('--dry-run', action='store_true',
@@ -100,15 +103,16 @@ def main(argv=None):
 
     if args.dry_run:
         guess = gf.DEFAULT_REV_CLOSED
-        target = max(guess, guess) + args.span
-        print('（只打印）起点按默认合拢点 {:.4f} 圈算，目标 {:.4f} 圈'
-              .format(guess, target))
+        print('（只打印）先往合拢推：目标 {:.4f} 圈（超过止位，位置会停住）'
+              .format(max(guess, guess) + args.span))
         print('（只打印）{}'.format(
             gf.describe(gf.ENABLE_FRAME_ID, gf.encode_enable(True))))
         print('（只打印）{}'.format(
-            gf.describe(gf.POSITION_FRAME_ID, gf.encode_position(target))))
-        print('（只打印）再一路发 0x{:03X} 查询位置，直到连续几次不动'
-              .format(gf.POSITION_FEEDBACK_ID))
+            gf.describe(gf.POSITION_FRAME_ID,
+                        gf.encode_position(guess + args.span))))
+        print('（只打印）再往张开推：目标 = 合拢点 − {:.1f} 圈'.format(args.span))
+        print('（只打印）然后校验两头距离 ≈ {:.2f} 圈（机械行程 {:.1f} mm）'.format(
+            gh.DEFAULT_STROKE_REVS, gh.DEFAULT_STROKE_REVS * gf.MM_PER_REV))
         print_table(guess)
         return 0
 
@@ -118,7 +122,7 @@ def main(argv=None):
     result = gh.home(
         make_send(sock, False), make_reader(sock, read_one),
         span_revs=args.span, timeout_s=args.timeout, rate_hz=args.rate,
-        plausible_revs=args.plausible, log=print)
+        stroke_tol_revs=args.stroke_tol, log=print)
 
     if not result.ok:
         print('')
@@ -127,8 +131,12 @@ def main(argv=None):
         return 4 if 'read' in result.reason or '读不到' in result.reason else 2
 
     print('')
-    print('合拢点 {:.4f} 圈（采样 {} 次）'.format(
-        result.rev_closed, len(result.samples)))
+    print('合拢点 {:.4f} 圈、张开点 {:.4f} 圈'.format(
+        result.rev_closed, result.rev_open))
+    print('行程 {:.3f} 圈 ≈ {:.1f} mm（机械 {:.1f} mm，差 {:+.1f} mm）'.format(
+        result.span_revs, result.span_revs * gf.MM_PER_REV,
+        gh.DEFAULT_STROKE_REVS * gf.MM_PER_REV,
+        (result.span_revs - gh.DEFAULT_STROKE_REVS) * gf.MM_PER_REV))
     print_table(result.rev_closed)
 
     width, clamped = gf.clamp_width(args.open_to)

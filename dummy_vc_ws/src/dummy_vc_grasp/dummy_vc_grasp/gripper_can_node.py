@@ -74,10 +74,11 @@ class GripperCanNode(Node):
         #: 启动时先量一次合拢点。**默认开着**：宽度那条线性关系的截距跟着编码器
         #: 零点走，零点会因为"重新标定一次"就平移，所以不能假设上电时手指在哪。
         self.declare_parameter('home_on_start', True)
-        #: 找零点时命令目标超过合拢点多少圈（整段行程才 4.7 圈）。
+        #: 找零点时命令目标超过止位多少圈（整段行程才 4.7 圈）。
         self.declare_parameter('home_span_revs', gh.DEFAULT_SPAN_REVS)
-        #: 量到的合拢点离默认值超过这么多圈就拒绝。
-        self.declare_parameter('home_plausible_revs', gh.DEFAULT_PLAUSIBLE_REVS)
+        #: 两头行程与机械行程差多少圈就拒绝（判"两指之间卡了东西"）。
+        self.declare_parameter('home_stroke_tol_revs',
+                               gh.DEFAULT_STROKE_TOL_REVS)
         #: 量完之后张到多宽（不要让手指一直顶在止位上）。
         self.declare_parameter('idle_width_mm', 50.0)
 
@@ -178,13 +179,15 @@ class GripperCanNode(Node):
         result = gh.home(
             _send, self._read_revs,
             span_revs=float(self.get_parameter('home_span_revs').value),
-            plausible_revs=float(
-                self.get_parameter('home_plausible_revs').value),
+            stroke_tol_revs=float(
+                self.get_parameter('home_stroke_tol_revs').value),
             log=lambda message: log.info('找零点：{}'.format(message)))
         if result.ok:
             self.rev_closed = result.rev_closed
-            log.info('合拢点 {:.4f} 圈（出厂值 {:.4f}），宽度都从这一点算'.format(
-                result.rev_closed, gf.DEFAULT_REV_CLOSED))
+            log.info('合拢点 {:.4f} 圈、张开点 {:.4f} 圈，行程 {:.1f} mm；'
+                     '宽度都从合拢点算'.format(
+                         result.rev_closed, result.rev_open,
+                         result.span_revs * gf.MM_PER_REV))
         else:
             log.warn('没量成：{}。先按出厂合拢点 {:.4f} 圈算，宽度可能整体偏；'
                      '要用工具单独量一次：tools/gripper_home.py'.format(
