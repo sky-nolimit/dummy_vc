@@ -114,6 +114,18 @@ def check_ids(gf):
     same('回读帧 0x3A3', gf.POSITION_FEEDBACK_ID, 0x3A3)
     same('负载长度 8', gf.DLC, 8)
     same('回帧请求字节 0x01', gf.ACK_REQUEST, 0x01)
+    same('标定帧 0x382（禁区）', gf.CALIBRATION_FRAME_ID, 0x382)
+
+    print('\n1b. 0x382 必须发不出去：那是触发标定，载荷是什么都不影响')
+    expect_error('to_socketcan(0x382) 直接拒', gf.ForbiddenFrame,
+                 gf.to_socketcan, gf.CALIBRATION_FRAME_ID,
+                 gf.encode_position(0.0))
+    expect_error('check_frame_id(0x382) 也拒', gf.ForbiddenFrame,
+                 gf.check_frame_id, gf.CALIBRATION_FRAME_ID)
+    expect_error('非标准帧 ID 拒', ValueError, gf.check_frame_id, 0x800)
+    for fid in (gf.ENABLE_FRAME_ID, gf.POSITION_FRAME_ID, gf.POSITION_FEEDBACK_ID):
+        gf.check_frame_id(fid)
+    ok('0x381 / 0x385 / 0x3A3 都放行')
 
 
 def check_payload(gf):

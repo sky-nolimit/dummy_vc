@@ -43,6 +43,13 @@ POSITION_FEEDBACK_ID = (NODE_ID << 7) | MODE_POSITION_FEEDBACK  # 0x3A3
 #: 三种帧都是固定 8 字节
 DLC = 8
 
+#: **禁区**：0x382 在这块板上是 `case 0x02` = 触发编码器标定，不是"设角度"。
+#: 载荷被完全忽略，发一个全零帧照样会触发：电机被开环推两圈、手指顶到限位、
+#: 采样不够 → 标定失败 → 标定表作废 → 位置模式从此不输出，而且**位置回读会
+#: 冻在最后一个值上**（读数是查表产物）。恢复只能给板子断电重启。
+#: 2026-10-26 和 27 日各踩过一次。`to_socketcan()` 会直接拒绝这个 ID。
+CALIBRATION_FRAME_ID = (NODE_ID << 7) | 0x02                     # 0x382
+
 #: 位置帧第 5 字节：1 = 请板子回一帧 0x3A3（`case 0x05` 里的 `_data[4]`）
 ACK_REQUEST = 0x01
 
@@ -60,6 +67,22 @@ CAN_FRAME = struct.Struct('<IB3x8s')
 
 class OutOfRange(ValueError):
     """值超出这块板能接受的范围。调用方该夹就夹，别让它悄悄过去。"""
+
+
+class ForbiddenFrame(ValueError):
+    """这个 ID 不许发（目前只有 0x382：触发标定，会把夹爪标定表弄坏）。"""
+
+
+def check_frame_id(frame_id):
+    """发之前把 ID 查一遍。0x382 一票否决，其余只要求是标准帧。"""
+    if frame_id == CALIBRATION_FRAME_ID:
+        raise ForbiddenFrame(
+            '0x{:03X} 是触发编码器标定，不是设角度，载荷是什么都不影响。发了就会'
+            '把夹爪的标定表弄坏：位置模式从此不输出、回读冻在最后一个值上，只能断电'
+            '重启。要动夹爪请用 0x{:03X}（使能）和 0x{:03X}（位置）。'.format(
+                frame_id, ENABLE_FRAME_ID, POSITION_FRAME_ID))
+    if not 0 <= frame_id <= 0x7FF:
+        raise ValueError('只发标准帧，ID 不能超过 0x7FF，拿到 0x{:X}'.format(frame_id))
 
 
 def _as_float(name, value):
@@ -128,11 +151,14 @@ def to_socketcan(frame_id, payload):
 
     单独一个函数是为了能在 Windows 上验字节布局 —— 这是最容易写错、又最不容
     易在真总线上看出来的一步。
+
+    所有发送路径都必须经过这里，因为**唯一一道禁止 0x382 的闸也在这里**：
+    那一帧在真板子上是"触发编码器标定"，载荷是什么都无所谓，发出去就会把
+    夹爪的标定表弄坏（详见 `CALIBRATION_FRAME_ID` 的说明）。
     """
+    check_frame_id(frame_id)
     if len(payload) != DLC:
         raise ValueError('负载必须是 {} 字节，拿到 {}'.format(DLC, len(payload)))
-    if not 0 <= frame_id <= 0x7FF:
-        raise ValueError('只发标准帧，ID 不能超过 0x7FF，拿到 0x{:X}'.format(frame_id))
     return CAN_FRAME.pack(frame_id, DLC, payload)
 
 
