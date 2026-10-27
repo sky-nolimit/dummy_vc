@@ -188,6 +188,23 @@ def check_mapping(gf):
     close('抓 24 mm 块要的圈数', gf.width_to_revs(24.0), 0.886, 0.01)
     close('抓 24 mm 块留 2 mm 余量', gf.width_to_revs(26.0), 0.714, 0.01)
 
+    print('\n5b. 现场量到两头时，映射改用"这两头之间"（2026-10-27 实测那组）')
+    closed, span = 4.0341, 4.807
+    close('0 mm → 合拢止位本身', gf.width_to_revs(0.0, closed, span), closed, 1e-9)
+    close('55 mm → 张开止位本身',
+          gf.width_to_revs(55.0, closed, span), closed - span, 1e-9)
+    close('24 mm 打在中间',
+          gf.width_to_revs(24.0, closed, span), closed - 24.0 * span / 55.0, 1e-9)
+    close('两头插值的 24 mm 与固定斜率差不到 1 mm',
+          abs(gf.width_to_revs(24.0, closed, span)
+              - gf.width_to_revs(24.0, closed)) * gf.MM_PER_REV, 0.0, 1.0)
+    for width in (0.0, 23.0, 24.0, 55.0):
+        back = gf.revs_to_width(gf.width_to_revs(width, closed, span),
+                                closed, span)
+        close('{:.1f} mm 用两头插值来回一趟'.format(width), back, width, 1e-9)
+    expect_error('行程 <= 0 要拒绝', ValueError,
+                 gf.width_to_revs, 10.0, closed, 0.0)
+
 
 def check_rejections(gf):
     print('\n6. 越界与非法值：抛异常，不静默夹紧')

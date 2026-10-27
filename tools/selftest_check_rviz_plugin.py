@@ -143,7 +143,16 @@ check('MotionPlanning found in the XML',
 check('base class matched', '[ok] base class matches what RViz asks for' in out,
       out[-2000:])
 if made_lib:
-    check('dlopen succeeded', 'dlopen succeeded' in out, out[-2000:])
+    # 这台 Windows 上应用控制策略会拒绝加载现场编译的 DLL（WinError 4551，
+    # "应用程序控制策略已阻止此文件"）。那不是被测逻辑的问题：检查器如实报
+    # "dlopen failed"，而断言期望成功。这种情况显式跳过并说明，别假装通过。
+    if 'dlopen succeeded' in out:
+        check('dlopen succeeded', True)
+    elif '4551' in out or '应用程序控制策略' in out:
+        print('  [skip] dlopen 被系统策略挡住（与本脚本要验的逻辑无关）；'
+              '这条断言只在 Linux 虚拟机上有效')
+    else:
+        check('dlopen succeeded', False, out[-2000:])
 
 print('')
 print('=== case 2: XML present, marker MISSING (the failure mode) ===')

@@ -63,13 +63,13 @@ def make_reader(sock, read_one, timeout=0.3):
     return _read
 
 
-def print_table(rev_closed):
+def print_table(rev_closed, span_revs=None):
     print('')
     print('以这个合拢点为原点：')
     print('  {:>8}  {:>10}'.format('开口 mm', '位置 圈'))
     for width in SHOW_WIDTHS:
         print('  {:>8.1f}  {:>10.4f}'.format(
-            width, gf.width_to_revs(width, rev_closed)))
+            width, gf.width_to_revs(width, rev_closed, span_revs)))
     print('')
     print('改写这两行（dummy_vc_ws/src/dummy_vc_grasp/dummy_vc_grasp/'
           'gripper_frames.py）：')
@@ -137,7 +137,7 @@ def main(argv=None):
         result.span_revs, result.span_revs * gf.MM_PER_REV,
         gh.DEFAULT_STROKE_REVS * gf.MM_PER_REV,
         (result.span_revs - gh.DEFAULT_STROKE_REVS) * gf.MM_PER_REV))
-    print_table(result.rev_closed)
+    print_table(result.rev_closed, result.span_revs)
 
     width, clamped = gf.clamp_width(args.open_to)
     if clamped:
@@ -148,7 +148,8 @@ def main(argv=None):
                                   gf.encode_enable(True)))
         sock.send(gf.to_socketcan(
             gf.POSITION_FRAME_ID,
-            gf.encode_position(gf.width_to_revs(width, result.rev_closed))))
+            gf.encode_position(
+                gf.width_to_revs(width, result.rev_closed, result.span_revs))))
         print('已张到 {:.1f} mm（离开合拢点，别让它顶着）'.format(width))
     except OSError as exc:
         print('张开的命令没发出去：{}'.format(exc))

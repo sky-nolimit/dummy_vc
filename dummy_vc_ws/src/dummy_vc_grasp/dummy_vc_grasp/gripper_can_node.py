@@ -90,6 +90,8 @@ class GripperCanNode(Node):
 
         #: 现场量到的合拢点（圈）。None = 还没量过，按出厂标定值算。
         self.rev_closed = None
+        #: 现场量到的两头行程（圈）。None = 还没量过，按齿条节距换算。
+        self.span_revs = None
         if self.sock is not None and bool(
                 self.get_parameter('home_on_start').value):
             self._home_on_start()
@@ -134,6 +136,11 @@ class GripperCanNode(Node):
         """宽度 ↔ 圈数的原点：量到过就用量的，没量过用出厂标定值。"""
         return (gf.DEFAULT_REV_CLOSED if self.rev_closed is None
                 else self.rev_closed)
+
+    @property
+    def span(self):
+        """两头止位之间差多少圈（没量过就 None，退回固定的齿条节距换算）。"""
+        return self.span_revs
 
     def _read_revs(self, timeout=0.3):
         """同步读一次位置（圈），读不到返回 None。
@@ -184,8 +191,9 @@ class GripperCanNode(Node):
             log=lambda message: log.info('找零点：{}'.format(message)))
         if result.ok:
             self.rev_closed = result.rev_closed
+            self.span_revs = result.span_revs
             log.info('合拢点 {:.4f} 圈、张开点 {:.4f} 圈，行程 {:.1f} mm；'
-                     '宽度都从合拢点算'.format(
+                     '宽度就按这两头之间插值'.format(
                          result.rev_closed, result.rev_open,
                          result.span_revs * gf.MM_PER_REV))
         else:
@@ -200,7 +208,7 @@ class GripperCanNode(Node):
                                            gf.encode_enable(True)))
             self.sock.send(gf.to_socketcan(
                 gf.POSITION_FRAME_ID,
-                gf.encode_position(gf.width_to_revs(width, self.anchor))))
+                gf.encode_position(gf.width_to_revs(width, self.anchor, self.span))))
             log.info('张到 {:.1f} mm 待命'.format(width))
         except OSError as exc:
             log.warn('张开命令没发出去：{}'.format(exc))
@@ -267,7 +275,7 @@ class GripperCanNode(Node):
             except ValueError as exc:
                 self.get_logger().warn('回帧解不开：{}'.format(exc))
                 continue
-            width = gf.revs_to_width(revs, self.anchor)
+            width = gf.revs_to_width(revs, self.anchor, self.span)
             self.position_pub.publish(Float64(data=width))
             self._report(revs, width, finished)
 
@@ -297,7 +305,7 @@ class GripperCanNode(Node):
             self.get_logger().warn(
                 '要 {:.2f} mm，机械行程只有 {:g}~{:g} mm，按 {:.2f} mm 发'.format(
                     raw, gf.MIN_WIDTH_MM, gf.MAX_WIDTH_MM, width))
-        revs = gf.width_to_revs(width, self.anchor)
+        revs = gf.width_to_revs(width, self.anchor, self.span)
         # 每发一次位置都补一帧使能。原因：主控固件的 power_on 会调
         # hand.set_enable(true)，而它发的是 0x381 带一个 float（如 0.5A），
         # 35 板那边只认 uint32 == 1 才是使能，其余一律 MODE_STOP —— 主控

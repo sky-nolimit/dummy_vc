@@ -184,23 +184,41 @@ def decode_offset(payload):
     return struct.unpack('<i', payload[:4])[0]
 
 
-def width_to_revs(width_mm, rev_closed=DEFAULT_REV_CLOSED):
+def width_to_revs(width_mm, rev_closed=DEFAULT_REV_CLOSED, span_revs=None):
     """开口宽度（mm）→ 电机圈数。越界抛异常，不静默夹紧。
 
     `rev_closed` 是"手指完全合拢时的圈数"，也就是这部分坐标系的原点。
     默认用出厂标定值；现场量过之后请把量到的那个传进来 —— 否则一旦夹爪重新
     标定过（零点平移），同一条命令会把手指送到别的地方去。
+
+    `span_revs` 是"两头止位之间差多少圈"（现场量的行程）。给了它就把
+    [0, MAX_WIDTH_MM] 线性铺在这段行程上，两端都精确落在止位上；不给就退回
+    固定的 `MM_PER_REV`（齿条节距，4.733 圈 = 55 mm）。两者差在 2% 以内，
+    但现场量过的那一份更贴实机。
     """
     width = _as_float('开口宽度', width_mm)
     if width < MIN_WIDTH_MM or width > MAX_WIDTH_MM:
         raise OutOfRange('开口 {:.2f} mm 超出 [{:g}, {:g}] mm'.format(
             width, MIN_WIDTH_MM, MAX_WIDTH_MM))
-    return _as_float('合拢圈数', rev_closed) - width / MM_PER_REV
+    closed = _as_float('合拢圈数', rev_closed)
+    if span_revs is None:
+        return closed - width / MM_PER_REV
+    span = _as_float('行程圈数', span_revs)
+    if span <= 0.0:
+        raise ValueError('行程必须是正的圈数，拿到 {!r}'.format(span_revs))
+    return closed - width * span / MAX_WIDTH_MM
 
 
-def revs_to_width(revs, rev_closed=DEFAULT_REV_CLOSED):
-    """电机圈数 → 开口宽度（mm）。`rev_closed` 含义同 `width_to_revs`。"""
-    return (_as_float('合拢圈数', rev_closed) - _as_float('位置', revs)) * MM_PER_REV
+def revs_to_width(revs, rev_closed=DEFAULT_REV_CLOSED, span_revs=None):
+    """电机圈数 → 开口宽度（mm）。其余参数同 `width_to_revs`。"""
+    closed = _as_float('合拢圈数', rev_closed)
+    revs = _as_float('位置', revs)
+    if span_revs is None:
+        return (closed - revs) * MM_PER_REV
+    span = _as_float('行程圈数', span_revs)
+    if span <= 0.0:
+        raise ValueError('行程必须是正的圈数，拿到 {!r}'.format(span_revs))
+    return (closed - revs) * MAX_WIDTH_MM / span
 
 
 def clamp_width(width_mm):
