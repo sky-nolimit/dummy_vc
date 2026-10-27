@@ -210,6 +210,51 @@ def check_planner(gripper, planner):
     expect_error('未实测模型拒绝给出角度指令值', gripper.UnverifiedGripperModel,
                  placeholder.command_for_width, plan2.open_width_m)
 
+    # -- 2026-10-27 真机反馈的三件事 --------------------------------------
+    # (a) 腕部不要为了迁就视觉给的任意 yaw 多转半圈：正方形方块 90 度就够。
+    yaw = np.deg2rad(55.3)
+    snapped = planner.snap_yaw(yaw)
+    close('55.3° 量化到 90°', snapped, np.pi / 2, 1e-12)
+    close('4.3° 量化到 0°', planner.snap_yaw(np.deg2rad(4.3)), 0.0, 1e-12)
+    close('−40° 量化到 0°', planner.snap_yaw(np.deg2rad(-40.0)), 0.0, 1e-12)
+    close('snap=0 时原样返回', planner.snap_yaw(yaw, 0.0), yaw, 1e-12)
+    tilted = FakeDetection([0.0, 0.30, ground + 0.012], yaw_rad=yaw)
+    keep = planner.plan_grasp(tilted, model, yaw_snap_deg=0.0)
+    close('snap=0：计划里还是原始 yaw', keep.yaw_rad, yaw, 1e-12)
+    snap_plan = planner.plan_grasp(tilted, model)
+    close('默认 90°：计划里的 yaw 被量化', snap_plan.yaw_rad, np.pi / 2, 1e-12)
+    q_keep = keep.waypoints.quaternion
+    q_snap = snap_plan.waypoints.quaternion
+    if tuple(q_keep) != tuple(q_snap) and abs(q_snap[2]) > 1e-6:
+        ok('量化改变了目标姿态（四元数 z: {:.3f} → {:.3f}）'.format(
+            q_keep[2], q_snap[2]))
+    else:
+        fail('量化没改变目标姿态，可能没接上')
+
+    # (b) 抓不准：偏差直接加在视觉给的抓取点上。
+    shifted = planner.plan_grasp(good, model, object_offset=(0.013, -0.029))
+    close('抓取点被平移了 (13, -29) mm', shifted.waypoints.grasp,
+          [0.0 + 0.013, 0.30 - 0.029, ground + 0.012 + 0.0085], 1e-9)
+    close('平移不影响起手高度',
+          shifted.waypoints.pre_grasp[2] - shifted.waypoints.grasp[2], 0.08, 1e-12)
+    picked_offset, _ = planner.first_graspable(
+        [good], model, object_offset=(0.01, 0.0))
+    close('first_graspable 也认 object_offset', picked_offset.waypoints.grasp[0],
+          0.01, 1e-9)
+
+    # (c) 放置点：place_x/place_y 以前声明了却没用，计划里的 place 就是抓取点。
+    wp_x = planner.pick_place_waypoints(plan, (-0.175, 0.090), ground,
+                                        approach_m=0.08, lift_m=0.10)
+    close('放置点用参数给的 xy', wp_x.place, [-0.175, 0.090, ground + 0.08], 1e-12)
+    if not np.allclose(wp_x.place, plan.waypoints.grasp):
+        ok('放置点不再等于抓取点')
+    else:
+        fail('放置点仍然等于抓取点（place_x/place_y 没生效）')
+    wp_z = planner.pick_place_waypoints(plan, (-0.175, 0.090), ground,
+                                        place_z=-0.0405 + 0.055)
+    close('place_z 给了就按它来（桌面上方 55 mm）', wp_z.place[2],
+          -0.0405 + 0.055, 1e-12)
+
 
 def run_machine(task, gripper_ready, events):
     """按事件序列跑一遍，返回经过的状态列表。"""

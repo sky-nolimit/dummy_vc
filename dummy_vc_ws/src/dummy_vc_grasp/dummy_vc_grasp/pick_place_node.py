@@ -40,6 +40,7 @@ from std_msgs.msg import Empty, Float64, String
 from vision_msgs.msg import Detection3DArray
 
 import numpy as np
+from dataclasses import replace
 
 from dummy_vc_perception import geometry as g
 from dummy_vc_perception import gripper as gr
@@ -119,6 +120,17 @@ class PickPlaceNode(Node):
         self.declare_parameter('lift_m', 0.10)
         self.declare_parameter('place_x', 0.0)
         self.declare_parameter('place_y', 0.10)
+        #: 放置点高度（base_link，米）。小于 -100 表示没设，按"工作面 + approach_m"
+        #: 算。注意 base_link 的原点在底座底面往上 15.5 mm，桌面在 z = -0.0405：
+        #: 从桌面量出来的 55 mm 要填 -0.0405 + 0.055 = +0.0145。
+        self.declare_parameter('place_z', -999.0)
+        #: 抓取点补偿（base_link，米）。视觉 + 执行合起来的系统性偏差，按实测填，
+        #: 默认 0。见 tools/fit_grasp_correction.py。
+        self.declare_parameter('grasp_offset_x_m', 0.0)
+        self.declare_parameter('grasp_offset_y_m', 0.0)
+        #: 抓取朝向量化到多少度。90 = 只分横着夹/竖着夹；0 = 照抄视觉的 yaw。
+        self.declare_parameter('grasp_yaw_snap_deg',
+                               grasp_planner.DEFAULT_YAW_SNAP_DEG)
         # 默认值与 scene_objects / perception 的实测值同源，别在这里写死一个数
         self.declare_parameter('table_z', scene.DEFAULT_TABLE_Z)
         self.declare_parameter('max_reach_m', 0.45)
@@ -318,6 +330,34 @@ class PickPlaceNode(Node):
             self.action_busy = False
             self._gripper_mode = ''
 
+    def _with_place_point(self, plan):
+        """把参数里的放置点接进计划里。
+
+        2026-10-27 才发现的一个真 bug：`place_x`/`place_y` 声明了却从没被用过，
+        而 `plan_grasp(place_point=None)` 会把放置点填成**抓取点本身** —— 于是
+        "放置"这一步其实是原地松手，手臂一步都没挪。用户设的 (-175, +90) mm
+        完全没生效。
+        """
+        params = self.get_parameter
+        place_z = float(params('place_z').value)
+        try:
+            wp = grasp_planner.pick_place_waypoints(
+                plan,
+                (float(params('place_x').value), float(params('place_y').value)),
+                float(params('table_z').value),
+                approach_m=float(params('approach_m').value),
+                lift_m=float(params('lift_m').value),
+                place_z=None if place_z < -100.0 else place_z)
+        except Exception as exc:                # noqa: BLE001
+            self.get_logger().warn(
+                '放置点算不出来（{}），这轮就放回抓取点上方'.format(exc))
+            return plan
+        self.get_logger().info(
+            '放置点 ({:.3f}, {:.3f}, {:+.3f}) m{}'.format(
+                wp.place[0], wp.place[1], wp.place[2],
+                '' if place_z >= -100.0 else '（没设 place_z，按工作面 + 起手高度算）'))
+        return replace(plan, waypoints=wp)
+
     def _gripper_ready_to_move(self):
         """动手之前先确认夹爪知道自己的零在哪。
 
@@ -494,13 +534,18 @@ class PickPlaceNode(Node):
         plan, reasons = grasp_planner.first_graspable(
             dets, self.gripper_model, limits=self.limits,
             approach_m=float(self.get_parameter('approach_m').value),
-            lift_m=float(self.get_parameter('lift_m').value))
+            lift_m=float(self.get_parameter('lift_m').value),
+            object_offset=(float(self.get_parameter('grasp_offset_x_m').value),
+                           float(self.get_parameter('grasp_offset_y_m').value)),
+            yaw_snap_deg=float(
+                self.get_parameter('grasp_yaw_snap_deg').value))
         for why in reasons:
             self.get_logger().info('跳过：{}'.format(why))
         if plan is None:
             self.get_logger().info('这一帧没有可抓的目标（{} 个候选都被拒）'.format(
                 len(dets)))
             return
+        plan = self._with_place_point(plan)
         self.plan = plan
         self.last_detection = dets[0]
         self.get_logger().info('抓到目标：{}'.format(plan.describe()))
@@ -931,9 +976,13 @@ def _constraints(frame, link, position, quaternion):
     ori.orientation.z = float(quaternion[2])
     ori.orientation.w = float(quaternion[3])
     # 顶抓只要求"朝下"这个姿态，绕竖直轴的容差留一点，否则 IK 容易解不出来。
-    ori.absolute_x_axis_tolerance = 0.05
-    ori.absolute_y_axis_tolerance = 0.05
-    ori.absolute_z_axis_tolerance = 0.4
+    ori.absolute_x_axis_tolerance = 0.02
+    ori.absolute_y_axis_tolerance = 0.02
+    # 绕工具系 z 的容差 = 手指的自转。原来是 0.4 rad（23°），够腕部在里面随便
+    # 转：同一个方块每次停的朝向都不一样，规划出来的路径就带一堆"转半圈"的
+    # 无效动作（2026-10-27 真机反馈）。收紧到 0.05 rad（2.9°）以后，朝向由
+    # `snap_yaw` 量化过的目标唯一确定。
+    ori.absolute_z_axis_tolerance = 0.05
 
     cons = Constraints()
     cons.position_constraints = [pos]

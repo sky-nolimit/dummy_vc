@@ -88,6 +88,14 @@ class GripperCanNode(Node):
         self.declare_parameter('park_on_shutdown', True)
         #: 退出时合拢要等多久再读回读（手指走 0~50 mm 约 1 s）。
         self.declare_parameter('park_settle_s', 1.5)
+
+        #: 位置模式是 DCE（比例型）控制，负载和齿条摩擦下会停在离目标一截的
+        #: 地方：真机上"要 50 mm"经常停在 52~54 mm。所以发完不等它自己收敛，
+        #: 而是读回实测、按"目标 = 当前 + 差值"补发一次，最多补 `width_max_iters`
+        #: 次。容差 0.8 mm 比手指和物块的接触变形大，不会来回抖。
+        self.declare_parameter('width_tol_mm', 0.8)
+        self.declare_parameter('width_max_iters', 4)
+        self.declare_parameter('width_settle_s', 0.4)
         #: 找零点之前先等板子回一帧位置，最多等这么久（刚开 socket 时板子可能
         #: 正在上电/重启，第一帧要一两百毫秒才到）。
         self.declare_parameter('home_board_timeout_s', 2.0)
@@ -120,6 +128,13 @@ class GripperCanNode(Node):
         self._reader = None
         self._last_reported_width = None
         self._last_finished = None
+        #: 最近一次回读到的电机圈数与开口（闭环修正用）。
+        self._last_revs = None
+        self._last_width = None
+        #: 闭环修正的当前目标：None = 没有在跟的目标。
+        self._target_width_mm = None
+        self._target_iters = 0
+        self._target_ready_at = 0.0
 
         self.position_pub = self.create_publisher(
             Float64, str(self.get_parameter('position_topic').value), 10)
@@ -284,6 +299,11 @@ class GripperCanNode(Node):
                 gf.POSITION_FRAME_ID,
                 gf.encode_position(gf.width_to_revs(width, self.anchor, self.span))))
             log.info('张到 {:.1f} mm 待命'.format(width))
+            # 也进闭环：位置模式有静差，这一发常常停在 52~54 mm，
+            # 等接收线程起来以后由 _correct_once 补到位。
+            self._target_width_mm = float(width)
+            self._target_iters = 0
+            self._target_ready_at = time.time() + 1.0
         except OSError as exc:
             log.warn('张开命令没发出去：{}'.format(exc))
 
@@ -371,6 +391,8 @@ class GripperCanNode(Node):
                 self.get_logger().warn('回帧解不开：{}'.format(exc))
                 continue
             width = gf.revs_to_width(revs, self.anchor, self.span)
+            self._last_revs = float(revs)
+            self._last_width = float(width)
             self.position_pub.publish(Float64(data=width))
             self._report(revs, width, finished)
 
@@ -389,6 +411,7 @@ class GripperCanNode(Node):
     # -- 命令 -------------------------------------------------------------
     def _on_poll(self):
         self._send(gf.POSITION_FEEDBACK_ID, gf.encode_position_query())
+        self._correct_once()
 
     def _on_width(self, msg):
         raw = float(msg.data)
@@ -415,6 +438,61 @@ class GripperCanNode(Node):
         self._send(gf.POSITION_FRAME_ID, gf.encode_position(revs))
         self.get_logger().info(
             '开口 {:.2f} mm → 位置 {:.4f} 圈'.format(width, revs))
+        # 从这一刻起盯着这个目标，等它停稳再由 _correct_once 补发。
+        self._target_width_mm = float(width)
+        self._target_iters = 0
+        self._target_ready_at = time.time() + float(
+            self.get_parameter('width_settle_s').value)
+
+    def _correct_once(self):
+        """按回读补发一次位置，把"要 50 停在 52~54"的静差补掉。
+
+        位置模式是比例型控制，负载越大停得越偏；它自己不会收敛到目标。
+        补发量用 `2*目标 − 实测`（同一个线性映射下的等量补偿），比按 mm/圈
+        硬算更稳：映射里的截距、行程都在里面自动对消了。
+        """
+        if self._target_width_mm is None or self._last_revs is None:
+            return
+        if not self._may_move:
+            self._target_width_mm = None
+            return
+        if time.time() < self._target_ready_at:
+            return
+        tol = float(self.get_parameter('width_tol_mm').value)
+        max_iters = int(self.get_parameter('width_max_iters').value)
+        error = self._target_width_mm - float(self._last_width)
+        if abs(error) <= tol:
+            if self._target_iters:
+                self.get_logger().info(
+                    '开口到位：要 {:.1f} mm，实测 {:.1f} mm（补发 {} 次）'.format(
+                        self._target_width_mm, self._last_width,
+                        self._target_iters))
+            self._target_width_mm = None
+            return
+        if self._target_iters >= max_iters:
+            self.get_logger().warn(
+                '开口停在 {:.1f} mm（要 {:.1f} mm），补发 {} 次后还差 '
+                '{:+.1f} mm —— 多半是顶到什么了'.format(
+                    self._last_width, self._target_width_mm,
+                    self._target_iters, error))
+            self._target_width_mm = None
+            return
+        goal = gf.width_to_revs(self._target_width_mm, self.anchor, self.span)
+        command = 2.0 * goal - float(self._last_revs)
+        self._target_iters += 1
+        try:
+            if self._enable_before_move:
+                self._send(gf.ENABLE_FRAME_ID, gf.encode_enable(True))
+            self._send(gf.POSITION_FRAME_ID, gf.encode_position(command))
+        except OSError as exc:
+            self.get_logger().error('补发位置失败（{}），不再修'.format(exc))
+            self._target_width_mm = None
+            return
+        self.get_logger().info(
+            '差 {:+.1f} mm，补发到 {:.4f} 圈（第 {} 次）'.format(
+                error, command, self._target_iters))
+        self._target_ready_at = time.time() + float(
+            self.get_parameter('width_settle_s').value)
 
     def _park(self):
         """退出前合拢，让手指停在一个确定的、收起来的位置。
@@ -423,6 +501,7 @@ class GripperCanNode(Node):
         再发一帧使能 + 位置，等 settle，最后发停（不长期保持力矩）。
         """
         width = float(self.get_parameter('park_width_mm').value)
+        self._target_width_mm = None            # 退出时别让闭环修正来抢
         if not self._may_move:
             self.get_logger().info('零点没量出来，退出时不收手（手指停在原地）')
             return

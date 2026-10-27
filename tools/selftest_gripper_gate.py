@@ -134,6 +134,39 @@ def check_no_hand_commands():
     else:
         fail('不检查夹爪零点就动手', 'MOVE_PRE_GRASP 之前要调 _gripper_ready_to_move')
 
+    # 放置点：place_x/place_y 曾经声明了却从没被用过，place 退化成抓取点。
+    if '_with_place_point' in src and 'pick_place_waypoints' in src:
+        ok('放置点真的被接进计划（_with_place_point）')
+    else:
+        fail('放置点没接进计划', 'place_x/place_y 会继续被无视')
+
+
+def check_gripper_servo():
+    """闭环修正：位置模式有静差，"要 50 停在 52~54"得靠读回再补一发。"""
+    print('\n6. 源码守卫：夹爪节点的闭环修正')
+    path = os.path.join(GRASP, 'dummy_vc_grasp', 'gripper_can_node.py')
+    with open(path, encoding='utf-8') as handle:
+        src = handle.read()
+    for need in ('def _correct_once', 'self._correct_once()',
+                 "declare_parameter('width_tol_mm'",
+                 "declare_parameter('width_max_iters'",
+                 "declare_parameter('width_settle_s'"):
+        if need in src:
+            ok('源码里有 {!r}'.format(need))
+        else:
+            fail('源码里没有 {!r}'.format(need),
+                 '静差补不回来，张开 50 会停在 52~54')
+    # 补发量必须是"2*目标 − 实测"，不能按系数硬推。
+    if '2.0 * goal - float(self._last_revs)' in src:
+        ok('补发量用 2*目标 − 实测（映射自动对消）')
+    else:
+        fail('补发量不是 2*目标 − 实测')
+    # 到位/放弃/收手三条路径都要把目标清掉，否则会一直补发。
+    if src.count('self._target_width_mm = None') >= 3:
+        ok('到位、放弃、收手都会清掉目标')
+    else:
+        fail('有路径没清掉闭环目标', '会一直补发不停')
+
 
 def main():
     print('gripper_gate 自测')
@@ -141,6 +174,7 @@ def main():
     check_verdict()
     check_describe()
     check_no_hand_commands()
+    check_gripper_servo()
     print('\nSUMMARY')
     if FAILED:
         print('  {} 项失败：'.format(len(FAILED)))

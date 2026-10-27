@@ -35,6 +35,10 @@ DEFAULT_TIP_TO_CENTRE_M = 0.0175
 #: 抓取时指尖离工作面留多少。太小会蹭桌面，太大方块夹不稳。
 DEFAULT_FINGERTIP_CLEARANCE_M = 0.003
 
+#: 抓取朝向量化到多少度。90 = 只区分"横着夹/竖着夹"，正好够正方形方块用；
+#: 设成 0 就完全相信视觉给的 yaw（腕部会多转，见 `snap_yaw` 的注释）。
+DEFAULT_YAW_SNAP_DEG = 90.0
+
 
 @dataclass(frozen=True)
 class WorkspaceLimits:
@@ -97,12 +101,32 @@ def _object_edge(detection) -> float:
     return min(a, b)
 
 
+def snap_yaw(yaw_rad, snap_deg=DEFAULT_YAW_SNAP_DEG):
+    """把抓取朝向量化到 `snap_deg` 的整数倍。
+
+    为什么可以量化：开口是按**标称边长**算的（现在是 24 mm 的方框，见
+    `_object_edge`），手指横着夹、竖着夹都能夹住，所以朝向只需要精确到 90°。
+
+    为什么必须量化：`geometry.top_down_grasp_matrix(yaw)` 让工具系的 x 轴跟着
+    方块的 yaw 走，而方块摆得随便（实测 yaw 4.3°、55.3° 都出现过）。任何一个
+    非整数倍的 yaw 都要靠腕部（j6 甚至 j4）多转那半圈，规划出来就是"转了半天
+    没什么用"的动作（2026-10-27 真机反馈）。量化之后 j6 只会在 0/90/180/270
+    里挑，而且同一个方块每次挑的都是同一个。
+    """
+    if not snap_deg or float(snap_deg) <= 0.0:
+        return float(yaw_rad)
+    step = math.radians(float(snap_deg))
+    return round(float(yaw_rad) / step) * step
+
+
 def plan_grasp(detection, model: gr.FingerOpeningModel,
                limits: WorkspaceLimits = WorkspaceLimits(),
                approach_m: float = 0.08, lift_m: float = 0.10,
                place_point=None,
                tip_to_centre_m: float = DEFAULT_TIP_TO_CENTRE_M,
-               fingertip_clearance_m: float = DEFAULT_FINGERTIP_CLEARANCE_M) -> GraspPlan:
+               fingertip_clearance_m: float = DEFAULT_FINGERTIP_CLEARANCE_M,
+               object_offset=(0.0, 0.0),
+               yaw_snap_deg: float = DEFAULT_YAW_SNAP_DEG) -> GraspPlan:
     """由一次检测生成抓取计划；不能抓就抛 NotGraspable，原因写在消息里。
 
     `detection.position` 是**方块中心**（视觉给的就是这个），而 `gripper_tcp`
@@ -125,6 +149,11 @@ def plan_grasp(detection, model: gr.FingerOpeningModel,
     p = np.asarray(detection.position, float)
     if p.shape != (3,):
         raise NotGraspable('抓取点要 3 个数，收到 {} 个'.format(p.size))
+    # 系统性偏差的补偿（视觉 + 执行合起来那几厘米）。默认是 0，要按实测数据填，
+    # 怎么填见 tools/fit_grasp_correction.py 和 config/pick_place.yaml 的注释。
+    dx, dy = (float(v) for v in object_offset)
+    if dx or dy:
+        p = np.array([p[0] + dx, p[1] + dy, p[2]], float)
 
     reach = float(math.hypot(p[0], p[1]))
     if reach > limits.max_reach_m:
@@ -156,28 +185,34 @@ def plan_grasp(detection, model: gr.FingerOpeningModel,
 
     tcp_offset = fingertip_clearance_m + tip_to_centre_m - 0.5 * edge
     grasp_point = np.array([p[0], p[1], p[2] + tcp_offset], float)
+    yaw = snap_yaw(float(detection.yaw_rad), yaw_snap_deg)
 
     try:
-        wp = g.grasp_waypoints(grasp_point, float(detection.yaw_rad),
+        wp = g.grasp_waypoints(grasp_point, yaw,
                                approach_m=approach_m, lift_m=lift_m,
                                place_point=place_point)
     except g.GeometryError as exc:
         raise NotGraspable('生成路点失败：{}'.format(exc))
 
     return GraspPlan(waypoints=wp, object_edge_m=edge, open_width_m=open_width,
-                     yaw_rad=float(detection.yaw_rad), reach_m=reach,
+                     yaw_rad=yaw, reach_m=reach,
                      gripper_ready=bool(model.verified),
                      tcp_offset_m=float(tcp_offset))
 
 
 def pick_place_waypoints(plan: GraspPlan, place_xy, table_z, approach_m=0.08,
-                         lift_m=0.10):
+                         lift_m=0.10, place_z=None):
     """把放置点也算出来（首期放置点是参数给定的，不由视觉算）。
 
-    放置高度取工作面 + 抬升量，避免"停在地面上"导致合爪时蹭着走。
+    默认放置高度取工作面 + 抬升量，避免"停在地面上"导致合爪时蹭着走。
+    `place_z` 给了就直接用（base_link 坐标系，米）—— 有人是拿尺子从桌面量
+    高度来定放置点的，那种数就填在这里，别再自己去减 table_z。
     """
-    place = np.array([float(place_xy[0]), float(place_xy[1]),
-                      float(table_z) + float(approach_m)], float)
+    if place_z is None:
+        z = float(table_z) + float(approach_m)
+    else:
+        z = float(place_z)
+    place = np.array([float(place_xy[0]), float(place_xy[1]), z], float)
     return g.grasp_waypoints(plan.waypoints.grasp, plan.yaw_rad,
                              approach_m=approach_m, lift_m=lift_m,
                              place_point=place)
