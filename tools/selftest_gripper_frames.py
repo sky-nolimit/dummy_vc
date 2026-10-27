@@ -31,8 +31,8 @@ NODE = os.path.join(GRASP, 'dummy_vc_grasp', 'gripper_can_node.py')
 #: 纯层允许 import 的东西。多一个 ROS/socket 进来，这个自测就没了。
 PURE_IMPORTS = {'math', 'struct'}
 
-#: 2026-10-26 量尺实测的三个点：圈数 → 开口（mm）
-MEASURED = ((0.10, 12.5), (0.25, 10.5), (0.50, 8.0))
+#: 2026-10-27 重标定之后的实测点（卡尺）：圈数 → 开口（mm），两个方向各取一段
+MEASURED = ((0.0, 34.0), (0.5, 28.0), (0.9, 24.0), (-1.0, 46.0))
 
 FAILURES = []
 
@@ -163,19 +163,21 @@ def check_socketcan(gf):
 
 
 def check_mapping(gf):
-    print('\n5. 宽度↔圈数：实测三点都要落在 0.5 mm 内')
+    print('\n5. 宽度↔圈数：实测四点都要落在 0.6 mm 内（拟合 RMS 0.31 mm）')
     for revs, width in MEASURED:
-        close('{:.2f} 圈 → 开口'.format(revs), gf.revs_to_width(revs), width, 0.5)
-    for width in (0.0, 8.0, 12.5, 30.0, 55.0):
+        close('{:.2f} 圈 → 开口'.format(revs), gf.revs_to_width(revs), width, 0.6)
+    for width in (0.0, 23.0, 34.0, 46.0, 55.0):
         back = gf.revs_to_width(gf.width_to_revs(width))
         close('{:.1f} mm 来回一趟'.format(width), back, width, 1e-6)
-    close('满开 55 mm 的圈数是负的（正常）', gf.width_to_revs(55.0), -3.733, 0.01)
+    close('满开 55 mm 的圈数是负的（正常）', gf.width_to_revs(55.0), -1.782, 0.01)
+    close('抓 24 mm 块要的圈数', gf.width_to_revs(24.0), 0.886, 0.01)
+    close('抓 24 mm 块留 2 mm 余量', gf.width_to_revs(26.0), 0.714, 0.01)
 
 
 def check_rejections(gf):
     print('\n6. 越界与非法值：抛异常，不静默夹紧')
     ok('0 mm 算得出圈数（{:.3f}）'.format(gf.width_to_revs(0.0)))
-    close('55 mm 可以', gf.width_to_revs(55.0), -3.733, 0.002)
+    close('55 mm 可以', gf.width_to_revs(55.0), -1.782, 0.002)
     expect_error('55.1 mm', gf.OutOfRange, gf.width_to_revs, 55.1)
     expect_error('-0.1 mm', gf.OutOfRange, gf.width_to_revs, -0.1)
     expect_error('NaN 宽度', gf.OutOfRange, gf.width_to_revs, float('nan'))
@@ -253,7 +255,7 @@ def main():
         return 1
     print('SUMMARY')
     print('  [ ok ] gripper_frames.py      enable/position/feedback frames match the 35-board firmware')
-    print('  [ ok ] gripper_frames.py      width <-> revs mapping reproduces the three measured points')
+    print('  [ ok ] gripper_frames.py      width <-> revs mapping reproduces the measured points')
     print('  [ ok ] gripper_can_node.py    goes through the codec, and is registered')
     print('RESULT: every byte of the gripper frame is pinned down offline')
     return 0
