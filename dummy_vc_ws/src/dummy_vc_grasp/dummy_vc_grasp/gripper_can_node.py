@@ -45,12 +45,14 @@ import math
 import socket
 import sys
 import threading
+import time
 
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float64
 
 from dummy_vc_grasp import gripper_frames as gf
+from dummy_vc_grasp import gripper_home as gh
 
 
 class GripperCanNode(Node):
@@ -69,12 +71,27 @@ class GripperCanNode(Node):
         self.declare_parameter('enable_before_move', True)
         #: 只打印不发送：用来在没开 can0 的机器上先看一眼要发什么。
         self.declare_parameter('dry_run', False)
+        #: 启动时先量一次合拢点。**默认开着**：宽度那条线性关系的截距跟着编码器
+        #: 零点走，零点会因为"重新标定一次"就平移，所以不能假设上电时手指在哪。
+        self.declare_parameter('home_on_start', True)
+        #: 找零点时命令目标超过合拢点多少圈（整段行程才 4.7 圈）。
+        self.declare_parameter('home_span_revs', gh.DEFAULT_SPAN_REVS)
+        #: 量到的合拢点离默认值超过这么多圈就拒绝。
+        self.declare_parameter('home_plausible_revs', gh.DEFAULT_PLAUSIBLE_REVS)
+        #: 量完之后张到多宽（不要让手指一直顶在止位上）。
+        self.declare_parameter('idle_width_mm', 50.0)
 
         self.channel = str(self.get_parameter('channel').value)
         self.dry_run = bool(self.get_parameter('dry_run').value)
         self._enable_before_move = bool(
             self.get_parameter('enable_before_move').value)
         self.sock = None if self.dry_run else self._open_socket(self.channel)
+
+        #: 现场量到的合拢点（圈）。None = 还没量过，按出厂标定值算。
+        self.rev_closed = None
+        if self.sock is not None and bool(
+                self.get_parameter('home_on_start').value):
+            self._home_on_start()
 
         self.frames_sent = 0
         self._stop = threading.Event()
@@ -101,11 +118,89 @@ class GripperCanNode(Node):
 
         self.get_logger().info(
             '夹爪通道就绪：{}（{}）。{} → 0x{:03X}，回读 0x{:03X} → {}。'
+            '宽度以"手指合拢"那一点为原点（当前 {:.4f} 圈{}）。'
             '前提是板子已经标定过，否则位置命令会被固件那道闸挡掉。'.format(
                 self.channel, '只打印不发送' if self.dry_run else 'SocketCAN 已打开',
                 self.get_parameter('width_topic').value, gf.POSITION_FRAME_ID,
                 gf.POSITION_FEEDBACK_ID,
-                self.get_parameter('position_topic').value))
+                self.get_parameter('position_topic').value,
+                self.anchor,
+                '' if self.rev_closed is not None else '，出厂值，没量过'))
+
+    # -- 找零点 -----------------------------------------------------------
+    @property
+    def anchor(self):
+        """宽度 ↔ 圈数的原点：量到过就用量的，没量过用出厂标定值。"""
+        return (gf.DEFAULT_REV_CLOSED if self.rev_closed is None
+                else self.rev_closed)
+
+    def _read_revs(self, timeout=0.3):
+        """同步读一次位置（圈），读不到返回 None。
+
+        只在找零点时用 —— 那会儿接收线程还没起来，没人跟它抢帧。
+        """
+        try:
+            self.sock.send(gf.to_socketcan(
+                gf.POSITION_FEEDBACK_ID, gf.encode_position_query()))
+        except OSError:
+            return None
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                data = self.sock.recv(gf.CAN_FRAME.size)
+            except socket.timeout:
+                continue
+            except OSError:
+                return None
+            if len(data) < gf.CAN_FRAME.size:
+                continue
+            frame_id, _dlc, payload = gf.CAN_FRAME.unpack(data)
+            if frame_id != gf.POSITION_FEEDBACK_ID:
+                continue
+            try:
+                revs, _finished = gf.decode_position(payload)
+            except ValueError:
+                continue
+            return revs
+        return None
+
+    def _home_on_start(self):
+        """启动时先把手指推到合拢，量出"开口 0"在哪一圈。
+
+        这一步是宽度映射可靠的前提：截距跟着编码器零点走，而零点会被一次重新
+        标定平移掉。量不到就退回出厂值并明确告警 —— 不假装没事。
+        """
+        log = self.get_logger()
+
+        def _send(frame_id, payload):
+            self.sock.send(gf.to_socketcan(frame_id, payload))
+
+        result = gh.home(
+            _send, self._read_revs,
+            span_revs=float(self.get_parameter('home_span_revs').value),
+            plausible_revs=float(
+                self.get_parameter('home_plausible_revs').value),
+            log=lambda message: log.info('找零点：{}'.format(message)))
+        if result.ok:
+            self.rev_closed = result.rev_closed
+            log.info('合拢点 {:.4f} 圈（出厂值 {:.4f}），宽度都从这一点算'.format(
+                result.rev_closed, gf.DEFAULT_REV_CLOSED))
+        else:
+            log.warn('没量成：{}。先按出厂合拢点 {:.4f} 圈算，宽度可能整体偏；'
+                     '要用工具单独量一次：tools/gripper_home.py'.format(
+                         result.reason, gf.DEFAULT_REV_CLOSED))
+        # 量完（或者没量成）都别让手指顶在止位上。
+        width, _ = gf.clamp_width(
+            float(self.get_parameter('idle_width_mm').value))
+        try:
+            self.sock.send(gf.to_socketcan(gf.ENABLE_FRAME_ID,
+                                           gf.encode_enable(True)))
+            self.sock.send(gf.to_socketcan(
+                gf.POSITION_FRAME_ID,
+                gf.encode_position(gf.width_to_revs(width, self.anchor))))
+            log.info('张到 {:.1f} mm 待命'.format(width))
+        except OSError as exc:
+            log.warn('张开命令没发出去：{}'.format(exc))
 
     # -- 传输层 -----------------------------------------------------------
     def _open_socket(self, channel):
@@ -169,7 +264,7 @@ class GripperCanNode(Node):
             except ValueError as exc:
                 self.get_logger().warn('回帧解不开：{}'.format(exc))
                 continue
-            width = gf.revs_to_width(revs)
+            width = gf.revs_to_width(revs, self.anchor)
             self.position_pub.publish(Float64(data=width))
             self._report(revs, width, finished)
 
@@ -199,7 +294,7 @@ class GripperCanNode(Node):
             self.get_logger().warn(
                 '要 {:.2f} mm，机械行程只有 {:g}~{:g} mm，按 {:.2f} mm 发'.format(
                     raw, gf.MIN_WIDTH_MM, gf.MAX_WIDTH_MM, width))
-        revs = gf.width_to_revs(width)
+        revs = gf.width_to_revs(width, self.anchor)
         # 每发一次位置都补一帧使能。原因：主控固件的 power_on 会调
         # hand.set_enable(true)，而它发的是 0x381 带一个 float（如 0.5A），
         # 35 板那边只认 uint32 == 1 才是使能，其余一律 MODE_STOP —— 主控

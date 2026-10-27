@@ -105,6 +105,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'gripper_channel', default_value='can0',
             description='gripper_can_node 用的 SocketCAN 接口（没接适配器时用 vcan0 干跑）'),
+        DeclareLaunchArgument(
+            'gripper_home', default_value='true',
+            description='gripper_can_node 启动时先把手指推到合拢量一次零点'
+                        '（宽度映射的原点；关掉就只能用出厂标定值）'),
     ]
 
     scene = Node(
@@ -148,6 +152,10 @@ def generate_launch_description():
 
     # 夹爪旁路：只在 gripper:=true 时起来。它需要 can0 已经 up（适配器挂着），
     # 起不来会在自己的日志里说清楚要跑哪条 ip 命令。
+    #
+    # 起来之后第一件事是找零点：把手指推到合拢、量出"开口 0"在哪一圈。宽度那条
+    # 线性关系的截距跟着编码器零点走，而零点会被一次重新标定平移掉 —— 所以不能
+    # 假设上电时手指停在哪儿。`gripper_home:=false` 可以关掉（只用出厂标定值）。
     gripper_node = Node(
         package='dummy_vc_grasp',
         executable='gripper_can_node',
@@ -155,6 +163,8 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'channel': LaunchConfiguration('gripper_channel'),
+            'home_on_start': ParameterValue(
+                LaunchConfiguration('gripper_home'), value_type=bool),
         }],
         condition=IfCondition(LaunchConfiguration('gripper')),
     )

@@ -80,3 +80,20 @@ def describe(result, target_m, measured_m):
     gap = measured_m - target_m
     return '目标 {:.1f} mm，实测 {:.1f} mm（差 {:+.1f} mm）'.format(
         target_m * 1e3, measured_m * 1e3, gap * 1e3)
+
+
+def stall_detected(samples, tol=3e-4, need=3):
+    """最近 `need` 次位置采样几乎没变 ⇒ 顶到机械止位了。
+
+    用在找零点那一步（`gripper_home`）：命令一个明显超过合拢点的目标，位置
+    连续几次不动就说明手指已经顶死，可以停手了。`tol` 是圈，默认 3e-4 圈
+    ≈ 3.5 µm 的开口变化 —— 编码器分辨力约 4.5e-5 圈，静止时的抖动在 1e-4
+    以内，所以这个阈值不会把"慢速移动"误判成"停住"。
+
+    只看**最近** `need` 个采样：早期那些"还没开始动"的点不能算进来，否则命令
+    刚发出去就会被判成顶住了。所以调用方要先把"确实动过"的标志置起来再问。
+    """
+    window = [float(s) for s in samples[-int(need):]]
+    if len(window) < int(need):
+        return False
+    return max(window) - min(window) <= float(tol)

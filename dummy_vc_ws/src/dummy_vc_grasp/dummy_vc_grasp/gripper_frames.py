@@ -73,8 +73,21 @@ ACK_REQUEST = 0x01
 #: 重测**：标定改的是 `encoderHomeOffset`，同一圈数对应的物理位置整体平移，
 #: 旧数据直接作废。重测用 `tools/gripper_sweep.py`（自己走点、问你卡尺读数）+
 #: `tools/fit_gripper_width.py`（拟合出这两个常数并打印成可直接粘贴的格式）。
+#:
+#: **这两个数不是"夹爪的物理常数"，而是"那一次标定下的坐标系"**：斜率
+#: `MM_PER_REV` 是齿条节距决定的、不随标定变；截距 `REV_AT_ZERO_WIDTH_MM` 是
+#: "手指完全合拢时电机读到多少圈"，它跟着编码器零点走。
+#:
+#: 所以真正稳的做法是**每次用之前现场量一次零点**（把手指慢慢推到合拢，看它停
+#: 在哪个圈数），那就是 `tools/gripper_home.py` 干的事；这两个常数只在"还没量
+#: 过"的时候当默认锚点用。见 `DEFAULT_REV_CLOSED`。
 REV_AT_ZERO_WIDTH_MM = 34.294
 MM_PER_REV = 11.620
+
+#: 默认锚点：手指合拢（开口 0）时电机应该在的圈数。由上面那条拟合关系反推：
+#: `34.294 / 11.620 = 2.951`。**它只是默认值** —— 夹爪重新标定过、或者被手动
+#: 掰过之后，真实值会变，用 `tools/gripper_home.py` 现场量。
+DEFAULT_REV_CLOSED = REV_AT_ZERO_WIDTH_MM / MM_PER_REV
 
 #: 两指的机械行程（实测最大开口 55 mm）。这是**机械极限**：命令到 53 mm 以上
 #: 手指就顶到本体、电机堵转，抓取流程里根本用不到那么开，别去试。
@@ -171,18 +184,23 @@ def decode_offset(payload):
     return struct.unpack('<i', payload[:4])[0]
 
 
-def width_to_revs(width_mm):
-    """开口宽度（mm）→ 电机圈数。越界抛异常，不静默夹紧。"""
+def width_to_revs(width_mm, rev_closed=DEFAULT_REV_CLOSED):
+    """开口宽度（mm）→ 电机圈数。越界抛异常，不静默夹紧。
+
+    `rev_closed` 是"手指完全合拢时的圈数"，也就是这部分坐标系的原点。
+    默认用出厂标定值；现场量过之后请把量到的那个传进来 —— 否则一旦夹爪重新
+    标定过（零点平移），同一条命令会把手指送到别的地方去。
+    """
     width = _as_float('开口宽度', width_mm)
     if width < MIN_WIDTH_MM or width > MAX_WIDTH_MM:
         raise OutOfRange('开口 {:.2f} mm 超出 [{:g}, {:g}] mm'.format(
             width, MIN_WIDTH_MM, MAX_WIDTH_MM))
-    return (REV_AT_ZERO_WIDTH_MM - width) / MM_PER_REV
+    return _as_float('合拢圈数', rev_closed) - width / MM_PER_REV
 
 
-def revs_to_width(revs):
-    """电机圈数 → 开口宽度（mm）。"""
-    return REV_AT_ZERO_WIDTH_MM - MM_PER_REV * _as_float('位置', revs)
+def revs_to_width(revs, rev_closed=DEFAULT_REV_CLOSED):
+    """电机圈数 → 开口宽度（mm）。`rev_closed` 含义同 `width_to_revs`。"""
+    return (_as_float('合拢圈数', rev_closed) - _as_float('位置', revs)) * MM_PER_REV
 
 
 def clamp_width(width_mm):
