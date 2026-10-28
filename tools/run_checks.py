@@ -169,6 +169,9 @@ CHECKS = [
     ('selftest_patch_gripper_firmware.py',
      'the firmware patch: three edits, idempotent, refuses unknown trees', True,
      []),
+    ('selftest_patch_main_firmware.py',
+     'the main firmware patch: bounded wait, release on failure, retries back on',
+     True, []),
 ]
 
 
