@@ -90,9 +90,17 @@ def generate_launch_description():
             'observe_timeout_s', default_value='60.0',
             description='等 /detected_objects 的上限（相机要十几秒才起来，别设太小）'),
         DeclareLaunchArgument(
-            'place_x', default_value='0.0', description='放置点 x（base_link 下，米）'),
+            'place_x', default_value='-0.175',
+            description='放置点 x（base_link 下，米）'),
         DeclareLaunchArgument(
-            'place_y', default_value='0.10', description='放置点 y（base_link 下，米）'),
+            'place_y', default_value='0.090',
+            description='放置点 y（base_link 下，米）'),
+        DeclareLaunchArgument(
+            'place_z', default_value='0.055',
+            description='放置点高度；怎么量由 place_z_frame 决定'),
+        DeclareLaunchArgument(
+            'place_z_frame', default_value='table',
+            description="place_z 的量法：'table' = 离工作面多高，'base' = base_link 的 z"),
         DeclareLaunchArgument(
             'scene', default_value='true',
             description='是否起 scene_node（把地面/地台发进 planning scene）'),
@@ -142,6 +150,10 @@ def generate_launch_description():
                                           value_type=float),
                 'place_y': ParameterValue(LaunchConfiguration('place_y'),
                                           value_type=float),
+                'place_z': ParameterValue(LaunchConfiguration('place_z'),
+                                          value_type=float),
+                'place_z_frame': ParameterValue(
+                    LaunchConfiguration('place_z_frame'), value_type=str),
                 'observe_timeout_s': ParameterValue(
                     LaunchConfiguration('observe_timeout_s'), value_type=float),
                 'gripper_enabled': ParameterValue(

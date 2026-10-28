@@ -201,17 +201,31 @@ def plan_grasp(detection, model: gr.FingerOpeningModel,
 
 
 def pick_place_waypoints(plan: GraspPlan, place_xy, table_z, approach_m=0.08,
-                         lift_m=0.10, place_z=None):
+                         lift_m=0.10, place_z=None, place_z_frame='table'):
     """把放置点也算出来（首期放置点是参数给定的，不由视觉算）。
 
     默认放置高度取工作面 + 抬升量，避免"停在地面上"导致合爪时蹭着走。
-    `place_z` 给了就直接用（base_link 坐标系，米）—— 有人是拿尺子从桌面量
-    高度来定放置点的，那种数就填在这里，别再自己去减 table_z。
+
+    `place_z` 量的是"离工作面多高"还是"base_link 里的绝对高度"，由
+    `place_z_frame` 说清楚：
+
+    - `'table'`（默认）：从桌面往上量的高度（人拿尺子量的就是这种），内部加
+      `table_z`；
+    - `'base'`：已经是 base_link 的 z，直接用。
+
+    2026-10-27 之前的坑：`place_x`/`place_y` 声明了却从没被读过，放置点悄悄
+    等于抓取点（"放置"其实是原地松手）。
     """
     if place_z is None:
         z = float(table_z) + float(approach_m)
-    else:
+    elif place_z_frame == 'table':
+        z = float(table_z) + float(place_z)
+    elif place_z_frame == 'base':
         z = float(place_z)
+    else:
+        raise ValueError(
+            "place_z_frame 只能是 'table' 或 'base'，收到 {!r}".format(
+                place_z_frame))
     place = np.array([float(place_xy[0]), float(place_xy[1]), z], float)
     return g.grasp_waypoints(plan.waypoints.grasp, plan.yaw_rad,
                              approach_m=approach_m, lift_m=lift_m,

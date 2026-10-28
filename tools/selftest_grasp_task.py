@@ -251,9 +251,28 @@ def check_planner(gripper, planner):
     else:
         fail('放置点仍然等于抓取点（place_x/place_y 没生效）')
     wp_z = planner.pick_place_waypoints(plan, (-0.175, 0.090), ground,
-                                        place_z=-0.0405 + 0.055)
-    close('place_z 给了就按它来（桌面上方 55 mm）', wp_z.place[2],
+                                        place_z=-0.0405 + 0.055,
+                                        place_z_frame='base')
+    close('place_z + frame=base 直接用（base_link 的 z）', wp_z.place[2],
           -0.0405 + 0.055, 1e-12)
+    wp_t = planner.pick_place_waypoints(plan, (-0.175, 0.090), ground,
+                                        place_z=0.055, place_z_frame='table')
+    close('place_z + frame=table 加 table_z（"桌面上方 55 mm"）', wp_t.place[2],
+          -0.0405 + 0.055, 1e-12)
+    if abs(wp_t.place[2] - wp_z.place[2]) > 1e-12:
+        fail('frame=table 与 frame=base 对同一高度算出了不同的 z')
+    else:
+        ok('两种 frame 写法能对上（省得再自己减 table_z）')
+    try:
+        planner.pick_place_waypoints(plan, (-0.175, 0.090), ground,
+                                     place_z=0.055, place_z_frame='floor')
+    except ValueError as exc:
+        if 'table' in str(exc) and 'base' in str(exc):
+            ok('frame 写错立刻报错，并说明只能是 table/base')
+        else:
+            fail(f'frame 报错没讲清楚两种取值：{exc}')
+    else:
+        fail('place_z_frame 写成 floor 竟然没报错')
 
 
 def run_machine(task, gripper_ready, events):

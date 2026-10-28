@@ -146,10 +146,12 @@ class PickPlaceNode(Node):
         self.declare_parameter('lift_m', 0.10)
         self.declare_parameter('place_x', 0.0)
         self.declare_parameter('place_y', 0.10)
-        #: 放置点高度（base_link，米）。小于 -100 表示没设，按"工作面 + approach_m"
-        #: 算。注意 base_link 的原点在底座底面往上 15.5 mm，桌面在 z = -0.0405：
-        #: 从桌面量出来的 55 mm 要填 -0.0405 + 0.055 = +0.0145。
+        #: 放置点高度。小于 -100 表示没设，按"工作面 + approach_m"算。
+        #: 怎么量由 `place_z_frame` 决定：'table' = 从桌面往上量的高度（人拿尺子
+        #: 量的就是这种），'base' = base_link 里的绝对 z。桌面在 base_link 的
+        #: z = -0.0405，所以"桌面上方 55 mm"两种写法分别是 0.055 / +0.0145。
         self.declare_parameter('place_z', -999.0)
+        self.declare_parameter('place_z_frame', 'table')
         #: 抓取点补偿（base_link，米）。视觉 + 执行合起来的系统性偏差，按实测填，
         #: 默认 0。见 tools/fit_grasp_correction.py。
         self.declare_parameter('grasp_offset_x_m', 0.0)
@@ -418,6 +420,7 @@ class PickPlaceNode(Node):
         """
         params = self.get_parameter
         place_z = float(params('place_z').value)
+        frame = str(params('place_z_frame').value).strip()
         try:
             wp = grasp_planner.pick_place_waypoints(
                 plan,
@@ -425,15 +428,22 @@ class PickPlaceNode(Node):
                 float(params('table_z').value),
                 approach_m=float(params('approach_m').value),
                 lift_m=float(params('lift_m').value),
-                place_z=None if place_z < -100.0 else place_z)
+                place_z=None if place_z < -100.0 else place_z,
+                place_z_frame=frame)
         except Exception as exc:                # noqa: BLE001
             self.get_logger().warn(
                 '放置点算不出来（{}），这轮就放回抓取点上方'.format(exc))
             return plan
+        if place_z < -100.0:
+            how = '（没设 place_z，按工作面 + 起手高度算）'
+        elif frame == 'table':
+            how = '（离工作面 {:.1f} mm）'.format(place_z * 1e3)
+        else:
+            how = '（base_link z，离工作面 {:.1f} mm）'.format(
+                (wp.place[2] - float(params('table_z').value)) * 1e3)
         self.get_logger().info(
             '放置点 ({:.3f}, {:.3f}, {:+.3f}) m{}'.format(
-                wp.place[0], wp.place[1], wp.place[2],
-                '' if place_z >= -100.0 else '（没设 place_z，按工作面 + 起手高度算）'))
+                wp.place[0], wp.place[1], wp.place[2], how))
         return replace(plan, waypoints=wp)
 
     def _gripper_ready_to_move(self):
