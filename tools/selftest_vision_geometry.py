@@ -870,6 +870,7 @@ def check_depth(geometry, depth3d, detection):
         fail(f'棱角那组的短边差 {corner * 1e3:.1f} mm，与 6/12 mm 门限的'
              f'关系变了，检查的前提不成立')
 
+
     # 11d. 用地面拟合反解相机倾角：真实 20°，URDF 里写的 16° -> 应补 +4°
     ground_opt = (ray[labels.ravel() == 2]
                   * t[labels.ravel() == 2][:, None])
@@ -1013,6 +1014,78 @@ def check_depth(geometry, depth3d, detection):
              f'（该接近 0，即锁到墙），加先验后 z = {pri_z:+.4f}（该是 0）')
 
 
+def check_shadow_correction(geometry):
+    """影子修正：2026-10-28 真机三点的偏差方向都在"相机→方块"的射线上。"""
+    print('--- 12. 影子修正（把检测点沿"远离相机"的方向拉回来）')
+    # 相机在 base_link 的 (-0.302, +0.317, +0.097)，桌面 z = -0.0405
+    cam_xy = (-0.302, 0.317)
+    height = 0.097 - (-0.0405)
+    edge = 0.024
+    cases = [
+        # 检测到的点, 真值, 名字
+        ((0.020, 0.210), (0.000, 0.220), '第 1 点'),
+        ((0.121, 0.171), (0.080, 0.180), '第 2 点'),
+    ]
+    for det, truth, name in cases:
+        shift = geometry.shadow_correction(det, cam_xy, height, edge)
+        fixed = np.asarray(det) + shift
+        before = float(np.hypot(det[0] - truth[0], det[1] - truth[1]))
+        after = float(np.hypot(fixed[0] - truth[0], fixed[1] - truth[1]))
+        print(f'    {name}: 修正前差 {before * 1e3:.1f} mm，修正后差 '
+              f'{after * 1e3:.1f} mm（往 ({shift[0] * 1e3:+.1f}, '
+              f'{shift[1] * 1e3:+.1f}) mm 挪）')
+        if after >= before:
+            fail(f'{name} 修正后反而更偏')
+        elif after > 0.012:
+            fail(f'{name} 修正后还剩 {after * 1e3:.1f} mm，超过 12 mm')
+        else:
+            ok(f'{name} 修正后残差 {after * 1e3:.1f} mm')
+    # 修正方向必须是从方块指向相机（即把检测点往相机方向拉）。
+    det = np.array([0.0, 0.30])
+    shift = geometry.shadow_correction(det, cam_xy, height, edge)
+    to_cam = np.array(cam_xy) - det
+    if float(np.dot(shift, to_cam)) <= 0.0:
+        fail('修正方向不是朝向相机')
+    else:
+        ok('修正方向朝向相机')
+    # 正下方（r=0）不需要修；系数 0 就等于关掉；离相机越远偏得越多。
+    close('相机正下方不修', geometry.shadow_correction(
+        cam_xy, cam_xy, height, edge), [0.0, 0.0], 1e-12)
+    close('系数 0 = 不修', geometry.shadow_correction(
+        det, cam_xy, height, edge, scale=0.0), [0.0, 0.0], 1e-12)
+    # 沿同一条射线取两点，r 翻四倍偏移也应翻四倍（相机在 +y 侧，所以
+    # 越靠近机械臂、离相机越远 —— 别拿"y 更大"当"更远"）。
+    ray = np.array([0.6, -0.8])
+    near_pt = np.array(cam_xy) + ray * 0.10
+    far_pt = np.array(cam_xy) + ray * 0.40
+    near = float(np.hypot(*geometry.shadow_correction(
+        near_pt, cam_xy, height, edge)))
+    far = float(np.hypot(*geometry.shadow_correction(
+        far_pt, cam_xy, height, edge)))
+    if abs(far / near - 4.0) > 0.05:
+        fail(f'偏移没随距相机的距离线性增长（{near * 1e3:.2f} → '
+             f'{far * 1e3:.2f} mm，比值 {far / near:.2f}）')
+    else:
+        ok(f'偏移随距相机的距离线性增长（{near * 1e3:.2f} → '
+           f'{far * 1e3:.2f} mm）')
+    if float(np.hypot(*geometry.shadow_correction(
+            [-0.302, 0.20], cam_xy, height, edge))) > float(
+                np.hypot(*geometry.shadow_correction(
+                    [-0.302, 0.40], cam_xy, height, edge))):
+        ok('相机正 +y 侧：方块越靠近机械臂（离相机越远）偏得越多')
+    else:
+        fail('沿 +y 的单调性反了')
+    for bad in (([0.0, 0.2, 0.0], cam_xy, height, edge),
+                ([0.0, 0.2], cam_xy, 0.0, edge)):
+        try:
+            geometry.shadow_correction(*bad)
+        except geometry.GeometryError:
+            pass
+        else:
+            fail('维度不对或相机高度为 0 时没抛 GeometryError')
+    ok('维度/高度不合法时抛 GeometryError')
+
+
 def main():
     print(f'reading {os.path.relpath(PKG_ROOT, REPO)}')
     geometry, gripper, detection, depth3d = load_modules()
@@ -1033,6 +1106,7 @@ def main():
     check_measurements(geometry, gripper)
     check_detection(geometry, gripper, detection)
     check_depth(geometry, depth3d, detection)
+    check_shadow_correction(geometry)
 
     print()
     if FAILURES:

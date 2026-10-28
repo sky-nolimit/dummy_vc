@@ -96,6 +96,12 @@ class GripperCanNode(Node):
         self.declare_parameter('width_tol_mm', 0.8)
         self.declare_parameter('width_max_iters', 4)
         self.declare_parameter('width_settle_s', 0.4)
+        #: 多久没收到 0x3A3 就认定板子卡死了（秒）。卡死之后这边不再发命令，
+        #: 并把 /gripper/status 改成 no_zero，逼人去断电重启。
+        self.declare_parameter('link_timeout_s', 3.0)
+        #: 空闲时的查询频率（Hz）。发得越少，撞上 35 板那条"一帧没发出去就
+        #: 永久锁死发送"的固件缺陷的机会越小；有目标在跟的时候仍按 poll_hz 问。
+        self.declare_parameter('idle_poll_hz', 1.0)
         #: 找零点之前先等板子回一帧位置，最多等这么久（刚开 socket 时板子可能
         #: 正在上电/重启，第一帧要一两百毫秒才到）。
         self.declare_parameter('home_board_timeout_s', 2.0)
@@ -135,6 +141,9 @@ class GripperCanNode(Node):
         self._target_width_mm = None
         self._target_iters = 0
         self._target_ready_at = 0.0
+        #: 最近一次收到回帧的时间（看门狗用）。0 = 还没收到过。
+        self._last_feedback_at = 0.0
+        self._poll_tick = 0
 
         self.position_pub = self.create_publisher(
             Float64, str(self.get_parameter('position_topic').value), 10)
@@ -223,6 +232,7 @@ class GripperCanNode(Node):
                 revs, _finished = gf.decode_position(payload)
             except ValueError:
                 continue
+            self._last_feedback_at = time.time()
             return revs
         return None
 
@@ -311,6 +321,7 @@ class GripperCanNode(Node):
         """把"零点准不准"发出去，让抓取节点在动之前就能看见。"""
         if self.dry_run:
             return
+        self._check_link()
         if self.zero_known:
             text = 'ready'
         elif self._may_move:
@@ -318,6 +329,33 @@ class GripperCanNode(Node):
         else:
             text = 'no_zero'
         self.status_pub.publish(String(data=text))
+
+    def _check_link(self):
+        """板子还活着吗？活着才允许继续动。
+
+        2026-10-28 真机：一次成功的抓取之后，夹爪板突然不再回 0x3A3，
+        `candump` 上一条都没有，只有整机断电重启才恢复。35 板固件那条
+        "一帧发不出去就永久丢掉 TX 信号量" 的缺陷（见 docs/04 A2-补充2）
+        完全能解释这个现象 —— 板子自己的 CAN 发送路径锁死了，它不会再收
+        也不会再答。
+
+        我们没法从这边把它救回来（它连 reboot 帧都不处理），能做的是：
+        立刻停止发命令、把状态改成 no_zero、并明确告诉人"断电重启"。
+        """
+        if not self.zero_known or self._last_feedback_at <= 0.0:
+            return
+        silent_for = time.time() - self._last_feedback_at
+        limit = float(self.get_parameter('link_timeout_s').value)
+        if silent_for < limit or not self._may_move:
+            return
+        self._may_move = False
+        self.zero_known = False
+        self._target_width_mm = None
+        self.get_logger().error(
+            '夹爪板 {:.1f} 秒没回过一帧（0x3A3）。它多半卡在自己的 CAN 发送上，'
+            '这边救不回来：把机械臂（或夹爪板）断电重启，再跑一次 '
+            'tools/gripper_home.py。在那之前本节点不再发任何移动命令。'
+            .format(silent_for))
 
     def _refuse(self, note):
         """零点不可用时的统一回绝：说清楚原因，但别每 100 ms 刷一遍。"""
@@ -393,6 +431,7 @@ class GripperCanNode(Node):
             width = gf.revs_to_width(revs, self.anchor, self.span)
             self._last_revs = float(revs)
             self._last_width = float(width)
+            self._last_feedback_at = time.time()
             self.position_pub.publish(Float64(data=width))
             self._report(revs, width, finished)
 
@@ -410,7 +449,14 @@ class GripperCanNode(Node):
 
     # -- 命令 -------------------------------------------------------------
     def _on_poll(self):
-        self._send(gf.POSITION_FEEDBACK_ID, gf.encode_position_query())
+        self._poll_tick += 1
+        # 有目标在跟的时候按 poll_hz 问；空闲时降到 idle_poll_hz —— 少发帧就少
+        # 一次撞上固件那条"发送失败就永久锁死"的机会。
+        poll_hz = max(0.1, float(self.get_parameter('poll_hz').value))
+        idle_hz = max(0.1, float(self.get_parameter('idle_poll_hz').value))
+        every = max(1, int(round(poll_hz / idle_hz)))
+        if self._target_width_mm is not None or self._poll_tick % every == 0:
+            self._send(gf.POSITION_FEEDBACK_ID, gf.encode_position_query())
         self._correct_once()
 
     def _on_width(self, msg):

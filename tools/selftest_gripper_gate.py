@@ -150,12 +150,20 @@ def check_gripper_servo():
     for need in ('def _correct_once', 'self._correct_once()',
                  "declare_parameter('width_tol_mm'",
                  "declare_parameter('width_max_iters'",
-                 "declare_parameter('width_settle_s'"):
+                 "declare_parameter('width_settle_s'",
+                 "declare_parameter('link_timeout_s'",
+                 "declare_parameter('idle_poll_hz'",
+                 'def _check_link', 'self._check_link()'):
         if need in src:
             ok('源码里有 {!r}'.format(need))
         else:
             fail('源码里没有 {!r}'.format(need),
-                 '静差补不回来，张开 50 会停在 52~54')
+                 '静差补不回来 / 板子卡死了没人发现')
+    # 两条读回路径都要盖时间戳，否则空闲时看门狗会误判"板子死了"。
+    if src.count('self._last_feedback_at = time.time()') >= 2:
+        ok('两条读回路径都盖了时间戳')
+    else:
+        fail('读回路径没盖时间戳', '看门狗会误报')
     # 补发量必须是"2*目标 − 实测"，不能按系数硬推。
     if '2.0 * goal - float(self._last_revs)' in src:
         ok('补发量用 2*目标 − 实测（映射自动对消）')

@@ -457,6 +457,39 @@ def check_node_api(geometry, gripper, planner, scene, task):
         else:
             ok(f'代码里没有 {banned}（{why}）')
 
+    # error_code 得配翻译：真机上只会给一个 -4，没翻译就只能猜。
+    funcs = {node.name: node for node in ast.walk(tree)
+             if isinstance(node, ast.FunctionDef)}
+    if 'describe_moveit_error' not in funcs:
+        fail('pick_place_node 里没有 describe_moveit_error')
+        return
+    env = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.Assign, ast.AnnAssign)) and (
+                getattr(node, 'name', None) == 'describe_moveit_error'
+                or any(getattr(t, 'id', None) == '_MOVEIT_ERROR_TEXT'
+                       for t in getattr(node, 'targets', []))):
+            exec(compile(ast.Module([node], []), path, 'exec'), env)  # noqa: S102
+    describe = env.get('describe_moveit_error')
+    if describe is None:
+        fail('describe_moveit_error 抠不出来（依赖了模块里的别的东西？）')
+        return
+    if describe(1) != '':
+        fail('成功码不该带解释：{!r}'.format(describe(1)))
+    else:
+        ok('成功码（1）不带解释')
+    for code in (-1, -4, -9, 99999):
+        text = describe(code)
+        if not text.startswith(': '):
+            fail(f'{code} 的解释格式不对：{text!r}')
+        else:
+            ok(f'{code} → {text[2:][:28]}…')
+    if 'move_group' not in describe(-4):
+        fail('-4（CONTROL_FAILED）的解释没说去看 move_group 日志',
+             '这个码恰恰是"规划好了但没执行"，线索在 move_group 那边')
+    else:
+        ok('-4 指了该去看哪段日志')
+
 
 def check_scene(scene, geometry):
     """碰撞体数值：场景里最容易被当成"随便填个大盒子"糊过去的一层。"""

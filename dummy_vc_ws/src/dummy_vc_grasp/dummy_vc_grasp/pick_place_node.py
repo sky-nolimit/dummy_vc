@@ -51,6 +51,32 @@ from dummy_vc_grasp import scene_objects as scene
 from dummy_vc_grasp import task as task_mod
 
 
+#: MoveIt 的 error_code 翻译。负数那一串数字本身什么也没说，得配一句"下一步
+#: 该看哪儿"，不然真机上只能对着 -4 猜。
+_MOVEIT_ERROR_TEXT = {
+    0: '失败（FAILURE，没细分原因）',
+    -1: '规划失败（PLANNING_FAILED）：同一场景下没有可行路径',
+    -2: '规划方案无效（INVALID_MOTION_PLAN）：常见于起点状态和现在对不上',
+    -3: '规划期间场景变了（MOTION_PLAN_INVALIDATED_BY_ENVIRONMENT_CHANGE）',
+    -4: '控制器执行失败（CONTROL_FAILED）：规划出来了，但控制器没收这条轨迹'
+        ' —— 去看 move_group 那段日志的 "Controller failed to execute" / '
+        '"Trajectory start state does not match"',
+    -5: '路径没通过环境检查（UNABLE_TO_APPROVE_PATH）',
+    -6: '超时（TIMED_OUT）',
+    -7: '机器人状态过期（ROBOT_STATE_STALE）：/joint_states 可能断了',
+    -8: '传感器信息过期（SENSOR_INFO_STALE）',
+    -9: '无逆解（NO_IK_SOLUTION）：这个位姿夹爪本身到不了',
+    -10: '超时（TIMED_OUT）',
+    99999: '没被赋值（goal tree 采不到解），看不出为什么',
+}
+
+
+def describe_moveit_error(code):
+    """把 error_code 翻成人话，前面带一个 ": "，方便直接拼进日志。"""
+    text = _MOVEIT_ERROR_TEXT.get(int(code))
+    return '' if text is None else ': ' + text
+
+
 class Detection(object):
     """`dummy_vc_perception.detection.SceneDetection` 的等价物。
 
@@ -131,6 +157,14 @@ class PickPlaceNode(Node):
         #: 抓取朝向量化到多少度。90 = 只分横着夹/竖着夹；0 = 照抄视觉的 yaw。
         self.declare_parameter('grasp_yaw_snap_deg',
                                grasp_planner.DEFAULT_YAW_SNAP_DEG)
+        #: 单目"影子"修正：方块有高度、像素却被投到桌面平面上，检测点会沿
+        #: "从相机指向方块"的方向系统性偏出去，且偏移随距离增长。默认开着。
+        self.declare_parameter('shadow_fix', True)
+        self.declare_parameter('shadow_fix_scale', 1.0)
+        #: 相机在 base_link 里的位置（xacro 里 camera_offset_* 的值）。
+        self.declare_parameter('camera_x_m', -0.302)
+        self.declare_parameter('camera_y_m', 0.317)
+        self.declare_parameter('camera_z_m', 0.097)
         # 默认值与 scene_objects / perception 的实测值同源，别在这里写死一个数
         self.declare_parameter('table_z', scene.DEFAULT_TABLE_Z)
         self.declare_parameter('max_reach_m', 0.45)
@@ -200,6 +234,8 @@ class PickPlaceNode(Node):
         #: 起算 —— 只规划时机械臂并没有真的动过去，用"当前状态"算出来的直线
         #: 是从它真正站着的地方出发的，那不是我们要验的东西。
         self.planned_pre_grasp = None
+        #: 影子修正只打一次日志（每帧都打会把终端刷爆）。
+        self.shadow_logged = False
         #: 经 IK 预检之后真正用的位姿（label -> 位置）。“退开”那一步直接复用
         #: 起手位，不再问一遍 IK。
         self.fitted = {}
@@ -329,6 +365,48 @@ class PickPlaceNode(Node):
                 self.goal_handle = None
             self.action_busy = False
             self._gripper_mode = ''
+
+    def _correct_shadow(self, dets):
+        """把单目"影子"偏移从检测点里减掉。
+
+        这块的像素被投到桌面平面上，方块有 24 mm 高，于是检测点沿"从相机
+        指向方块"的方向偏出去，偏移随距离线性增长（见 geometry.shadow_correction
+        的推导真机数据）。不修它的话，"抓不准"永远是一个随位置变化的偏差 ——
+        填死一个 `grasp_offset` 只能修好一条弧线。
+        """
+        if not bool(self.get_parameter('shadow_fix').value):
+            return dets
+        scale = float(self.get_parameter('shadow_fix_scale').value)
+        if scale == 0.0:
+            return dets
+        camera = (float(self.get_parameter('camera_x_m').value),
+                  float(self.get_parameter('camera_y_m').value))
+        height = float(self.get_parameter('camera_z_m').value) - float(
+            self.get_parameter('table_z').value)
+        fixed = []
+        for det in dets:
+            try:
+                shift = g.shadow_correction(
+                    det.position[:2], camera, height, det.extent_m[1], scale)
+            except g.GeometryError as exc:
+                self.get_logger().warn('影子修正跳过：{}'.format(exc))
+                fixed.append(det)
+                continue
+            if not self.shadow_logged:
+                self.shadow_logged = True
+                self.get_logger().info(
+                    '影子修正：({:.3f}, {:.3f}) → ({:.3f}, {:.3f}) m'
+                    '（相机 ({:+.3f}, {:+.3f}) 离桌面 {:.3f} m，方块高 {:.1f} mm，'
+                    '系数 {:.2f}）'.format(
+                        det.position[0], det.position[1],
+                        det.position[0] + shift[0], det.position[1] + shift[1],
+                        camera[0], camera[1], height,
+                        det.extent_m[1] * 1e3, scale))
+            fixed.append(Detection(
+                [det.position[0] + shift[0], det.position[1] + shift[1],
+                 det.position[2]],
+                det.yaw_rad, det.quaternion, det.extent_m, det.distance_m))
+        return fixed
 
     def _with_place_point(self, plan):
         """把参数里的放置点接进计划里。
@@ -531,6 +609,7 @@ class PickPlaceNode(Node):
                                   float(np.linalg.norm([pos.x, pos.y, pos.z]))))
         if not dets:
             return
+        dets = self._correct_shadow(dets)
         plan, reasons = grasp_planner.first_graspable(
             dets, self.gripper_model, limits=self.limits,
             approach_m=float(self.get_parameter('approach_m').value),
@@ -716,8 +795,9 @@ class PickPlaceNode(Node):
             return
         code = result.error_code.val
         if code != MoveItErrorCodes.SUCCESS:
-            self._decide_failure('MoveIt 失败{}：error_code={}'.format(
-                '（{}）'.format(label) if label else '', code))
+            self._decide_failure('MoveIt 失败{}：error_code={}{}'.format(
+                '（{}）'.format(label) if label else '', code,
+                describe_moveit_error(code)))
             return
         # 只规划模式下，把"到起手位"那条轨迹的末点记下来：下降要从这里起算。
         if label == 'move_pre_grasp' and not self.execute:

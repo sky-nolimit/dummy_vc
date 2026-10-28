@@ -253,6 +253,40 @@ def object_center_on_table(x, y, table_z, height_m):
     return np.array([float(x), float(y), float(table_z) + float(height_m) / 2.0])
 
 
+def shadow_correction(position_xy, camera_xy, camera_height_m, object_height_m,
+                      scale=1.0):
+    """把"方块投影到地面平面"造成的偏移拉回来（单目顶看的系统性偏差）。
+
+    这块用单目标定、把像素投到桌面平面上（z = table_z）之后，一个有高度的
+    方块不是投在它自己的位置上，而是被投到更远处：顶面（z = h）上的点沿视线
+    落到地面时会朝**远离相机**的方向走 `h·r/H`（r 是它到相机的水平距离，H 是
+    相机离平面的高度）。可见的侧面再往外糊一层，两者合起来的轮廓中心大约偏
+    `0.5·h·r/H` 那么多。
+
+    这就是 2026-10-27/28 真机上"方块明明摆在 (0, 0.22)，日志里却是 (0.020,
+    0.210)"的来路：偏移方向正是从相机指向方块的那条射线，大小随距离线性增长
+    —— 所以一个固定的平移补偿（`grasp_offset_*`）只能在某一条弧线上对，换个
+    位置就又错了。
+
+    返回**修正量**（2 元素向量，米）：加到被检测到的位置上就是真实位置。
+    `scale` 用来现场微调（1.0 = 按上面的半影模型，0 = 关掉）。
+    """
+    p = np.asarray(position_xy, float).reshape(-1)
+    c = np.asarray(camera_xy, float).reshape(-1)
+    if p.size != 2 or c.size != 2:
+        raise GeometryError('shadow_correction 要二维点：position={} camera={}'
+                            .format(p.size, c.size))
+    h = float(camera_height_m)
+    if h <= 0.0:
+        raise GeometryError('相机高度必须为正：{}'.format(h))
+    d = p - c
+    r = float(np.hypot(d[0], d[1]))
+    if r <= 1e-9:
+        return np.zeros(2)
+    magnitude = 0.5 * float(scale) * float(object_height_m) * r / h
+    return -magnitude * d / r
+
+
 # --------------------------------------------------------------------------
 # 顶抓姿态
 # --------------------------------------------------------------------------
