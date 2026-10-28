@@ -1,7 +1,7 @@
 """夹爪那块 35 板固件的 CAN 编解码：纯字节算术，不碰 ROS、不碰 socket。
 
 **2026-10-26 整份重写过。** 最初这两帧是照主控固件里的 `DummyHand`
-（`reference/Firmware/dummy-ref-core-fw/Robot/instances/dummy_robot.cpp:333-389`）
+（`firmware/dummy-ref-core-fw/Robot/instances/dummy_robot.cpp:333-389`）
 抄的，于是把 0x381 当成"电流上限"、0x382 当成"角度"。真板子接上 CAN 之后才发现
 夹爪上这块板跑的是关节那套 `dummy-35motor-fw`：在那里 **0x382 是触发编码器标定**
 ——一按就把电机开环推两圈，手指顶到限位、标定失败、`ClearFlash()` 擦掉标定表，
@@ -14,7 +14,7 @@
     mode 0x05 → 0x385  位置：前 4 字节 float32 圈数，第 5 字节 1 = 要求回一帧
     mode 0x23 → 0x3A3  位置回读：float32 圈数 + 第 5 字节 1 = 已到位
 
-出处：`reference/Firmware/dummy-35motor-fw/UserApp/protocols/interface_can.cpp`
+出处：`firmware/dummy-35motor-fw/UserApp/protocols/interface_can.cpp`
 的 `case 0x01/0x05/0x23`。
 
 位置单位是**电机圈数**，不是度也不是毫米（`interface_can.cpp:56-57` 把它乘

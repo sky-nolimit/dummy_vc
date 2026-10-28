@@ -4,7 +4,8 @@
 和 selftest_patch_gripper_firmware 一个风格。沙箱只允许往 reference/ 里直接写文件、
 建不了子目录，所以文件层面的夹具用固定名字，用完删掉。
 
-如果本机有主控固件源码树（reference/Firmware/dummy-ref-core-fw，被 .gitignore），
+如果本机有主控固件源码树（firmware/dummy-ref-core-fw，已入库；老工作区在
+reference/Firmware/dummy-ref-core-fw），
 就额外对着真文件验一遍——那是"锚点写对了没有"的唯一硬证据。
 """
 
@@ -56,7 +57,13 @@ SEND_SIGNATURE = ("void CanSendMessage(CAN_context* canCtx, uint8_t* txData, "
                   "CAN_TxHeaderTypeDef* txHeader)\n{\n")
 
 TMP_ROOT = Path(__file__).resolve().parent.parent / "reference"
-REAL_ROOT = TMP_ROOT / "Firmware" / "dummy-ref-core-fw"
+# 固件源码树 2026-10-28 挪进了仓库的 firmware/（之前是 reference/Firmware/，被 .gitignore）。
+# 两个位置都认，老的工作区不至于因为挪目录就红。
+_CANDIDATES = (
+    Path(__file__).resolve().parent.parent / "firmware" / "dummy-ref-core-fw",
+    TMP_ROOT / "Firmware" / "dummy-ref-core-fw",
+)
+REAL_ROOT = next((p for p in _CANDIDATES if p.is_dir()), _CANDIDATES[0])
 
 FLAT = {
     "selftest_main_interface_can.cpp": pmf.EDITS[pmf.CAN_CPP],
