@@ -166,6 +166,9 @@ CHECKS = [
      True, []),
     ('selftest_fit_gripper_width.py',
      'the width fit: recovers a known line, skips unmeasured rows', True, []),
+    ('selftest_patch_gripper_firmware.py',
+     'the firmware patch: three edits, idempotent, refuses unknown trees', True,
+     []),
 ]
 
 
