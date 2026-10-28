@@ -13,6 +13,7 @@
     python3 tools/gripper_cli.py open 30              # 开口开到 30 mm
     python3 tools/gripper_cli.py revs 0.25            # 直接给电机圈数
     python3 tools/gripper_cli.py watch                # 只听 3 秒，解码每帧
+    python3 tools/gripper_cli.py watch --tally        # 只统计哪个节点在说话
 
     python3 tools/gripper_cli.py --dry-run open 30    # 不碰硬件，只打印要发什么
 
@@ -150,6 +151,47 @@ def cmd_revs(args, sock):
     return 0
 
 
+def node_of(frame_id):
+    """帧 ID 的高位就是节点号（`StdId = node << 7 | cmd`）。"""
+    return (int(frame_id) >> 7) & 0x0F
+
+
+NODE_NAMES = {0: '广播', 7: '夹爪'}
+for _n in range(1, 7):
+    NODE_NAMES[_n] = '关节 {}'.format(_n)
+
+
+def tally_report(counts):
+    """把"每个节点回过多少帧"变成结论。
+
+    这是"又听不到 3A3 了"时最该先看的东西：**总线活着没有**，以及**是不是
+    只有夹爪那块板不说话**。两种情况的修法完全不同。
+    """
+    lines = []
+    for node in sorted(counts):
+        lines.append('  节点 {:<2} {:<6} {:>6} 帧'.format(
+            node, NODE_NAMES.get(node, '?'), counts[node]))
+    gripper = counts.get(7, 0)
+    others = sum(n for node, n in counts.items() if node not in (0, 7))
+    if gripper and others:
+        verdict = '总线是活的，夹爪（节点 7）也在答 —— 现在不用恢复'
+        ok = True
+    elif gripper and not others:
+        verdict = ('只有夹爪在答，其他节点一帧都没有：多半是主控没在跑'
+                   '（dummy_controller 没起）。夹爪本身是好的')
+        ok = True
+    elif others and not gripper:
+        verdict = ('**总线活着（其他节点在答），只有夹爪这块板不说话**。'
+                   '它的固件没有恢复路径（发不出去就 Error_Handler 死循环，'
+                   '总线 off 也不会自己回来），软件救不了：给夹爪板断电重启')
+        ok = False
+    else:
+        verdict = ('一条帧都没有：can0 没 up / 适配器没挂进虚拟机 / 终端电阻'
+                   ' / 波特率不对，先查这条链路，别急着动夹爪')
+        ok = False
+    return lines, verdict, ok
+
+
 def cmd_watch(args, sock):
     """只听不发：屏幕上滚动解码，用来确认"板子在说话"。"""
     if args.dry_run:
@@ -157,6 +199,7 @@ def cmd_watch(args, sock):
         return 0
     deadline = time.time() + args.seconds
     seen = 0
+    counts = {}
     while time.time() < deadline:
         try:
             data = sock.recv(gf.CAN_FRAME.size)
@@ -168,6 +211,10 @@ def cmd_watch(args, sock):
             continue
         frame_id, dlc, payload = gf.CAN_FRAME.unpack(data)
         seen += 1
+        node = node_of(frame_id)
+        counts[node] = counts.get(node, 0) + 1
+        if args.tally:
+            continue
         label = '夹爪' if frame_id == gf.POSITION_FEEDBACK_ID else '其他节点'
         try:
             text = gf.describe(frame_id, payload)
@@ -175,10 +222,18 @@ def cmd_watch(args, sock):
             text = '解不开：{}'.format(exc)
         print('0x{:03X} [{}] {}  {}'.format(frame_id, dlc, label, text))
     print('{} 秒内收到 {} 帧'.format(args.seconds, seen))
+    lines, verdict, ok = tally_report(counts)
+    print('按节点：')
+    if lines:
+        for line in lines:
+            print(line)
+    else:
+        print('  （一个节点都没回）')
+    print(verdict)
     if seen == 0:
         print('一帧都没有：can0 没 up、没接终端电阻，或者这块板没在总线上。')
         return 2
-    return 0
+    return 0 if ok else 3
 
 
 def main(argv=None):
@@ -200,6 +255,8 @@ def main(argv=None):
     p_revs.add_argument('revs', type=float)
     p_watch = sub.add_parser('watch', help='只听不发')
     p_watch.add_argument('--seconds', type=float, default=3.0)
+    p_watch.add_argument('--tally', action='store_true',
+                         help='只统计每个节点回过多少帧（"又听不到 3A3"时用这个）')
 
     args = parser.parse_args(argv)
     sock = None if args.dry_run else open_socket(args.channel)

@@ -291,6 +291,48 @@ def check_node_uses_frames():
          True)
 
 
+def check_watch_tally():
+    """`watch --tally` 的结论表：分清"总线活着但夹爪不答"和"整条链路不通"。"""
+    print()
+    print('--- 8. 听总线：谁在说话')
+    if os.path.join(REPO, 'tools') not in sys.path:
+        sys.path.insert(0, os.path.join(REPO, 'tools'))
+    try:
+        import gripper_cli
+    except Exception as exc:          # noqa: BLE001
+        fail(f'import gripper_cli 失败：{exc}')
+        return
+    same('节点号 = ID 的高位', [gripper_cli.node_of(0x3A3),
+                                gripper_cli.node_of(0x085),
+                                gripper_cli.node_of(0x3FF)], [7, 1, 7])
+
+    lines, verdict, good = gripper_cli.tally_report({7: 12, 1: 20, 2: 20})
+    if not good or '总线是活的' not in verdict:
+        fail(f'夹爪和其他节点都在答时判错了：{verdict}')
+    elif len(lines) != 3 or '夹爪' not in ' '.join(lines):
+        fail(f'按节点列出来的表不对：{lines}')
+    else:
+        ok('三行表 + "总线是活的"')
+
+    _, verdict, good = gripper_cli.tally_report({7: 5})
+    if not good or '只有夹爪在答' not in verdict:
+        fail(f'只有夹爪在答时判错了：{verdict}')
+    else:
+        ok('只有夹爪在答（主控没跑）能认出来')
+
+    _, verdict, good = gripper_cli.tally_report({1: 30, 3: 30})
+    if good or '断电重启' not in verdict:
+        fail(f'"只有夹爪不说话"必须点到断电重启：{verdict}')
+    else:
+        ok('总线活着但夹爪不答 → 直接说"断电重启"')
+
+    _, verdict, good = gripper_cli.tally_report({})
+    if good or '链路' not in verdict:
+        fail(f'一条帧都没有时该先查链路：{verdict}')
+    else:
+        ok('一条帧都没有 → 先查 can0/适配器，别动夹爪')
+
+
 def main():
     gf = load_frames()
     check_pure_layer()
@@ -302,6 +344,7 @@ def main():
         check_rejections(gf)
         check_clamp(gf)
     check_node_uses_frames()
+    check_watch_tally()
 
     print()
     if FAILURES:
