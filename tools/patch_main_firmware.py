@@ -27,6 +27,10 @@
    也要在这里归还。
 3. `Core/Src/can.c` 的 CAN1/CAN2 初始化：`AutoBusOff` 与 `AutoRetransmission` 改成 ENABLE。
    NART 关掉之后，仲裁输掉/一时没有 ACK 的帧会自动重发，而不是静默丢弃。
+4. `CMakeLists.txt`：`link_libraries("arm_cortexM4lf_math.a")` 少了 `lib` 前缀
+   （仓库里的文件叫 `Drivers/CMSIS/Lib/libarm_cortexM4lf_math.a`），链接会失败。
+   改成给全路径。顺带说明：`6dof_kinematic.cpp` 用了 `arm_sin_f32` / `arm_cos_f32`，
+   这个库是真需要的，不能删。
 
 ## 用法
 
@@ -49,6 +53,7 @@ import sys
 
 CAN_CPP = os.path.join('Bsp', 'communication', 'interface_can.cpp')
 CAN_INIT = os.path.join('Core', 'Src', 'can.c')
+CMAKE = 'CMakeLists.txt'
 
 SEND_OLD = """    osStatus semaphore_status;
     if (canCtx->handle->Instance == CAN1)
@@ -131,17 +136,45 @@ EDITS = {
         ('can.abort-release', ABORT_OLD, ABORT_NEW),
     ],
     CAN_INIT: INIT_EDITS,
+    CMAKE: [
+        ('cmake.dsp-lib-path',
+         'link_libraries("arm_cortexM4lf_math.a")',
+         '# 2026-10-28: 这一行原来写的是 "arm_cortexM4lf_math.a"，但仓库里的文件叫\n'
+         '# libarm_cortexM4lf_math.a（在 Drivers/CMSIS/Lib/ 下），少了 lib 前缀链接器\n'
+         '# 就找不到，链接会报 cannot find -larm_cortexM4lf_math.a。改成给全路径。\n'
+         '# 6dof_kinematic.cpp 用了 arm_sin_f32 / arm_cos_f32，所以这个库是真需要的。\n'
+         'link_libraries(${CMAKE_SOURCE_DIR}/Drivers/CMSIS/Lib/libarm_cortexM4lf_math.a)'),
+    ],
 }
 
 
+def read_text(path):
+    """按二进制读、统一成 \\n，并告诉调用方这个文件原本是不是 CRLF。"""
+    with open(path, 'rb') as f:
+        raw = f.read()
+    crlf = b'\r\n' in raw
+    return raw.decode('utf-8').replace('\r\n', '\n'), crlf
+
+
+def write_text(path, text, crlf):
+    """按原文件的换行风格写回（不把一个 CRLF 文件改成 LF）。"""
+    data = text.replace('\n', '\r\n') if crlf else text
+    with open(path, 'wb') as f:
+        f.write(data.encode('utf-8'))
+
+
 def apply_edits(text, edits, apply=True):
-    """返回 (新文本, 没找到的补丁名列表)。apply=False 时只检查、不改文本。"""
+    """在字符串上做替换，返回 (新文本, 没找到的补丁名列表)。
+
+    apply 参数只为兼容保留：**总是算出结果**，写不写由调用方决定。
+    （早先的写法是 apply=False 就不改文本，于是 --check 永远报告"没有要改的"，
+    这个 bug 已经踩过一次。）
+    """
     missing = []
     out = text
     for name, old, new in edits:
         if old in out:
-            if apply:
-                out = out.replace(old, new, 1)
+            out = out.replace(old, new, 1)
             continue
         if new in out:
             continue  # 已经打过
@@ -153,17 +186,14 @@ def patch_file(path, edits, apply=True):
     """返回 (状态, 没找到的补丁名)。状态是 'patched' / 'already' / 'missing' / 'missing-file'。"""
     if not os.path.isfile(path):
         return 'missing-file', [name for name, _, _ in edits]
-    with open(path, 'r', encoding='utf-8', newline='') as f:
-        text = f.read()
-    new_text, missing = apply_edits(text, edits, apply=apply)
+    text, crlf = read_text(path)
+    new_text, missing = apply_edits(text, edits)
     if missing:
         return 'missing', missing
     if new_text == text:
         return 'already', []
     if apply:
-        with open(path, 'w', encoding='utf-8', newline='') as f:
-            f.write(new_text)
-        return 'patched', []
+        write_text(path, new_text, crlf)
     return 'patched', []
 
 
@@ -181,7 +211,11 @@ def run(root, apply=True, edits_map=None):
     for rel in edits_map:
         status, missing = run_file(root, rel, apply=apply, edits=edits_map[rel])
         if status == 'patched':
-            lines.append('%-42s %s' % (rel, '已改' if apply else '还有 %d 处没改' % len(edits_map[rel])))
+            if apply:
+                lines.append('%-42s 已改' % rel)
+            else:
+                lines.append('%-42s 还有 %d 处没改' % (rel, len(edits_map[rel])))
+                rc = 1
         elif status == 'already':
             lines.append('%-42s 没有要改的' % rel)
         elif status == 'missing-file':

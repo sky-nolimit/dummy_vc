@@ -143,7 +143,7 @@ def check_file_and_check_mode() -> str:
         cpp, init = write_fixtures(fixture_can_cpp(), CAN_C)
 
         rc, _ = pmf.run(str(TMP_ROOT), apply=False, edits_map=FLAT)
-        assert rc == 0
+        assert rc == 1, rc            # 还有待改的地方时，--check 必须以 1 退出
         assert cpp.read_text(encoding="utf-8").count("osWaitForever") == 2, "check 模式写了文件"
         assert init.read_text(encoding="utf-8") == CAN_C
 
@@ -161,6 +161,17 @@ def check_file_and_check_mode() -> str:
     return "check 不写、真改对、再跑说没有要改的"
 
 
+def check_link_fix() -> str:
+    original = 'link_libraries("arm_cortexM4lf_math.a")\n'
+    text, missing = pmf.apply_edits(original, pmf.EDITS[pmf.CMAKE], apply=True)
+    assert missing == [], missing
+    assert '${CMAKE_SOURCE_DIR}/Drivers/CMSIS/Lib/libarm_cortexM4lf_math.a' in text, text
+    assert 'link_libraries("arm_cortexM4lf_math.a")' not in text
+    twice, missing2 = pmf.apply_edits(text, pmf.EDITS[pmf.CMAKE], apply=True)
+    assert missing2 == [] and twice == text
+    return "DSP 库改成全路径，跑两遍不变"
+
+
 def check_missing_root() -> str:
     rc, lines = pmf.run(str(TMP_ROOT / "no-such-firmware-tree"), apply=True)
     assert rc == 2, rc
@@ -173,12 +184,18 @@ def check_real_tree() -> str:
     init = REAL_ROOT / pmf.CAN_INIT
     if not cpp.is_file() or not init.is_file():
         return "[skip] 本机没有主控固件源码树"
-    _, missing = pmf.apply_edits(cpp.read_text(encoding="utf-8"),
-                                 pmf.EDITS[pmf.CAN_CPP], apply=False)
+    cpp_text, cpp_crlf = pmf.read_text(cpp)
+    _, missing = pmf.apply_edits(cpp_text, pmf.EDITS[pmf.CAN_CPP], apply=False)
+    print('        (interface_can.cpp 原始换行：%s)' % ('CRLF' if cpp_crlf else 'LF'))
     assert missing == [], "锚点对不上真文件：%s" % missing
-    _, missing = pmf.apply_edits(init.read_text(encoding="utf-8"),
-                                 pmf.EDITS[pmf.CAN_INIT], apply=False)
+    init_text, _ = pmf.read_text(init)
+    _, missing = pmf.apply_edits(init_text, pmf.EDITS[pmf.CAN_INIT], apply=False)
     assert missing == [], "初始化项的锚点对不上：%s" % missing
+    cmake = REAL_ROOT / pmf.CMAKE
+    if cmake.is_file():
+        cmake_text, _ = pmf.read_text(cmake)
+        _, missing = pmf.apply_edits(cmake_text, pmf.EDITS[pmf.CMAKE], apply=False)
+        assert missing == [], "CMakeLists 的锚点对不上：%s" % missing
     return "锚点在真源码树里全都找得到"
 
 
@@ -190,6 +207,7 @@ def main() -> int:
         ("unknown", check_refuses_unknown_tree),
         ("files", check_file_and_check_mode),
         ("no-root", check_missing_root),
+        ("link", check_link_fix),
         ("real", check_real_tree),
     ]
     failed = 0
