@@ -291,14 +291,16 @@ class dummy_controller(LifecycleNode):
         # 夹爪初始化超时（秒）。夹爪的 fibre 调用曾经阻塞过，而它若在
         # on_configure 里同步等待就会冻死整个节点，连 /joint_states 都不发。
         self.declare_parameter('gripper_init_timeout_sec', 5.0)
-        # 是否在启动时初始化夹爪。**默认 false。**
+        # 是否在启动时初始化夹爪。**2026-10-29 起这个开关已经无效。**
         #
-        # 实测：夹爪的 fibre 调用会永久阻塞且不返回。那个线程留在那里会一直
-        # 持有 fibre 链路，于是后续每个设备调用都排在它后面 —— 不只是夹爪
-        # 不可用，**move_j 也会一起卡住，机械臂根本动不了**。
+        # 主控这条通道封掉了，原因写在 `_init_gripper_with_timeout` 的 docstring
+        # 里：固件把 0x382 当"设角度"发出去，夹爪板把它当"触发编码器标定"；
+        # 固件把 0x381 当"电流上限"发出去，夹爪板把它当 uint32 使能位。两边的
+        # 意思对不上，调用一次就可能把夹爪的标定表擦掉。旧固件还会因为发送
+        # 卡死拖垮整机。夹爪现在由 `dummy_vc_grasp/gripper_can_node` 经 USB-CAN
+        # 适配器直接驱动（`/gripper/width`，单位毫米）。
         #
-        # 所以默认不碰夹爪：先让机械臂能正常跑起来，夹爪单独作为一项议题去查
-        # （很可能是固件或接线问题）。要用夹爪时显式打开 gripper_enable:=true。
+        # 传 true 不报错、也不再发任何帧，只在日志里明确说"已忽略"。
         self.declare_parameter('gripper_enable', False)
         # 夹爪是否初始化成功。失败、超时或被禁用后为 False。
         self.gripper_ready = False
@@ -1128,87 +1130,42 @@ class dummy_controller(LifecycleNode):
         self._init_gripper_with_timeout()
 
     def _init_gripper_with_timeout(self):
-        """在线程里初始化夹爪，超时就放弃，不阻塞 configure。
+        """夹爪不走主控这条路了（2026-10-29 起），这里只留一句说明。
 
-        **默认跳过整个夹爪初始化。** 见 gripper_enable 参数的说明：夹爪的
-        fibre 调用实测会阻塞且永不返回，而那个线程会一直持有 fibre 链路，
-        把后续所有设备调用（包括 move_j）全部排队堵死。所以默认根本不碰它，
-        要先在 `ros2 param set` 或启动参数里显式打开。
+        为什么整条路封掉——两边的固件对同一组 CAN ID 的理解不一样：
+
+        * 主控固件 `DummyHand::SetAngle` 发 **0x382**，以为那是"设角度"；
+          而夹爪板（35 板固件）`case 0x02` 收到 0x382 是**触发编码器标定**，
+          payload 一个字节都不看。夹爪行程只有 55 mm，标定要求电机正反各转
+          两圈多，必然顶死、采样不够、失败后 `ClearFlash()` 擦掉标定表 ——
+          一次调用就能把夹爪变成"读数冻死、位置模式不出力"。
+        * `DummyHand::SetEnable(true)` 的实现是 `SetMaxCurrent(maxCurrent)`，
+          发 **0x381** 带 float；夹爪板 `case 0x01` 把前 4 字节当 **uint32
+          使能位**（等于 1 才转速度模式，否则 MODE_STOP）。所以我们以为在
+          "使能"，实际在"停机"。
+        * 旧主控固件还有一层：`CanSendMessage` 用 `osWaitForever` 拿信号量，
+          而归还点只有发送完成回调；一帧没发完就永久丢失，之后所有 CAN 发送
+          一起卡死，整机失联、只能断电。
+
+        所以夹爪改由 `dummy_vc_grasp` 的 `gripper_can_node` 经 USB-CAN 适配器
+        直接驱动 node 7（话题 `/gripper/width`、`/gripper/position`）。主控这里
+        一律不碰设备：即使有人传 `gripper_enable:=true` 也只报错、不发帧。
         """
-        if not self.gripper_enable:
-            self.get_logger().info(
-                'gripper ENABLE is off (gripper_enable=false); skipping '
-                'gripper init entirely. This is the default because the '
-                'gripper fibre calls have been observed to block forever and '
-                'starve every other device call. Start with '
-                'gripper_enable:=true only when you are ready to debug the '
-                'gripper itself.')
-            self.gripper_ready = False
-            return
-
-        timeout = float(self.get_parameter('gripper_init_timeout_sec').value)
-        result = {}
-
-        def _work():
-            try:
-                # 分步记日志：夹爪通道一旦阻塞，日志停在哪个 "step" 上就
-                # 直接指出是取句柄、设电流还是使能出的问题。
-                self.get_logger().info('gripper step 1/3: reading hand handle')
-                hand = self.dummy_driver.robot.hand
-                self.get_logger().info(
-                    f'gripper step 2/3: set_current_limit('
-                    f'{self.grip_current_limit})')
-                # 要在使能**之前**压低电流上限，否则夹爪可能一上来就用默认大
-                # 电流，第一次装夹就压坏东西。
-                hand.set_current_limit(self.grip_current_limit)
-                self.get_logger().info('gripper step 3/3: set_enable(True)')
-                hand.set_enable(True)
-                result['ok'] = True
-            except Exception as exc:  # noqa: BLE001
-                result['err'] = f'{type(exc).__name__}: {exc}'
-
-        self.get_logger().info(
-            f'initialising gripper (timeout {timeout}s) ...')
-        th = threading.Thread(target=_work, daemon=True,
-                              name='gripper-init')
-        th.start()
-        th.join(timeout)
-
-        if th.is_alive():
-            # 线程还活着说明 fibre 调用没返回。
-            #
-            # **这是个严重状态，不只是"夹爪不可用"。** 那个线程还在持有
-            # fibre 链路，后续每一个设备调用都会排在它后面，于是 move_j
-            # 也会卡住 —— 实测就是这样：夹爪超时之后，homing 也一起挂死。
-            # 所以这条日志要说清楚：不是"夹爪没了、别的还能用"，而是
-            # "这条链路被占住了，机械臂也动不了，请重启进程"。
+        if self.gripper_enable:
             self.get_logger().error(
-                f'gripper init did NOT return within {timeout}s: the fibre call '
-                'is blocked and this thread still holds the link. Every later '
-                'device call, INCLUDING move_j, will queue behind it, so the '
-                'arm will NOT move. Stop this process (Ctrl+C), power-cycle the '
-                'arm, and restart with gripper_enable:=false to use the arm '
-                'without the gripper.')
-            self.gripper_ready = False
-            return
-
-        if result.get('ok'):
-            self.gripper_ready = True
-            self.get_logger().info(
-                f'gripper enabled, current limit = {self.grip_current_limit}')
-            # 明确说出"没有回读"这件事。此前驱动读 hand.angle 而该属性不存在，
-            # 于是手指位置永远是 0 且不报错；把限制讲出来，比让人去猜 RViz
-            # 里手指为什么不动要好。
-            self.get_logger().warn(
-                'the gripper has NO position readback: /joint_states will '
-                'report the finger joints at the LAST COMMANDED angle, not a '
-                'measured one. When the fingers are blocked by an object the '
-                'model will still show them closed.')
+                'gripper_enable:=true is not supported any more and has been '
+                'IGNORED: the main-board firmware sends 0x382 (which the '
+                'gripper board treats as "start encoder calibration") and '
+                '0x381 with a float (which it treats as a uint32 enable). Drive '
+                'the gripper with dummy_vc_grasp/gripper_can_node over the '
+                'USB-CAN adapter instead (/gripper/width). Nothing was sent to '
+                'the gripper.')
         else:
-            self.gripper_ready = False
-            self.get_logger().error(
-                f'gripper init failed ({result.get("err", "unknown")}); '
-                'continuing without gripper')
+            self.get_logger().info(
+                'gripper: driven by gripper_can_node over USB-CAN, not by the '
+                'main board; skipping gripper init here.')
+        self.gripper_enable = False
+        self.gripper_ready = False
 
     def init_pub_sub(self):
         # Subscribers
@@ -1620,42 +1577,18 @@ class dummy_controller(LifecycleNode):
         return lo + (hi - lo) * max(0.0, min(1.0, float(frac)))
 
     def on_gripper_command(self, msg):
-        """接收归一化夹爪指令。
+        """这条通道已经关了：夹爪改走 `gripper_can_node` 的 `/gripper/width`。
 
-        0.0 = 全闭，1.0 = 全开。超范围会被夹到 [0,1]。
-        夹持力由 grip_current_limit 控制，在 configure 时已设好。
+        留着这个订阅只是为了有人在旧脚本里往 `/dummy_gripper/command` 发东西时
+        能立刻看到一句明确的解释，而不是静默无事发生。**一帧都不会发给设备。**
         """
-        if not self.gripper_ready:
-            # 夹爪初始化失败或超时过。这里的调用走同一条会阻塞的 fibre
-            # 通道，如果在执行器线程里再阻塞一次，整个节点就彻底不响应了
-            # ——包括 /joint_states。所以直接拒绝，而不是去试。
-            self.get_logger().error(
-                'gripper not ready (init failed or timed out); ignoring the '
-                'command. See the "gripper init" line in the startup log.',
-                throttle_duration_sec=5.0)
-            return
-
-        frac = max(0.0, min(1.0, float(msg.data)))
-        angle = self.gripper_frac_to_angle(frac)
-        self.gripper_target = frac
-        self.get_logger().info(
-            f'gripper command: frac={frac:.3f} -> angle={angle:.2f} deg')
-        # 也放到线程里：即使这次 fibre 调用卡住，也只丢掉这一条指令，
-        # 不会冻结执行器。
-        threading.Thread(
-            target=self._send_gripper_angle, args=(angle,),
-            daemon=True, name='gripper-cmd').start()
-
-    def _send_gripper_angle(self, angle):
-        try:
-            self.dummy_driver.robot.hand.set_angle(angle)
-            # 只在成功之后记录。夹爪没有回读（见 current_finger_positions 的
-            # 说明），所以这个值就是"我们让它去了哪里"，是发布手指位置时
-            # 唯一可用的依据。失败时保留旧值，免得 RViz 显示一个没发生过的
-            # 姿态。
-            self._last_gripper_angle = float(angle)
-        except Exception as exc:  # noqa: BLE001
-            self.get_logger().error(f'gripper command failed: {exc}')
+        self.get_logger().error(
+            'gripper commands over /dummy_gripper/command are no longer '
+            'supported: the main-board firmware turns 0x382 into "start '
+            'encoder calibration" and 0x381 into a uint32 enable, so sending '
+            'through it damages the gripper and used to hang the whole board. '
+            'Use /gripper/width (float64, millimetres) with gripper_can_node.',
+            throttle_duration_sec=5.0)
 
     def pub_current_joints(self):
         try:

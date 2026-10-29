@@ -12,6 +12,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 GRASP = os.path.join(REPO, 'dummy_vc_ws', 'src', 'dummy_vc_grasp')
+CONTROLLER = os.path.join(REPO, 'dummy_vc_ws', 'src', 'dummy_controller')
 if GRASP not in sys.path:
     sys.path.insert(0, GRASP)
 
@@ -176,6 +177,31 @@ def check_gripper_servo():
         fail('有路径没清掉闭环目标', '会一直补发不停')
 
 
+def check_controller_never_touches_hand():
+    """驱动里那条 hand.* 通道必须封死：一调就可能擦掉夹爪标定、拖死整机。"""
+    print('\n7. 源码守卫：驱动不再碰 hand.*')
+    path = os.path.join(CONTROLLER, 'dummy_controller', 'dummy_controller.py')
+    with open(path, encoding='utf-8') as handle:
+        src = handle.read()
+    for banned in ('hand.set_angle', 'hand.set_enable', 'hand.set_current_limit'):
+        if banned in src:
+            fail('驱动里还有 {!r}'.format(banned),
+                 '主控固件把 0x382 当标定、把 0x381 当 uint32 使能，调用会毁设备')
+        else:
+            ok('驱动里没有 {!r}'.format(banned))
+    for need in ('has been ', 'gripper_enable:=true is not supported'):
+        if need in src:
+            ok('驱动会明确说"gripper_enable 已忽略"')
+            break
+    else:
+        fail('gripper_enable:=true 时没有明确拒绝',
+             '有人打开这个开关会以为夹爪被初始化了')
+    if '/gripper/width' in src:
+        ok('拒绝时指出了正确的替代通道（/gripper/width）')
+    else:
+        fail('拒绝时没说该走哪条路')
+
+
 def main():
     print('gripper_gate 自测')
     check_close_width()
@@ -183,6 +209,7 @@ def main():
     check_describe()
     check_no_hand_commands()
     check_gripper_servo()
+    check_controller_never_touches_hand()
     print('\nSUMMARY')
     if FAILED:
         print('  {} 项失败：'.format(len(FAILED)))

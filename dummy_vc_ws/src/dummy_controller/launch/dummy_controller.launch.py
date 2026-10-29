@@ -131,9 +131,12 @@ DESCRIPTIONS = {
         'Gripper current limit. The only guard against crushing an object; '
         'start low.',
     'gripper_enable':
-        'Initialise the gripper at startup. Default false: the gripper fibre '
-        'calls have been observed to block forever, and the stuck thread '
-        'holds the link so move_j starves and the arm cannot move.',
+        'Deprecated and IGNORED since 2026-10-29. The main board turns 0x382 '
+        'into "start encoder calibration" on the gripper board and 0x381 into a '
+        'uint32 enable, so talking to the gripper through it damages the '
+        'gripper. The gripper is driven by gripper_can_node over the USB-CAN '
+        'adapter (/gripper/width, millimetres). Passing true logs an error and '
+        'sends nothing.',
     'gripper_init_timeout_sec':
         'Seconds to wait for gripper init before giving up on it. The '
         'gripper fibre channel has blocked before, and a hang there must not '
