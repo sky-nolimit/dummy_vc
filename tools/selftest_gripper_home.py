@@ -136,8 +136,8 @@ def case_frozen_readback():
     board = standard_board(start=0.0, frozen=True)
     result = run(board, clock, still_s=0.2)
     check('回读冻住就拒绝', not result.ok, repr(result.reason))
-    check('理由点出读数拉不开', '冻住' in result.reason or '拉不开' in result.reason,
-          result.reason)
+    check('理由点出两个方向都没动',
+          '两个方向都没动' in result.reason, result.reason)
 
 
 def case_no_readback():

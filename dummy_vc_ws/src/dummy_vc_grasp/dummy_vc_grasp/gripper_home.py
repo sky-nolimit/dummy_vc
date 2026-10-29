@@ -53,8 +53,10 @@ DEFAULT_STROKE_REVS = gf.MAX_WIDTH_MM / gf.MM_PER_REV
 #: 的东西就会超差；机械本身的松旷（1~2 mm）不会误判。
 DEFAULT_STROKE_TOL_REVS = 0.4
 
-#: 一开始就完全不动时，等这么久才认定"它本来就在止位上"。
-DEFAULT_STILL_S = 1.0
+#: 一开始就完全不动时，等这么久才认定"它本来就在止位上"。2.5 s 是 2026-10-29
+#: 实测改的：1.0 s 太短，电机从"顶死"状态退回来、齿条背隙吃掉的那一段常常还没
+#: 走完，工具就抢着判"本来就在止位上"，然后量出一个假的止位。
+DEFAULT_STILL_S = 2.5
 
 #: 回读拿不到的容忍次数（连续这么多次没有回帧就放弃）。
 DEFAULT_MISS_LIMIT = 10
@@ -123,8 +125,14 @@ def home(send, read_revs, span_revs=DEFAULT_SPAN_REVS,
     if span <= 0.0:
         return HomeResult(False, rev_closed=rev_closed, rev_open=rev_open,
                           span_revs=span, samples=closed[2],
-                          reason='两头的读数没拉开（合拢 {:.3f}、张开 {:.3f}）：'
-                                 '板子的回读可能是冻住的'.format(rev_closed, rev_open))
+                          reason='两个方向都没动（合拢 {:.3f}、张开 {:.3f}）。'
+                                 '这有两种可能，得用手分一下：①手指本来就顶在'
+                                 '合拢止位上，再往合拢推当然不动——这时手能把'
+                                 '手指掰开，掰开后再跑一次就行；②命令根本没生效'
+                                 '（板子又卡住了）——手推要很用力才动、或者干脆'
+                                 '推不动，而 `cansend can0 3A3#0000000000000000` '
+                                 '之后回帧里那 4 个字节也不变。'.format(
+                                     rev_closed, rev_open))
     if abs(span - float(stroke_revs)) > float(stroke_tol_revs):
         return HomeResult(
             False, rev_closed=rev_closed, rev_open=rev_open, span_revs=span,
