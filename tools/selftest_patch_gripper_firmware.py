@@ -63,9 +63,10 @@ def quiet(func, *args, **kwargs):
 
 def check_applies() -> str:
     text, applied, already, missing = pgf.apply_edits(CAN_C, pgf.EDITS, True)
-    assert (applied, already, missing) == (3, 0, []), (applied, already, missing)
+    assert (applied, already, missing) == (2, 1, []), (applied, already, missing)
     assert "hcan.Init.AutoBusOff = ENABLE;" in text
-    assert "hcan.Init.AutoRetransmission = ENABLE;" in text
+    # 自动重发必须保持出厂的 DISABLE（重发会占死邮箱，见模块 docstring）
+    assert "hcan.Init.AutoRetransmission = DISABLE;" in text
     body = text.split("void CAN_Send")[1]
     assert "Error_Handler();" not in body, body
     assert "        return;" in body, body
@@ -73,7 +74,7 @@ def check_applies() -> str:
     assert "hcan.Init.AutoWakeUp = ENABLE;" in text
     assert "hcan.Init.TransmitFifoPriority = DISABLE;" in text
     assert text.count("hcan.Init.") == CAN_C.count("hcan.Init.")
-    return "三处都改了，其它初始化项没动"
+    return "改了两处、自动重发保持关闭，其它初始化项没动"
 
 
 def check_idempotent() -> str:
@@ -101,11 +102,11 @@ def check_file_and_check_mode() -> str:
         path.write_text(CAN_C, encoding="utf-8", newline="")
         code, out = quiet(pgf.run_file, path.parent, Path(path.name), False)
         assert code == 1, f"--check 在没改的树上应返回 1，实际 {code}: {out}"
-        assert "还有 3 处没改" in out, out
+        assert "还有 2 处没改" in out, out
         assert path.read_text(encoding="utf-8") == CAN_C, "--check 居然写了文件"
         code, out = quiet(pgf.run_file, path.parent, Path(path.name), True)
         assert code == 0, out
-        assert "hcan.Init.AutoRetransmission = ENABLE;" in path.read_text(encoding="utf-8")
+        assert "hcan.Init.AutoBusOff = ENABLE;" in path.read_text(encoding="utf-8")
         code, out = quiet(pgf.run_file, path.parent, Path(path.name), False)
         assert code == 0, out
         assert "编译出来的固件就是改过的" in out, out
@@ -129,9 +130,21 @@ def check_local_lparen_matches() -> str:
     """真实固件里 CAN_Send 后面还有别的函数，替换要停在函数末尾。"""
     text = CAN_C + "\nvoid CAN_Init(void) { /* 后面还有函数 */ }\n"
     out, applied, _, missing = pgf.apply_edits(text, pgf.EDITS, True)
-    assert applied == 3 and not missing, (applied, missing)
+    assert applied == 2 and not missing, (applied, missing)
     assert out.endswith("void CAN_Init(void) { /* 后面还有函数 */ }\n")
     return "替换范围停在 CAN_Send 末尾"
+
+
+def check_reverts_first_version() -> str:
+    """第一版补丁把自动重发打成了 ENABLE，这一版必须能把它改回来。"""
+    v1 = CAN_C.replace("hcan.Init.AutoRetransmission = DISABLE;",
+                       "hcan.Init.AutoRetransmission = ENABLE;")
+    text, applied, already, missing = pgf.apply_edits(v1, pgf.EDITS, True)
+    assert not missing, missing
+    assert applied >= 1, applied
+    assert "hcan.Init.AutoRetransmission = DISABLE;" in text
+    assert "hcan.Init.AutoRetransmission = ENABLE;" not in text
+    return "第一版的 AutoRetransmission = ENABLE 会被改回 DISABLE"
 
 
 def main() -> int:
@@ -142,6 +155,7 @@ def main() -> int:
         ("文件与 --check 语义", check_file_and_check_mode),
         ("目录/文件缺失", check_missing_root),
         ("不改到后面的函数", check_local_lparen_matches),
+        ("改回第一版", check_reverts_first_version),
     ]
     failed = 0
     for name, func in checks:

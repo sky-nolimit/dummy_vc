@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""把 35 板（夹爪那块的 STM32F103）固件改成"丢帧不致命 + 自动重发"。
+"""把 35 板（夹爪那块的 STM32F103）固件改成"丢帧不致命、总线能自愈"。
 
 为什么改这三处
 --------------
@@ -9,19 +9,28 @@
 
 原来的固件里：
 
-* ``AutoRetransmission = DISABLE``（``Core/Src/can.c`` 初始化）——仲裁输掉或出
-  错的那一帧**直接丢掉，不重发**。于是机械臂一开始跑（主控按 5 ms 一轮发位置
-  命令 + 读位置），夹爪的回复和命令几乎每轮都抢不到总线，看上去就是"夹爪哑了"。
-  实测：停掉 ``dummy_controller``，``0x3A3`` 自己就回来了——板子一直是活的。
 * ``AutoBusOff = DISABLE`` ——一旦进 bus-off 就**永久**停在那儿，只能断电。
 * ``CAN_Send()`` 里 ``HAL_CAN_AddTxMessage() != HAL_OK`` 就 ``Error_Handler()``，
   而它等于 ``__disable_irq(); while(1);`` ——邮箱满一格就把整块板锁死。
+* ``AutoRetransmission = DISABLE`` ——仲裁输掉的那一帧直接丢，不重发。
 
 改成：
 
-1. ``AutoRetransmission = ENABLE``：输掉的帧自动重发，等总线空出来的间隙就能发出去。
-2. ``AutoBusOff = ENABLE``：总线异常能自动恢复，不用拔电。
-3. ``CAN_Send`` 失败只丢掉这一帧，不再锁死整块板。
+1. ``AutoBusOff = ENABLE``：总线异常能自动恢复，不用拔电。
+2. ``CAN_Send`` 失败只丢掉这一帧，不再锁死整块板。
+3. ``AutoRetransmission`` **保持出厂的 DISABLE**（下面这条是踩出来的）。
+
+为什么"自动重发"不能开（2026-10-29 的教训）
+-------------------------------------------
+第一版补丁把这个开关也打成了 ENABLE，理由是"输掉的帧该重发"。真机上反过来：
+夹爪的帧号 ``0x3A3`` 是总线上最大的，**每帧都排在最后**。主控一跑起来就按 5 ms
+一轮轮询，夹爪的回复几乎每帧都要重发；重发的帧**一直占着邮箱不释放**，三个
+邮箱很快全被"等着重发的旧回复"占满，于是我们真正想发的 ``0x385``/``0x381``
+连邮箱都排不进去 —— 现象就是"启动驱动之后夹爪又不动了"。
+
+出厂那个 DISABLE 才是对的：抢不到总线就把这一帧扔掉，**邮箱立刻空出来**给下
+一条命令；丢的只是一帧位置回读，5 ms 后主控会再问一次。所以这一版把打过
+ENABLE 的树改回 DISABLE，干净的树保持不动。
 
 用法
 ----
@@ -68,9 +77,9 @@ EDITS = (
         "bus-off 后自动恢复，不用断电",
     ),
     (
-        "hcan.Init.AutoRetransmission = DISABLE;",
         "hcan.Init.AutoRetransmission = ENABLE;",
-        "仲裁输掉/出错的帧自动重发",
+        "hcan.Init.AutoRetransmission = DISABLE;",
+        "自动重发保持关闭：重发会占死邮箱，命令反而发不出去",
     ),
     (
         "        Error_Handler();\n"
@@ -162,7 +171,7 @@ def run(root: Path, apply: bool = True) -> int:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        description="把 35 板固件改成丢帧不致命 + 自动重发（见模块 docstring）")
+        description="把 35 板固件改成丢帧不致命、bus-off 能自愈（见模块 docstring）")
     parser.add_argument("--firmware-root", required=True, type=Path,
                         help="35 板固件根目录（含 Core/Src/can.c）")
     parser.add_argument("--check", action="store_true",

@@ -167,10 +167,10 @@ CHECKS = [
     ('selftest_fit_gripper_width.py',
      'the width fit: recovers a known line, skips unmeasured rows', True, []),
     ('selftest_patch_gripper_firmware.py',
-     'the firmware patch: three edits, idempotent, refuses unknown trees', True,
+     'the firmware patch: keeps auto-retransmission off, idempotent, refuses unknown trees', True,
      []),
     ('selftest_patch_main_firmware.py',
-     'the main firmware patch: bounded wait, release on failure, retries back on',
+     'the main firmware patch: bounded wait, release on failure, version 1 reverted',
      True, []),
 ]
 
