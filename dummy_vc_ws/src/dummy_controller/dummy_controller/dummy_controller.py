@@ -225,6 +225,9 @@ class dummy_controller(LifecycleNode):
         # array 就让 on_configure 抛 InvalidParameterTypeException；而且它本来
         # 就是上面三张表的函数，存一份只是多一个会不同步的地方。
         self.declare_parameter('home_check_tol_deg', 1.0)
+        # homing 之后等手臂走到位：超时时间与容差。见 _wait_for_pose 的说明。
+        self.declare_parameter('home_timeout_s', 20.0)
+        self.declare_parameter('home_tol_deg', 1.5)
         self.declare_parameter('home_joints_deg', [0.0, 0.0, 90.0, 0.0, 0.0, 0.0])
         self.declare_parameter('reset_joints_deg', [0.0, -75.0, 180.0, 0.0, 0.0, 0.0])
         # ---- 夹爪 ----------------------------------------------------------
@@ -343,6 +346,8 @@ class dummy_controller(LifecycleNode):
         self.home_reference_deg = self._home_reference()
         self.home_check_tol_deg = float(
             self.get_parameter('home_check_tol_deg').value)
+        self.home_timeout_s = float(self.get_parameter('home_timeout_s').value)
+        self.home_tol_deg = float(self.get_parameter('home_tol_deg').value)
         self.home_joints = np.array(self.get_parameter('home_joints_deg').value)
         self.reset_joints = np.array(self.get_parameter('reset_joints_deg').value)
         self.finger_travel_m = float(self.get_parameter('finger_travel_m').value)
@@ -1810,8 +1815,82 @@ class dummy_controller(LifecycleNode):
             self.get_logger().warn(
                 f'{label}: command sent, but readback failed: {exc}')
 
+    def _wait_for_pose(self, target_deg, timeout_s, tol_deg, rate_hz=10.0):
+        """轮询 raw 角度，直到六轴都进 target 的容差以内（或超时）。
+
+        为什么需要它：`_send_named_pose` 在发完 move_j 之后 25 ms 就回读一次，
+        那时电机还没动完 —— 日志因此看起来像"命令发了、读数毫无变化"，最容易
+        被读成"命令没生效"。2026-10-29 就是这样把"j2 不动"误读成"所有关节都
+        没动"的。这里改成真的等：每 100 ms 读一次，判据用**标定 home 的原始角**
+        （raw 空间，度），不掺 URDF 换算。
+
+        返回 (ok, last, elapsed, before, moved)：moved 是逐轴位移（度）。
+        """
+        t0 = time.time()
+        before = None
+        try:
+            before = [float(v) for v in self.read_raw_angles()]
+        except Exception as exc:        # noqa: BLE001
+            self.get_logger().warn(
+                f'home: could not read the angles before the wait '
+                f'({type(exc).__name__}: {exc})')
+        last = before
+        target = np.asarray(target_deg, dtype=float)
+        ok = False
+        while time.time() - t0 < timeout_s:
+            try:
+                last = [float(v) for v in self.read_raw_angles()]
+            except Exception:            # noqa: BLE001
+                time.sleep(1.0 / rate_hz)
+                continue
+            if np.all(np.abs(np.asarray(last) - target) <= tol_deg):
+                ok = True
+                break
+            time.sleep(1.0 / rate_hz)
+        moved = None
+        if before is not None and last is not None:
+            moved = [float(b - a) for a, b in zip(before, last)]
+        return ok, last, time.time() - t0, before, moved
+
     def home_dummy(self, wait=True):
+        """回到 7 姿态，并**确认真的到了**。
+
+        发完命令就往下走是不行的：那样"没到位"只能靠人看 RViz 才发现。这里等
+        它走到标定 home，再逐关节打一行"起点 -> 现在 / 目标 / 移动 / 还差多少"，
+        并把"目标差很多但几乎没动"的轴单独点名 —— 那是没使能、堵转、或机械卡住
+        的指纹，与"走了一半停在半路"不是一回事。
+        """
         self._send_named_pose(self.home_joints, 'home')
+        if not wait or self.home_reference_deg is None:
+            return
+        ok, last, elapsed, before, moved = self._wait_for_pose(
+            self.home_reference_deg, self.home_timeout_s, self.home_tol_deg)
+        if last is None or before is None:
+            return
+        rows = []
+        stuck = []
+        for i, name in enumerate(HOME_JOINT_NAMES):
+            target = float(self.home_reference_deg[i])
+            gap = target - float(last[i])
+            step = float(moved[i])
+            rows.append(
+                f'{name} {float(before[i]):+.1f} -> {float(last[i]):+.1f} '
+                f'(target {target:+.1f}, moved {step:+.1f}, gap {gap:+.1f})')
+            if abs(gap) > 3.0 * self.home_tol_deg and abs(step) < 1.0:
+                stuck.append(name)
+        log = self.get_logger().info if ok else self.get_logger().warn
+        log(f'home: {"reached" if ok else "did NOT reach"} the calibrated home '
+            f'in {elapsed:.1f} s')
+        log('home: ' + ' | '.join(rows))
+        if stuck:
+            self.get_logger().error(
+                f'home: {"/".join(stuck)} did not move although the target is '
+                f'far away. That is not a slow joint -- the command reached the '
+                f'controller and the axis still will not move. Check in this '
+                f'order: (1) is the axis enabled (disable the motors, then push '
+                f'it by hand: a disabled axis moves freely), (2) is it stalled '
+                f'against something, (3) is its current limit too low to lift '
+                f'this pose.')
 
     def stop_dummy(self):
         """急停：把设备**此刻的实际姿态**换算回 move_j 空间再下发一次。

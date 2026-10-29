@@ -83,6 +83,12 @@ DESCRIPTIONS = {
         'How far (deg) a joint may sit from the calibrated home before the '
         'startup pose check calls it out. The reference itself is derived from '
         'joint_offset_deg and urdf_offset_deg, not stored separately.',
+    'home_timeout_s':
+        'How long homing waits for the arm to actually reach the calibrated '
+        'home before giving up and reporting the per-joint shortfall.',
+    'home_tol_deg':
+        'Homing counts as done once all six axes are within this many degrees '
+        'of the calibrated home.',
     'wrap_min_deg':
         'Lower bound the move_j command is normalised into.',
     'wrap_max_deg':
