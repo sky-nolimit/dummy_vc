@@ -102,9 +102,12 @@ class GripperCanNode(Node):
         #: 空闲时的查询频率（Hz）。发得越少，撞上 35 板那条"一帧没发出去就
         #: 永久锁死发送"的固件缺陷的机会越小；有目标在跟的时候仍按 poll_hz 问。
         self.declare_parameter('idle_poll_hz', 1.0)
-        #: 找零点之前先等板子回一帧位置，最多等这么久（刚开 socket 时板子可能
-        #: 正在上电/重启，第一帧要一两百毫秒才到）。
-        self.declare_parameter('home_board_timeout_s', 2.0)
+        #: 找零点之前先等板子回一帧位置，最多等这么久。**默认 30 秒**：这个节点
+        #: 是跟 `pick_place_demo` 一起起的，那一刻往往正是主控在给自己归位的几秒
+        #: —— 总线被 5 ms 一轮的运动命令占满，夹爪的帧号最大、优先级最低，回帧
+        #: 成片被丢。手动跑 `tools/gripper_home.py` 时臂早停了、总线很空，所以
+        #: 同一个操作手动能通、脚本里 2 秒就判死。别再把它调小。
+        self.declare_parameter('home_board_timeout_s', 30.0)
         #: 零点没量成时，要不要退回出厂合拢点继续用。**默认不要**：出厂值是别的
         #: 板子的状态，在这块板上整体偏了 12.6 mm（实测），拿它张爪会顶到限位、
         #: 拿它合爪会留 11 mm 缝 —— 比"一步不动"更难查。
@@ -237,10 +240,15 @@ class GripperCanNode(Node):
         return None
 
     def _wait_for_board(self, timeout=None):
-        """等板子第一次回位置。刚开 socket 时它可能正在上电，别立刻判死刑。"""
+        """等板子第一次回位置。刚开 socket 时它可能正在上电，别立刻判死刑。
+
+        等待期间每 2 秒说一声"还在等"，因为这段时间主控往往正在归位、总线很挤，
+        夹爪的回帧被丢是常态 —— 沉默比报错更让人以为卡死了。
+        """
         if timeout is None:
             timeout = float(self.get_parameter('home_board_timeout_s').value)
         waited = 0.0
+        last_note = 0.0
         while waited < float(timeout):
             if self._read_revs(timeout=0.4) is not None:
                 if waited > 0.0:
@@ -248,6 +256,12 @@ class GripperCanNode(Node):
                         '{:.1f} 秒后板子开始回位置了'.format(waited))
                 return True
             waited += 0.4
+            if waited - last_note >= 2.0:
+                last_note = waited
+                self.get_logger().info(
+                    '还在等夹爪板回帧（{:.0f}/{:.0f} 秒）。主控归位期间总线很挤，'
+                    '夹爪的帧优先级最低，等它抢到空档'.format(
+                        waited, float(timeout)))
         return False
 
     def _home_on_start(self):
@@ -262,19 +276,20 @@ class GripperCanNode(Node):
         def _send(frame_id, payload):
             self.sock.send(gf.to_socketcan(frame_id, payload))
 
-        if not self._wait_for_board():
+        board_up = self._wait_for_board()
+        if not board_up:
             log.error(
-                '夹爪板 {:.1f} 秒里一帧位置都没回。先确认 can0 UP、夹爪板通电、'
+                '夹爪板 {:.0f} 秒里一帧位置都没回。先确认 can0 UP、夹爪板通电、'
                 'channel 写对了；这次不会量零点'.format(
                     float(self.get_parameter('home_board_timeout_s').value)))
 
-        result = gh.home(
+        result = None if not board_up else gh.home(
             _send, lambda: self._read_revs(timeout=0.3, attempts=3),
             span_revs=float(self.get_parameter('home_span_revs').value),
             stroke_tol_revs=float(
                 self.get_parameter('home_stroke_tol_revs').value),
             log=lambda message: log.info('找零点：{}'.format(message)))
-        if result.ok:
+        if result is not None and result.ok:
             self.rev_closed = result.rev_closed
             self.span_revs = result.span_revs
             self.zero_known = True
@@ -285,18 +300,19 @@ class GripperCanNode(Node):
                          result.span_revs * gf.MM_PER_REV))
         else:
             allow = bool(self.get_parameter('home_allow_default').value)
+            reason = result.reason if result is not None else '板子一直没回帧'
             self.zero_known = False
             self._may_move = allow
             if allow:
                 log.warn('没量成：{}。按要求退回出厂合拢点 {:.4f} 圈继续 —— '
                          '宽度会整体偏（这块板实测偏 12.6 mm），别拿它夹东西'
-                         .format(result.reason, gf.DEFAULT_REV_CLOSED))
+                         .format(reason, gf.DEFAULT_REV_CLOSED))
             else:
                 log.error(
                     '没量成：{}。零点未知，**这次不会动夹爪**（张/合/收手都跳过），'
                     '抓取会在合爪那一步失败。先跑 tools/gripper_home.py 量一次；'
                     '硬要用出厂值就把 home_allow_default 设成 true（不推荐）'
-                    .format(result.reason))
+                    .format(reason))
         if not self._may_move:
             return
         # 量完（或者没量成）都别让手指顶在止位上。
