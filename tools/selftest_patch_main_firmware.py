@@ -109,15 +109,42 @@ def check_init_flags() -> str:
     text, missing = pmf.apply_edits(CAN_C, pmf.EDITS[pmf.CAN_INIT], apply=True)
     assert missing == [], missing
     assert "hcan1.Init.AutoBusOff = ENABLE;" in text
-    assert "hcan1.Init.AutoRetransmission = ENABLE;" in text
     assert "hcan2.Init.AutoBusOff = ENABLE;" in text
-    assert "hcan2.Init.AutoRetransmission = ENABLE;" in text
+    # 自动重发必须留着 DISABLE：打开了会让发往不响应节点的帧永远重发、占死邮箱，
+    # 三个邮箱占满之后所有帧都发不出去 —— 2026-10-29 真机上就是这么把手臂卡在半路的。
+    assert "hcan1.Init.AutoRetransmission = DISABLE;" in text, text
+    assert "hcan2.Init.AutoRetransmission = DISABLE;" in text, text
     assert "hcan1.Init.Prescaler = 7;" in text
     assert "hcan1.Init.TimeTriggeredMode = DISABLE;" in text
     assert "hcan1.Init.TransmitFifoPriority = ENABLE;" in text
     assert "hcan2.Init.TransmitFifoPriority = DISABLE;" in text
     assert text.count("AutoBusOff = ENABLE;") == 2
-    return "四个初始化标志都翻了，其它项没动"
+    return "只翻了 AutoBusOff，自动重发仍关着，其它项没动"
+
+
+def check_v1_revert() -> str:
+    """v1（把自动重发打开、超时 10 ms）打过的树，要能被改成 v2。"""
+    v1_cpp = fixture_can_cpp().replace(pmf.SEND_OLD, pmf.SEND_NEW_V1)
+    v1_cpp = v1_cpp.replace(pmf.ABORT_OLD, pmf.ABORT_NEW)
+    v1_can = CAN_C
+    v1_can = v1_can.replace("hcan1.Init.AutoBusOff = DISABLE;",
+                            "hcan1.Init.AutoBusOff = ENABLE;")
+    v1_can = v1_can.replace("hcan2.Init.AutoBusOff = DISABLE;",
+                            "hcan2.Init.AutoBusOff = ENABLE;")
+    v1_can = v1_can.replace("hcan1.Init.AutoRetransmission = DISABLE;",
+                            "hcan1.Init.AutoRetransmission = ENABLE;")
+    v1_can = v1_can.replace("hcan2.Init.AutoRetransmission = DISABLE;",
+                            "hcan2.Init.AutoRetransmission = ENABLE;")
+
+    cpp, missing_cpp = pmf.apply_edits(v1_cpp, pmf.EDITS[pmf.CAN_CPP], apply=True)
+    init, missing_init = pmf.apply_edits(v1_can, pmf.EDITS[pmf.CAN_INIT], apply=True)
+    assert missing_cpp == [] and missing_init == [], (missing_cpp, missing_init)
+    assert "CAN_TX_TIMEOUT_TICKS = 50;" in cpp, cpp
+    assert "CAN_TX_TIMEOUT_TICKS = 10;" not in cpp
+    assert "hcan1.Init.AutoRetransmission = DISABLE;" in init, init
+    assert "hcan2.Init.AutoRetransmission = DISABLE;" in init, init
+    assert "hcan1.Init.AutoBusOff = ENABLE;" in init
+    return "v1 打开自动重发/10 ms 超时的树能被改回 v2"
 
 
 def check_idempotent() -> str:
@@ -210,6 +237,7 @@ def main() -> int:
     checks = [
         ("apply", check_applies),
         ("init", check_init_flags),
+        ("v1-revert", check_v1_revert),
         ("idem", check_idempotent),
         ("unknown", check_refuses_unknown_tree),
         ("files", check_file_and_check_mode),
