@@ -87,22 +87,27 @@ def home(send, read_revs, span_revs=DEFAULT_SPAN_REVS,
          stroke_revs=DEFAULT_STROKE_REVS,
          stroke_tol_revs=DEFAULT_STROKE_TOL_REVS, still_s=DEFAULT_STILL_S,
          miss_limit=DEFAULT_MISS_LIMIT, log=None, sleep=time.sleep,
-         now=time.time):
+         now=time.time, rev0=None):
     """把手指推到两头，校验行程，返回"开口 0"对应的圈数。
 
     参数
     ----
     send(frame_id, payload) : 发一帧（`gripper_frames.to_socketcan` 那套）
     read_revs() -> float|None : 读一次位置（圈），读不到返回 None
+    rev0 : float|None
+        已经读到的起点圈数。传进来就跳过这里那次读 —— 节点启动时会先拿一个
+        长超时耐心读一帧（见 `gripper_can_node._attempt_home`），别在读零点
+        这一步又重新赌一次 0.3 秒的窗口（2026-10-30 真机就栽在这上面）。
 
     返回 `HomeResult`。成功时 `rev_closed` 就是"开口 0"对应的圈数。
     """
     log = log or (lambda *_: None)
 
-    rev0 = read_revs()
     if rev0 is None:
-        return HomeResult(False, reason='读不到位置：板子没答，先确认 can0 UP、'
-                                       '夹爪板通电、以及 `--channel` 写对了')
+        rev0 = read_revs()
+        if rev0 is None:
+            return HomeResult(False, reason='读不到位置：板子没答，先确认 can0 UP、'
+                                           '夹爪板通电、以及 `--channel` 写对了')
     log('起点 {:.4f} 圈，先往合拢方向推'.format(rev0))
 
     closed = _push(send, read_revs, max(float(rev0), float(rev_closed_guess))

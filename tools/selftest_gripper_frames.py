@@ -287,8 +287,20 @@ def check_node_uses_frames():
          "declare_parameter('status_topic'" in node_src
          and 'def _publish_status' in node_src, True)
     same('找零点前先等板子回话（_wait_for_board）',
-         'def _wait_for_board' in node_src and '_wait_for_board()' in node_src,
-         True)
+         'def _wait_for_board' in node_src
+         and 'self._wait_for_board(' in node_src, True)
+    # 2026-10-30 13:57 真机：板子刚回了一帧（"1.2 秒后板子开始回位置了"），紧接着
+    # 量零点却只给了 0.3 秒 × 3 的窗口，于是整场抓取被拒。下面四条守住那次的修法。
+    same('量零点的首读窗口不再是 0.3 秒（home_first_read_timeout_s）',
+         "declare_parameter('home_first_read_timeout_s'" in node_src, True)
+    same('量零点失败会后台补量（home_retry_s / _home_retry_loop）',
+         "declare_parameter('home_retry_s'" in node_src
+         and 'def _home_retry_loop' in node_src, True)
+    same('量零点时接收线程让开，别两边抢同一帧（_sync_reading）',
+         'if self._sync_reading:' in node_src
+         and 'self._sync_reading = True' in node_src, True)
+    same('内核里只收夹爪回帧（CAN_RAW_FILTER + gf.can_filter）',
+         'CAN_RAW_FILTER' in node_src and 'gf.can_filter(' in node_src, True)
 
 
 def check_watch_tally():

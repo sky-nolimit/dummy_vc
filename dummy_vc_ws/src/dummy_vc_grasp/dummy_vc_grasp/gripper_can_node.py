@@ -121,6 +121,14 @@ class GripperCanNode(Node):
         #: 成片被丢。手动跑 `tools/gripper_home.py` 时臂早停了、总线很空，所以
         #: 同一个操作手动能通、脚本里 2 秒就判死。别再把它调小。
         self.declare_parameter('home_board_timeout_s', 30.0)
+        #: 等到了板子之后，**量零点那一次读**最多给它多久。默认 3 秒：能等到
+        #: 板子第一帧，说明它活着，接下来只可能是总线又被挤了一段，就别再用
+        #: 0.3 秒的窗口去赌（2026-10-30 13:57 那次就是赌输了直接弃用整场）。
+        self.declare_parameter('home_first_read_timeout_s', 3.0)
+        #: 零点没量成时后台隔多久补量一次（秒），以及最多补几次。0 = 不补。
+        #: 一次启动撞上总线高峰不该让整场机器人报废，但也不能无限重试。
+        self.declare_parameter('home_retry_s', 10.0)
+        self.declare_parameter('home_retry_max', 12)
         #: 零点没量成时，要不要退回出厂合拢点继续用。**默认不要**：出厂值是别的
         #: 板子的状态，在这块板上整体偏了 12.6 mm（实测），拿它张爪会顶到限位、
         #: 拿它合爪会留 11 mm 缝 —— 比"一步不动"更难查。
@@ -170,6 +178,13 @@ class GripperCanNode(Node):
         #: 连续收帧失败次数（看门狗与日志用）。
         self._recv_errors = 0
         self._poll_tick = 0
+        #: 收到过几帧回读、同步读超时过几次（诊断用：看日志就知道板子答得有多
+        #: 慢、丢帧有多频繁，不用再猜"是不是 0.3 秒太短"）。
+        self._reply_count = 0
+        self._read_timeouts = 0
+        #: 同步读（量零点）期间让接收线程停在原地，别两边抢同一个 socket。
+        self._sync_reading = False
+        self._home_retry_thread = None
 
         self.position_pub = self.create_publisher(
             Float64, str(self.get_parameter('position_topic').value), 10)
@@ -241,7 +256,8 @@ class GripperCanNode(Node):
                 gf.POSITION_FEEDBACK_ID, gf.encode_position_query()))
         except OSError:
             return None
-        deadline = time.time() + timeout
+        sent_at = time.time()
+        deadline = sent_at + timeout
         while time.time() < deadline:
             try:
                 data = self.sock.recv(gf.CAN_FRAME.size)
@@ -260,7 +276,16 @@ class GripperCanNode(Node):
                 continue
             self._last_feedback_at = time.time()
             self._polls_since_reply = 0
+            self._reply_count += 1
+            # 头三帧记下往返时间：量零点再失败时，日志能直接回答"是板子慢，
+            # 还是这边读的窗口太短"，不用再凭猜。
+            if self._reply_count <= 3:
+                self.get_logger().info(
+                    '回帧 0x{:03X}：往返 {:.0f} ms，{:.4f} 圈'.format(
+                        gf.POSITION_FEEDBACK_ID,
+                        (self._last_feedback_at - sent_at) * 1e3, revs))
             return revs
+        self._read_timeouts += 1
         return None
 
     def _wait_for_board(self, timeout=None):
@@ -289,7 +314,43 @@ class GripperCanNode(Node):
         return False
 
     def _home_on_start(self):
-        """启动时先把手指推到合拢，量出"开口 0"在哪一圈。
+        """启动时量一次零点；量不成就在后台隔一会儿再试。
+
+        2026-10-30 13:57 真机：日志里刚说"1.2 秒后板子开始回位置了"，紧接着量
+        零点却"板子没答"，于是整场抓取被拒（/gripper/status=no_zero）。一次
+        启动撞上主控归位、总线挤满不该让机器人报废；但也不能无限重试。
+        """
+        if self._attempt_home():
+            return
+        if self._may_move:                       # 已按 home_allow_default 放行
+            return
+        if float(self.get_parameter('home_retry_s').value) <= 0.0:
+            return
+        self._home_retry_thread = threading.Thread(
+            target=self._home_retry_loop, daemon=True)
+        self._home_retry_thread.start()
+
+    def _home_retry_loop(self):
+        """后台补量零点：隔 home_retry_s 秒试一次，最多 home_retry_max 次。"""
+        log = self.get_logger()
+        retry_s = float(self.get_parameter('home_retry_s').value)
+        tries = max(1, int(self.get_parameter('home_retry_max').value))
+        for attempt in range(1, tries + 1):
+            if self._stop.wait(retry_s):
+                return
+            if self.zero_known or self._may_move:
+                return
+            log.info('零点还没量出来，补量第 {}/{} 次'.format(attempt, tries))
+            if self._attempt_home(quiet=True):
+                log.info('补量成功：合拢点 {:.4f} 圈，接下来可以正常夹了'
+                         .format(self.rev_closed))
+                return
+        log.error('补量 {} 次都没成，夹爪这次不参与抓取。先跑 '
+                  'tools/gripper_home.py，或者按 _check_link 里那两条 '
+                  'candump/cansend 判板子死活'.format(tries))
+
+    def _attempt_home(self, quiet=False):
+        """走一遍"等板子 → 量两头 → 张到待命"。返回零点是否量准。
 
         这一步是宽度映射可靠的前提：截距跟着编码器零点走，而零点会被一次重新
         标定平移掉。量不到就**不动**（除非显式允许退回出厂值）—— 用错零点张爪
@@ -300,20 +361,37 @@ class GripperCanNode(Node):
         def _send(frame_id, payload):
             self.sock.send(gf.to_socketcan(frame_id, payload))
 
-        board_up = self._wait_for_board()
-        if not board_up:
-            log.error(
-                '夹爪板 {:.0f} 秒里一帧位置都没回。先确认 can0 UP、夹爪板通电、'
-                'channel 写对了；这次不会量零点'.format(
-                    float(self.get_parameter('home_board_timeout_s').value)))
+        board_timeout = float(
+            self.get_parameter('home_board_timeout_s').value)
+        # 量零点期间让接收线程停在原地：两边都 recv 同一个 socket 时，谁抢到
+        # 那一帧是随机的（2026-10-30 之前"时成时不成"就是这么来的）。
+        self._sync_reading = True
+        try:
+            if not self._wait_for_board(board_timeout):
+                self._zero_failed('板子 {:.0f} 秒里一帧位置都没回'
+                                  '（开始量零点前就问过它了）'.format(board_timeout),
+                                  log, quiet)
+                return False
+            first = self._read_revs(
+                timeout=float(self.get_parameter(
+                    'home_first_read_timeout_s').value), attempts=2)
+            if first is None:
+                self._zero_failed(
+                    '等到过回帧，但量零点时又读不到（同步读超时 {} 次）'.format(
+                        self._read_timeouts), log, quiet)
+                return False
 
-        result = None if not board_up else gh.home(
-            _send, lambda: self._read_revs(timeout=0.3, attempts=3),
-            span_revs=float(self.get_parameter('home_span_revs').value),
-            stroke_tol_revs=float(
-                self.get_parameter('home_stroke_tol_revs').value),
-            log=lambda message: log.info('找零点：{}'.format(message)))
-        if result is not None and result.ok:
+            result = gh.home(
+                _send, lambda: self._read_revs(timeout=0.3, attempts=2),
+                rev0=first,
+                span_revs=float(self.get_parameter('home_span_revs').value),
+                stroke_tol_revs=float(
+                    self.get_parameter('home_stroke_tol_revs').value),
+                log=lambda message: log.info('找零点：{}'.format(message)))
+            if not result.ok:
+                self._zero_failed(result.reason, log)
+                return False
+
             self.rev_closed = result.rev_closed
             self.span_revs = result.span_revs
             self.zero_known = True
@@ -322,24 +400,35 @@ class GripperCanNode(Node):
                      '宽度就按这两头之间插值'.format(
                          result.rev_closed, result.rev_open,
                          result.span_revs * gf.MM_PER_REV))
-        else:
-            allow = bool(self.get_parameter('home_allow_default').value)
-            reason = result.reason if result is not None else '板子一直没回帧'
-            self.zero_known = False
-            self._may_move = allow
-            if allow:
-                log.warn('没量成：{}。按要求退回出厂合拢点 {:.4f} 圈继续 —— '
-                         '宽度会整体偏（这块板实测偏 12.6 mm），别拿它夹东西'
-                         .format(reason, gf.DEFAULT_REV_CLOSED))
-            else:
-                log.error(
-                    '没量成：{}。零点未知，**这次不会动夹爪**（张/合/收手都跳过），'
-                    '抓取会在合爪那一步失败。先跑 tools/gripper_home.py 量一次；'
-                    '硬要用出厂值就把 home_allow_default 设成 true（不推荐）'
-                    .format(reason))
-        if not self._may_move:
+            self._push_idle()
+            return True
+        finally:
+            self._sync_reading = False
+
+    def _zero_failed(self, reason, log, quiet=False):
+        """零点没量成：按 home_allow_default 决定"用出厂值"还是"一步不动"。"""
+        allow = bool(self.get_parameter('home_allow_default').value)
+        self.zero_known = False
+        self._may_move = allow
+        if allow:
+            log.warn('没量成：{}。按要求退回出厂合拢点 {:.4f} 圈继续 —— '
+                     '宽度会整体偏（这块板实测偏 12.6 mm），别拿它夹东西'
+                     .format(reason, gf.DEFAULT_REV_CLOSED))
             return
-        # 量完（或者没量成）都别让手指顶在止位上。
+        if quiet:
+            log.info('（补量）没量成：{}'.format(reason))
+            return
+        log.error(
+            '没量成：{}。零点未知，**这次不会动夹爪**（张/合/收手都跳过），'
+            '抓取会在合爪那一步失败。每 {:.0f} 秒会自动再试一次（最多 {} 次）；'
+            '也可以先跑 tools/gripper_home.py 量一次，或把 home_allow_default '
+            '设成 true（不推荐）'.format(
+                reason, float(self.get_parameter('home_retry_s').value),
+                int(self.get_parameter('home_retry_max').value)))
+
+    def _push_idle(self):
+        """量完零点都别让手指顶在止位上，张到待命宽度。"""
+        log = self.get_logger()
         width, _ = gf.clamp_width(
             float(self.get_parameter('idle_width_mm').value))
         revs = gf.width_to_revs(width, self.anchor, self.span)
@@ -449,6 +538,16 @@ class GripperCanNode(Node):
             raise SystemExit(2)
         # 收帧用超时，否则关节点时 recv 会一直挂着
         sock.settimeout(0.5)
+        # 只在内核里收 0x3A3：六轴主控的轮询回帧也在这条总线上，全收进用户态
+        # 再丢，会让夹爪那几帧排在队列后面（真机上问一帧要等过半秒）。
+        try:
+            sock.setsockopt(socket.SOL_CAN_RAW, gf.CAN_RAW_FILTER,
+                            gf.can_filter())
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
+        except OSError as exc:
+            # 老内核/虚拟总线不支持也别把节点弄死，只是回到"全收再筛"。
+            self.get_logger().warn('设 CAN 过滤/收包缓冲失败（{}），继续但可能'
+                                   '收到全总线流量'.format(exc))
         return sock
 
     def _send(self, frame_id, payload):
@@ -470,6 +569,11 @@ class GripperCanNode(Node):
     def _read_loop(self):
         """后台收帧：只认 0x3A3（位置回读），其余（关节轮询回帧）丢掉。"""
         while not self._stop.is_set():
+            if self._sync_reading:
+                # 量零点期间主线程自己在同一个 socket 上同步读，这里让开：
+                # 两边同时 recv 的话那一帧被谁抢到是随机的。
+                time.sleep(0.02)
+                continue
             try:
                 data = self.sock.recv(gf.CAN_FRAME.size)
             except socket.timeout:

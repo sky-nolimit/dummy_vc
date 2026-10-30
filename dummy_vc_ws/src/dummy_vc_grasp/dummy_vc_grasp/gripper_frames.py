@@ -128,6 +128,20 @@ def _as_float(name, value):
     return number
 
 
+#: Linux CAN_RAW 的"只收这几号"过滤选项。
+#:
+#: 2026-10-30 真机：启动量零点时偶尔一上来就"板子没答"，几秒后又自己好了。
+#: 主控归位那阵子每秒几百上千帧关节轮询回帧，全收进 socket 会把接收队列挤满，
+#: 挤满之后内核丢掉的是最后进来的几帧 —— 夹爪的 0x3A3 恰好最慢。只收这一号，
+#: 队列就不会被别人占满，顺带省掉绝大部分无用的 unpack。
+CAN_RAW_FILTER = 1
+
+
+def can_filter(frame_id=POSITION_FEEDBACK_ID, mask=0x7FF):
+    """`CAN_RAW_FILTER` 要的 `struct can_filter`：两个 u32（id、mask）。"""
+    return struct.pack('<II', frame_id, mask)
+
+
 def encode_enable(enabled):
     """使能帧的 8 字节负载：uint32 1/0，后 4 字节补零。"""
     return struct.pack('<I', 1 if enabled else 0) + b'\x00' * (DLC - 4)
