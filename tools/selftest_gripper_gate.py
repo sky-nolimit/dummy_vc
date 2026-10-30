@@ -152,24 +152,36 @@ def check_gripper_servo():
                  "declare_parameter('width_tol_mm'",
                  "declare_parameter('width_max_iters'",
                  "declare_parameter('width_settle_s'",
+                 "declare_parameter('width_settle_revs'",
+                 "declare_parameter('link_miss_max'",
                  "declare_parameter('link_timeout_s'",
                  "declare_parameter('idle_poll_hz'",
-                 'def _check_link', 'self._check_link()'):
+                 'def _settled', 'def _check_link', 'self._check_link()'):
         if need in src:
             ok('源码里有 {!r}'.format(need))
         else:
             fail('源码里没有 {!r}'.format(need),
-                 '静差补不回来 / 板子卡死了没人发现')
+                 '静差补不回来 / 板子卡死了没人发现 / 拿没停稳的读数算补发')
     # 两条读回路径都要盖时间戳，否则空闲时看门狗会误判"板子死了"。
     if src.count('self._last_feedback_at = time.time()') >= 2:
         ok('两条读回路径都盖了时间戳')
     else:
         fail('读回路径没盖时间戳', '看门狗会误报')
-    # 补发量必须是"2*目标 − 实测"，不能按系数硬推。
+    # 补发量必须"以上一条命令为基准补差值"，不能按系数硬推，也不能用
+    # "2*目标 − 实测"。后者假设上一条命令正好等于目标：一旦上一条已经补过，
+    # 它会把那次放大当成新误差继续放大 —— 2026-10-30 真机日志里 46.9 / 53.0
+    # 来回跳就是这么来的（详见 _correct_once 的 docstring）。
     if '2.0 * goal - float(self._last_revs)' in src:
-        ok('补发量用 2*目标 − 实测（映射自动对消）')
+        fail('补发量又回到 2*目标 − 实测',
+             '上一条命令已经补过时会继续放大，开口会来回跳')
+    elif 'MM_PER_REV' in src.split('def _correct_once', 1)[-1].split(
+            'def ', 1)[0]:
+        fail('闭环修正里按固定的 mm/圈 硬推', '映射的截距/行程没被对消')
+    elif ('self._command_revs' in src
+          and 'goal - float(self._last_revs)' in src):
+        ok('补发量以上一条命令为基准补差值（映射自动对消，不放大）')
     else:
-        fail('补发量不是 2*目标 − 实测')
+        fail('补发量不是"上一条命令 + 差值"')
     # 到位/放弃/收手三条路径都要把目标清掉，否则会一直补发。
     if src.count('self._target_width_mm = None') >= 3:
         ok('到位、放弃、收手都会清掉目标')

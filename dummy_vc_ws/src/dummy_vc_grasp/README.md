@@ -88,6 +88,9 @@ ros2 launch dummy_vc_grasp pick_place_demo.launch.py auto_start:=true
 | `vision` | `true` | 视觉那半已经在跑就传 `false` |
 | `camera` | `true` | 传给视觉 launch：是否顺带起相机 |
 | `place_x` / `place_y` | `0.0` / `0.10` | 放置点（base_link 下，米） |
+| `place_surface_m` | `0.055` | **推荐**：放置台顶面离桌面多高（米），节点自己扣物块半高和夹持中心抬高 |
+| `place_release_clearance_m` | `0.003` | 松手时物块底面离台面多高（米） |
+| `place_z` / `place_z_frame` | `-999` / `table` | 已知 TCP 高度时才用；设了 `place_surface_m` 就不看它 |
 | `params_file` | 包内 `config/pick_place.yaml` | 换参数就复制一份改 |
 
 想分开排查时的手工等价命令：

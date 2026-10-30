@@ -30,15 +30,21 @@ pick_place_node:
     # 右侧、+y 朝相机。用户实测要放 (-175, +90) mm。
     place_x: -0.175
     place_y: 0.090
-    # 放置点高度。`place_z_frame` 决定这个数怎么量：
-    #   'table'（默认）= 从桌面往上量的高度，人拿尺子量的就是这种；
-    #   'base'        = base_link 里的绝对 z（桌面在 -0.0405）。
-    # 所以"桌面上方 55 mm"两种写法：place_z: 0.055 + frame 'table'，
-    # 或者 place_z: 0.0145 + frame 'base'。
-    # 不填（保持 -999）就按 工作面 + approach_m 算 = -0.0405 + 0.08 = +0.0395。
-    # 提醒：55 mm 意味着松手后物块自由下落 5.5 cm；想轻放就填 0.02 左右。
-    place_z: 0.055
+    # 放置点高度，两种写法，**优先用下面那个 place_surface_m**。
+    # 1) place_z 量的是 **TCP（夹持中心）** 的高度：
+    #      'table'（默认）= 从桌面往上量；'base' = base_link 里的绝对 z
+    #      （桌面在 -0.0405）。"TCP 在桌面上方 55 mm" → 0.055 + 'table'。
+    # 2) place_surface_m 量的是 **放置台顶面** 的高度（人拿尺子量的台子）：
+    #      节点按"松手时物块底面停在台面上方 place_release_clearance_m"倒推
+    #      TCP，自动把"夹持中心比方块中心高 tcp_offset、方块半个高"加进去。
+    #
+    # 2026-10-30 踩过的坑：台子本身 55 mm 高，而 place_z 被填成 0.055 ——
+    # 那是 TCP 落在台面上，24 mm 的方块要陷进台面 20.5 mm，手指也插进台面。
+    # 现在台子高度写在 place_surface_m 里，place_z 保持 -999（不生效）。
+    place_z: -999.0
     place_z_frame: table
+    place_surface_m: 0.055               # 放置台顶面离桌面 55 mm（实测）
+    place_release_clearance_m: 0.003     # 松手时物块底面离台面 3 mm
 
     # ---- 抓不准的补偿（2026-10-27 加）----
     # 视觉和执行各有一段系统性偏差，量出来的数直接加在视觉给的抓取点上。

@@ -201,7 +201,8 @@ def plan_grasp(detection, model: gr.FingerOpeningModel,
 
 
 def pick_place_waypoints(plan: GraspPlan, place_xy, table_z, approach_m=0.08,
-                         lift_m=0.10, place_z=None, place_z_frame='table'):
+                         lift_m=0.10, place_z=None, place_z_frame='table',
+                         place_surface_m=None, place_clearance_m=0.003):
     """把放置点也算出来（首期放置点是参数给定的，不由视觉算）。
 
     默认放置高度取工作面 + 抬升量，避免"停在地面上"导致合爪时蹭着走。
@@ -213,10 +214,28 @@ def pick_place_waypoints(plan: GraspPlan, place_xy, table_z, approach_m=0.08,
       `table_z`；
     - `'base'`：已经是 base_link 的 z，直接用。
 
+    **`place_surface_m` 是"放置台顶面"的高度，不是 TCP 的高度 —— 优先用它。**
+    2026-10-30 的坑：放置台本身就是 55 mm 高，`place_z: 0.055` 于是把 TCP
+    放在台面上，而物块挂在 TCP 下面 `tcp_offset + 边长/2`（24 mm 方块是
+    20.5 mm），等于要物块**陷进台面 20.5 mm**，手指也会插进台面。
+
+    给了 `place_surface_m` 就按"松手时物块底面停在台面上方
+    `place_clearance_m`"倒推 TCP：
+
+        TCP_z = table_z + place_surface_m + tcp_offset + 边长/2 + clearance
+
+    这样换方块尺寸、换台子高度都不用重算那个数。
+
     2026-10-27 之前的坑：`place_x`/`place_y` 声明了却从没被读过，放置点悄悄
     等于抓取点（"放置"其实是原地松手）。
     """
-    if place_z is None:
+    if place_surface_m is not None:
+        # 物块底面比 TCP 低这么多：手势是"夹住方块中心"，而 TCP 还比方块中
+        # 心高 tcp_offset（手指 17.5 mm 长，不停高就会插进桌子）。
+        below = float(plan.tcp_offset_m) + 0.5 * float(plan.object_edge_m)
+        z = (float(table_z) + float(place_surface_m) + below
+             + float(place_clearance_m))
+    elif place_z is None:
         z = float(table_z) + float(approach_m)
     elif place_z_frame == 'table':
         z = float(table_z) + float(place_z)

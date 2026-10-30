@@ -96,11 +96,18 @@ def generate_launch_description():
             'place_y', default_value='0.090',
             description='放置点 y（base_link 下，米）'),
         DeclareLaunchArgument(
-            'place_z', default_value='0.055',
-            description='放置点高度；怎么量由 place_z_frame 决定'),
+            'place_z', default_value='-999.0',
+            description='放置点 TCP 高度；怎么量由 place_z_frame 决定。'
+                        '有放置台就留 -999，改用 place_surface_m'),
         DeclareLaunchArgument(
             'place_z_frame', default_value='table',
             description="place_z 的量法：'table' = 离工作面多高，'base' = base_link 的 z"),
+        DeclareLaunchArgument(
+            'place_surface_m', default_value='0.055',
+            description='放置台顶面离工作面多高（米）；设了优先于 place_z'),
+        DeclareLaunchArgument(
+            'place_release_clearance_m', default_value='0.003',
+            description='松手时物块底面离台面多高（米）'),
         DeclareLaunchArgument(
             'scene', default_value='true',
             description='是否起 scene_node（把地面/地台发进 planning scene）'),
@@ -154,6 +161,11 @@ def generate_launch_description():
                                           value_type=float),
                 'place_z_frame': ParameterValue(
                     LaunchConfiguration('place_z_frame'), value_type=str),
+                'place_surface_m': ParameterValue(
+                    LaunchConfiguration('place_surface_m'), value_type=float),
+                'place_release_clearance_m': ParameterValue(
+                    LaunchConfiguration('place_release_clearance_m'),
+                    value_type=float),
                 'observe_timeout_s': ParameterValue(
                     LaunchConfiguration('observe_timeout_s'), value_type=float),
                 'gripper_enabled': ParameterValue(

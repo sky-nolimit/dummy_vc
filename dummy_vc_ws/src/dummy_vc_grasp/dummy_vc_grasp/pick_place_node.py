@@ -150,8 +150,19 @@ class PickPlaceNode(Node):
         #: 怎么量由 `place_z_frame` 决定：'table' = 从桌面往上量的高度（人拿尺子
         #: 量的就是这种），'base' = base_link 里的绝对 z。桌面在 base_link 的
         #: z = -0.0405，所以"桌面上方 55 mm"两种写法分别是 0.055 / +0.0145。
+        #: **注意这是 TCP 的高度，不是放置台的高度**；放了台子就用下面的
+        #: `place_surface_m`，别用这个。
         self.declare_parameter('place_z', -999.0)
         self.declare_parameter('place_z_frame', 'table')
+        #: 放置台顶面离工作面多高（米）。设了就**优先于** `place_z`：节点按
+        #: "松手时物块底面停在台面上方 place_release_clearance_m"倒推 TCP。
+        #: 2026-10-30 的坑：台子本身 55 mm 高，而 place_z 填的 55 mm 被当成
+        #: TCP 高度 —— 等于要 24 mm 的方块陷进台面 20.5 mm，手指也会插进台面。
+        #: 小于 -100 表示没有台子（直接用桌面）。
+        self.declare_parameter('place_surface_m', -999.0)
+        #: 松手时物块底面离台面多高（米）。留一点余量：手指张开、物块轻轻
+        #: 落下去几毫米，比"贴着台面松手"更不容易蹭倒。
+        self.declare_parameter('place_release_clearance_m', 0.003)
         #: 抓取点补偿（base_link，米）。视觉 + 执行合起来的系统性偏差，按实测填，
         #: 默认 0。见 tools/fit_grasp_correction.py。
         self.declare_parameter('grasp_offset_x_m', 0.0)
@@ -421,6 +432,8 @@ class PickPlaceNode(Node):
         params = self.get_parameter
         place_z = float(params('place_z').value)
         frame = str(params('place_z_frame').value).strip()
+        surface = float(params('place_surface_m').value)
+        clearance = float(params('place_release_clearance_m').value)
         try:
             wp = grasp_planner.pick_place_waypoints(
                 plan,
@@ -429,12 +442,24 @@ class PickPlaceNode(Node):
                 approach_m=float(params('approach_m').value),
                 lift_m=float(params('lift_m').value),
                 place_z=None if place_z < -100.0 else place_z,
-                place_z_frame=frame)
+                place_z_frame=frame,
+                place_surface_m=None if surface < -100.0 else surface,
+                place_clearance_m=clearance)
         except Exception as exc:                # noqa: BLE001
             self.get_logger().warn(
                 '放置点算不出来（{}），这轮就放回抓取点上方'.format(exc))
             return plan
-        if place_z < -100.0:
+        if surface >= -100.0:
+            below = (float(plan.tcp_offset_m)
+                     + 0.5 * float(plan.object_edge_m))
+            how = ('（放置台顶面离桌面 {:.1f} mm + 物块底面比 TCP 低 {:.1f} mm'
+                   '〔夹持中心抬高 {:.1f} + 半个方块 {:.1f}〕+ 松手余量'
+                   ' {:.1f} mm）'.format(
+                       surface * 1e3, below * 1e3,
+                       float(plan.tcp_offset_m) * 1e3,
+                       0.5 * float(plan.object_edge_m) * 1e3,
+                       clearance * 1e3))
+        elif place_z < -100.0:
             how = '（没设 place_z，按工作面 + 起手高度算）'
         elif frame == 'table':
             how = '（离工作面 {:.1f} mm）'.format(place_z * 1e3)

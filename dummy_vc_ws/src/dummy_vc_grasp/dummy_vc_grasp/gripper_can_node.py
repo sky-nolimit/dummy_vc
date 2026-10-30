@@ -95,9 +95,22 @@ class GripperCanNode(Node):
         #: 次。容差 0.8 mm 比手指和物块的接触变形大，不会来回抖。
         self.declare_parameter('width_tol_mm', 0.8)
         self.declare_parameter('width_max_iters', 4)
-        self.declare_parameter('width_settle_s', 0.4)
-        #: 多久没收到 0x3A3 就认定板子卡死了（秒）。卡死之后这边不再发命令，
-        #: 并把 /gripper/status 改成 no_zero，逼人去断电重启。
+        #: 命令发出后至少等这么久，才认为回读可能是"停稳"的值。位置模式有加减
+        #: 速，0~50 mm 要走 1 s 以上；原来的 0.4 s 读到的是半路上的位置，拿它
+        #: 算补发量会把目标来回推 —— 2026-10-30 真机日志里"要 50 mm"实测在
+        #: 46.9 / 53.0 之间来回跳、补发 4 次还没到位，就是从这里开始的。
+        self.declare_parameter('width_settle_s', 1.0)
+        #: 时间判据之外的第二条：相邻两帧回读差超过这么多圈，就认为手指还在
+        #: 动，继续等。慢慢爬的时候只靠时间判据不够。
+        self.declare_parameter('width_settle_revs', 0.02)
+        #: 判"板子卡死"要**同时**满足两条：连续这么多次主动查询都没答……
+        self.declare_parameter('link_miss_max', 8)
+        #: ……并且已经这么久没收到 0x3A3（秒）。2026-10-30 之前只看时间
+        #: （3 s，真机上还被配成 2 s）：空闲时 1 Hz 查询，**丢一帧就等于
+        #: "2 秒没回"**，于是一次偶发丢帧就把夹爪判死（_may_move=False），
+        #: 之后张爪/合爪全被拒、只能断电重启 —— 日志里 13:29:40 那句
+        #: "2.0 秒没回过一帧" 紧跟在一帧成功的回读后面，就是个假警报。
+        #: 现在丢一帧只让计数 +1，要连丢 8 次（且空够 3 s）才判死。
         self.declare_parameter('link_timeout_s', 3.0)
         #: 空闲时的查询频率（Hz）。发得越少，撞上 35 板那条"一帧没发出去就
         #: 永久锁死发送"的固件缺陷的机会越小；有目标在跟的时候仍按 poll_hz 问。
@@ -140,12 +153,22 @@ class GripperCanNode(Node):
         #: 最近一次回读到的电机圈数与开口（闭环修正用）。
         self._last_revs = None
         self._last_width = None
+        #: 上一帧回读的圈数（判"停稳"用：相邻两帧差得够小才算停了）。
+        self._prev_revs = None
+        #: 最后一次实际发出去的圈数命令，以及发它的时间。补发量按
+        #: "上次命令 + 实测差" 算，不能按 "2*目标 − 实测" 算 —— 后者默认
+        #: 上一条命令就是目标，一旦上一条已经放大过，就会越补越偏。
+        self._command_revs = None
+        self._command_at = 0.0
         #: 闭环修正的当前目标：None = 没有在跟的目标。
         self._target_width_mm = None
         self._target_iters = 0
-        self._target_ready_at = 0.0
         #: 最近一次收到回帧的时间（看门狗用）。0 = 还没收到过。
         self._last_feedback_at = 0.0
+        #: 上次收到回帧之后又问了几次（看门狗用）。
+        self._polls_since_reply = 0
+        #: 连续收帧失败次数（看门狗与日志用）。
+        self._recv_errors = 0
         self._poll_tick = 0
 
         self.position_pub = self.create_publisher(
@@ -236,6 +259,7 @@ class GripperCanNode(Node):
             except ValueError:
                 continue
             self._last_feedback_at = time.time()
+            self._polls_since_reply = 0
             return revs
         return None
 
@@ -318,18 +342,19 @@ class GripperCanNode(Node):
         # 量完（或者没量成）都别让手指顶在止位上。
         width, _ = gf.clamp_width(
             float(self.get_parameter('idle_width_mm').value))
+        revs = gf.width_to_revs(width, self.anchor, self.span)
         try:
             self.sock.send(gf.to_socketcan(gf.ENABLE_FRAME_ID,
                                            gf.encode_enable(True)))
             self.sock.send(gf.to_socketcan(
-                gf.POSITION_FRAME_ID,
-                gf.encode_position(gf.width_to_revs(width, self.anchor, self.span))))
+                gf.POSITION_FRAME_ID, gf.encode_position(revs)))
             log.info('张到 {:.1f} mm 待命'.format(width))
             # 也进闭环：位置模式有静差，这一发常常停在 52~54 mm，
             # 等接收线程起来以后由 _correct_once 补到位。
             self._target_width_mm = float(width)
             self._target_iters = 0
-            self._target_ready_at = time.time() + 1.0
+            self._command_revs = float(revs)
+            self._command_at = time.time()
         except OSError as exc:
             log.warn('张开命令没发出去：{}'.format(exc))
 
@@ -356,22 +381,37 @@ class GripperCanNode(Node):
         也不会再答。
 
         我们没法从这边把它救回来（它连 reboot 帧都不处理），能做的是：
-        立刻停止发命令、把状态改成 no_zero、并明确告诉人"断电重启"。
+        立刻停止发命令、把状态改成 no_zero，并明确告诉人"断电重启"。
+
+        **2026-10-30 修正：判据不能只看时间。** 原来"3 秒（或被配成 2 秒）没
+        收到 0x3A3 就判死"，而空闲时查询只有 1 Hz —— 丢一帧就等于"1~2 秒没
+        回"，于是实测里一帧刚成功的回读之后紧接着就冒出一句"2.0 秒没回过一帧"，
+        夹爪被永久判死。CAN 上一帧偶发被挤掉是常态（主控归位时总线是满的），
+        所以现在要求"连续 link_miss_max 次主动查询都没答"**且**"空够
+        link_timeout_s 秒"两条同时成立才判死。
         """
         if not self.zero_known or self._last_feedback_at <= 0.0:
             return
+        if not self._may_move:
+            return
         silent_for = time.time() - self._last_feedback_at
         limit = float(self.get_parameter('link_timeout_s').value)
-        if silent_for < limit or not self._may_move:
+        miss_max = max(2, int(self.get_parameter('link_miss_max').value))
+        misses = int(self._polls_since_reply)
+        if misses < miss_max or silent_for < limit:
             return
         self._may_move = False
         self.zero_known = False
         self._target_width_mm = None
         self.get_logger().error(
-            '夹爪板 {:.1f} 秒没回过一帧（0x3A3）。它多半卡在自己的 CAN 发送上，'
-            '这边救不回来：把机械臂（或夹爪板）断电重启，再跑一次 '
-            'tools/gripper_home.py。在那之前本节点不再发任何移动命令。'
-            .format(silent_for))
+            '夹爪板连续 {} 次没回位置（0x3A3），已经 {:.1f} 秒。先别断电，'
+            '在另一个终端按住这个顺序试一次，能分清是哪种故障：\n'
+            '  1) 挂上监听：candump can0,3A3:3FF\n'
+            '  2) 另开一个终端问一次：cansend can0 3A3#0000000000000000\n'
+            '  有回帧 = 板子活着，是这边的接收出了问题（看上面有没有"收帧失败"）；\n'
+            '  没回帧 = 板子卡在自己的 CAN 发送上（35 板固件那条缺陷），只能断'
+            '电重启。\n'
+            '在那之前本节点不再发任何移动命令。'.format(misses, silent_for))
 
     def _refuse(self, note):
         """零点不可用时的统一回绝：说清楚原因，但别每 100 ms 刷一遍。"""
@@ -412,18 +452,20 @@ class GripperCanNode(Node):
         return sock
 
     def _send(self, frame_id, payload):
+        """发一帧。返回 True = 发出去了；False = 没发出去（原因已经记日志）。"""
         if self.dry_run:
             self.get_logger().info('（只打印）{}'.format(
                 gf.describe(frame_id, payload)))
-            return
+            return True
         frame = gf.to_socketcan(frame_id, payload)
         try:
             self.sock.send(frame)
         except OSError as exc:
             # 总线 down、适配器拔了、发送队列满，都在这里。别把失败吞掉。
             self.get_logger().error('发不出去（0x{:03X}）：{}'.format(frame_id, exc))
-            return
+            return False
         self.frames_sent += 1
+        return True
 
     def _read_loop(self):
         """后台收帧：只认 0x3A3（位置回读），其余（关节轮询回帧）丢掉。"""
@@ -432,8 +474,20 @@ class GripperCanNode(Node):
                 data = self.sock.recv(gf.CAN_FRAME.size)
             except socket.timeout:
                 continue
-            except OSError:
-                break
+            except OSError as exc:
+                # 以前这里直接 break：接收线程静默退出，现象和"板子不回帧"
+                # 一模一样（看门狗也是"没收到回帧"），日志里却完全分不出来。
+                # 现在留痕、计数，连续失败太多次才放弃。
+                self._recv_errors += 1
+                self.get_logger().error('收帧失败（{}），连续第 {} 次'.format(
+                    exc, self._recv_errors))
+                if self._recv_errors >= 10:
+                    self.get_logger().error(
+                        '连续 {} 次收帧失败，接收线程退出'.format(self._recv_errors))
+                    break
+                time.sleep(0.05)
+                continue
+            self._recv_errors = 0
             if len(data) < gf.CAN_FRAME.size:
                 continue
             frame_id, _dlc, payload = gf.CAN_FRAME.unpack(data)
@@ -445,9 +499,12 @@ class GripperCanNode(Node):
                 self.get_logger().warn('回帧解不开：{}'.format(exc))
                 continue
             width = gf.revs_to_width(revs, self.anchor, self.span)
+            # 判"停稳"要看相邻两帧的差，所以先把上一帧挪过去再覆盖。
+            self._prev_revs = self._last_revs
             self._last_revs = float(revs)
             self._last_width = float(width)
             self._last_feedback_at = time.time()
+            self._polls_since_reply = 0
             self.position_pub.publish(Float64(data=width))
             self._report(revs, width, finished)
 
@@ -473,6 +530,9 @@ class GripperCanNode(Node):
         every = max(1, int(round(poll_hz / idle_hz)))
         if self._target_width_mm is not None or self._poll_tick % every == 0:
             self._send(gf.POSITION_FEEDBACK_ID, gf.encode_position_query())
+            # 每问一次就记一笔：一条回帧都没来的话这个数一直涨，看门狗据此
+            # 判"板子是不是真的不答了"（见 _check_link）。
+            self._polls_since_reply += 1
         self._correct_once()
 
     def _on_width(self, msg):
@@ -497,28 +557,36 @@ class GripperCanNode(Node):
         # 一启动就会把夹爪置停。所以不能信任"节点启动时那一次使能"。
         if self._enable_before_move:
             self._send(gf.ENABLE_FRAME_ID, gf.encode_enable(True))
-        self._send(gf.POSITION_FRAME_ID, gf.encode_position(revs))
+        sent = self._send(gf.POSITION_FRAME_ID, gf.encode_position(revs))
         self.get_logger().info(
-            '开口 {:.2f} mm → 位置 {:.4f} 圈'.format(width, revs))
+            '开口 {:.2f} mm → 位置 {:.4f} 圈{}'.format(
+                width, revs, '' if sent else '（没发出去）'))
         # 从这一刻起盯着这个目标，等它停稳再由 _correct_once 补发。
+        # 没发出去就不记"上一条命令"：补发时退回开环，别拿一条没发生的命
+        # 令当基准（否则补发量会多出一整段）。
         self._target_width_mm = float(width)
         self._target_iters = 0
-        self._target_ready_at = time.time() + float(
-            self.get_parameter('width_settle_s').value)
+        self._command_revs = float(revs) if sent else None
+        self._command_at = time.time()
 
     def _correct_once(self):
         """按回读补发一次位置，把"要 50 停在 52~54"的静差补掉。
 
         位置模式是比例型控制，负载越大停得越偏；它自己不会收敛到目标。
-        补发量用 `2*目标 − 实测`（同一个线性映射下的等量补偿），比按 mm/圈
-        硬算更稳：映射里的截距、行程都在里面自动对消了。
+
+        补发量按"**上一条命令 + 这次实测差**"算，不是"2×目标 − 实测"。
+        老写法的前提是上一条命令正好等于目标；一旦上一条已经补过（目标 50 mm
+        而命令是 51.5 圈对应的值），它会把那次放大当成新误差继续放大 ——
+        再加上 0.4 s 就去读回读（手指还在走），2026-10-30 真机日志里就出现了
+        46.9 → 53.0 → 待发 51.5 的来回跳。新写法只补"命令与实际之间差的那一
+        段"，静差一次补平，不会越补越大。
         """
         if self._target_width_mm is None or self._last_revs is None:
             return
         if not self._may_move:
             self._target_width_mm = None
             return
-        if time.time() < self._target_ready_at:
+        if not self._settled():
             return
         tol = float(self.get_parameter('width_tol_mm').value)
         max_iters = int(self.get_parameter('width_max_iters').value)
@@ -533,28 +601,54 @@ class GripperCanNode(Node):
             return
         if self._target_iters >= max_iters:
             self.get_logger().warn(
-                '开口停在 {:.1f} mm（要 {:.1f} mm），补发 {} 次后还差 '
-                '{:+.1f} mm —— 多半是顶到什么了'.format(
-                    self._last_width, self._target_width_mm,
-                    self._target_iters, error))
+                '开口停在 {:.1f} mm（要 {:.1f} mm）：补发 {} 次、每次都等停稳了'
+                '才补，还差 {:+.1f} mm。先确认手指有没有顶到东西；没顶到就是'
+                '"宽度↔圈数"这条线偏了，重新量零点（tools/gripper_home.py）'
+                .format(self._last_width, self._target_width_mm,
+                        self._target_iters, error))
             self._target_width_mm = None
             return
         goal = gf.width_to_revs(self._target_width_mm, self.anchor, self.span)
-        command = 2.0 * goal - float(self._last_revs)
+        base = (goal if self._command_revs is None
+                else float(self._command_revs))
+        command = base + (goal - float(self._last_revs))
+        # 别把命令送出机械行程：比例控制下补过头会被固件限幅，读数停在限位上，
+        # 看起来又像"顶到了"。
+        ends = [gf.width_to_revs(w, self.anchor, self.span)
+                for w in (gf.MIN_WIDTH_MM, gf.MAX_WIDTH_MM)]
+        clamped = min(max(command, min(ends)), max(ends))
+        if abs(clamped - command) > 1e-9:
+            self.get_logger().warn(
+                '补发量 {:.4f} 圈超出机械行程，按 {:.4f} 圈发'.format(
+                    command, clamped))
+            command = clamped
         self._target_iters += 1
-        try:
-            if self._enable_before_move:
-                self._send(gf.ENABLE_FRAME_ID, gf.encode_enable(True))
-            self._send(gf.POSITION_FRAME_ID, gf.encode_position(command))
-        except OSError as exc:
-            self.get_logger().error('补发位置失败（{}），不再修'.format(exc))
+        if self._enable_before_move:
+            self._send(gf.ENABLE_FRAME_ID, gf.encode_enable(True))
+        if not self._send(gf.POSITION_FRAME_ID, gf.encode_position(command)):
+            self.get_logger().error('补发位置没发出去，不再修')
             self._target_width_mm = None
             return
+        self._command_revs = float(command)
+        self._command_at = time.time()
         self.get_logger().info(
-            '差 {:+.1f} mm，补发到 {:.4f} 圈（第 {} 次）'.format(
-                error, command, self._target_iters))
-        self._target_ready_at = time.time() + float(
-            self.get_parameter('width_settle_s').value)
+            '差 {:+.1f} mm（实测 {:.1f} mm；上一条命令 {:.4f} 圈），补发到 '
+            '{:.4f} 圈（第 {} 次）'.format(
+                error, self._last_width, base, command, self._target_iters))
+
+    def _settled(self):
+        """回读算"停稳"了吗？没停稳就别拿它算补发量。
+
+        两条都要满足：命令发出已超过 `width_settle_s`，且最近两帧回读的差
+        不超过 `width_settle_revs`。
+        """
+        if self._last_revs is None or self._prev_revs is None:
+            return False
+        if time.time() - self._command_at < float(
+                self.get_parameter('width_settle_s').value):
+            return False
+        return abs(float(self._last_revs) - float(self._prev_revs)) <= float(
+            self.get_parameter('width_settle_revs').value)
 
     def _park(self):
         """退出前合拢，让手指停在一个确定的、收起来的位置。
