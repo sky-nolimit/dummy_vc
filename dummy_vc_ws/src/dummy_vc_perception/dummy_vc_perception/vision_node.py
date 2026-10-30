@@ -116,6 +116,7 @@ class VisionNode(Node):
         self.depth_step = max(1, int(self.get_parameter('depth_step').value))
         self.depth_max_range = float(self.get_parameter('depth_max_range').value)
         self.calibrate_plane = bool(self.get_parameter('calibrate_plane').value)
+        self.shadow_bias_scale = float(self.get_parameter('shadow_bias_scale').value)
         self.depth_scale = self.depth_scale_setting or None
 
         self._check_measured(scene)

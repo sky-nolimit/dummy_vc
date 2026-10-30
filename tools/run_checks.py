@@ -45,6 +45,16 @@ this project's worst bugs:
                           pinned down here rather than on the arm. It also
                           enforces that the geometry layer imports no ROS and
                           no OpenCV, which is why it can run at all.
+    selftest_node_attributes
+                           static look at the node classes: every `self.x` that is
+                           read must have been assigned somewhere, and every
+                           parameter that is declared must really be read with
+                           get_parameter. 2026-10-30 a new parameter was declared
+                           and used but never read into an attribute -- nothing
+                           offline noticed, and the first real message on the
+                           robot raised AttributeError and killed the vision
+                           chain. Compilers and the other checks cannot see this;
+                           an AST walk can.
     selftest_grasp_task
                            the stage-5 grasp planner and task state machine: every
                            state has an action and a way forward, the retryable
@@ -143,6 +153,9 @@ CHECKS = [
     ('selftest_vision_geometry.py',
      'the vision geometry: axis conventions, distortion, table projection', True,
      []),
+    ('selftest_node_attributes.py',
+     'every node: self.x read has an assignment, declared params are really read',
+     True, []),
     ('selftest_grasp_task.py',
      'the grasp planner and task machine: retries, gripper gate, no dead ends',
      True, []),
