@@ -1086,6 +1086,49 @@ def check_shadow_correction(geometry):
     ok('维度/高度不合法时抛 GeometryError')
 
 
+def check_vision_correction(geometry):
+    """视觉固定偏差：绕相机的"转+缩放+平移"，2026-10-30 那个 42 mm 必须能修掉。"""
+    print('--- 13. 视觉固定偏差修正（绕相机转/缩放/平移）')
+    pivot = (-0.302, 0.317)
+    det = np.array([-0.024, 0.155])       # 日志里视觉给的
+    truth = np.array([0.000, 0.190])      # 拿尺量的
+    yaw = np.radians(-7.4)
+    scale, shift = 0.903, (0.0, 0.0)      # shift 下面解出来
+    # 反解出平移：truth = pivot + s R (det - pivot) + shift
+    shift = truth - (np.asarray(pivot) + scale * (
+        np.asarray(det) - np.asarray(pivot)) @ np.array(
+            [[np.cos(yaw), np.sin(yaw)], [-np.sin(yaw), np.cos(yaw)]]))
+    fixed = geometry.similarity_correction(det, pivot, yaw, scale, shift)
+    err = float(np.hypot(*(fixed - truth)))
+    if err < 1e-9:
+        ok(f'42 mm 的偏差能完全修掉（残差 {err * 1e6:.1f} um）')
+    else:
+        fail(f'修完还差 {err * 1e3:.2f} mm，参数和公式对不上')
+    # 不给参数（恒等）时原样返回，不许偷偷改数
+    close('恒等变换不改点', geometry.similarity_correction(det, pivot, 0.0),
+          det, 1e-12)
+    # pivot 上的点转不动；距离按 scale 缩放；+90 度是把 +x 转到 +y
+    close('pivot 点转不动', geometry.similarity_correction(
+        pivot, pivot, np.radians(37.0)), pivot, 1e-12)
+    far = np.asarray(pivot) + np.array([0.20, 0.0])
+    turned = geometry.similarity_correction(far, pivot, np.radians(90.0))
+    close('转 90 度把 +x 转到 +y', turned, np.asarray(pivot) + [0.0, 0.20],
+          1e-12)
+    shrunk = geometry.similarity_correction(far, pivot, 0.0, scale=0.5)
+    if abs(float(np.hypot(*(shrunk - np.asarray(pivot)))) - 0.10) < 1e-12:
+        ok('缩放 0.5 让 0.20 m 的半径变 0.10 m')
+    else:
+        fail('缩放没按半径生效')
+    for bad in ((det, pivot, 0.0, 0.0), (det, pivot, 0.0, -1.0),
+                ([0.0, 0.1, 0.2], pivot, 0.0), (det, (0.0, 0.1, 0.2), 0.0)):
+        try:
+            geometry.similarity_correction(*bad)
+        except geometry.GeometryError:
+            continue
+        fail(f'非法参数 {bad[2:]} 或维度不对时没抛 GeometryError')
+    ok('缩放非正/维度不对时抛 GeometryError')
+
+
 def main():
     print(f'reading {os.path.relpath(PKG_ROOT, REPO)}')
     geometry, gripper, detection, depth3d = load_modules()
@@ -1107,6 +1150,7 @@ def main():
     check_detection(geometry, gripper, detection)
     check_depth(geometry, depth3d, detection)
     check_shadow_correction(geometry)
+    check_vision_correction(geometry)
 
     print()
     if FAILURES:

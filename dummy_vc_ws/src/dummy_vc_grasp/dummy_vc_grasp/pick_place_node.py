@@ -171,9 +171,20 @@ class PickPlaceNode(Node):
         self.declare_parameter('grasp_yaw_snap_deg',
                                grasp_planner.DEFAULT_YAW_SNAP_DEG)
         #: 单目"影子"修正：方块有高度、像素却被投到桌面平面上，检测点会沿
-        #: "从相机指向方块"的方向系统性偏出去，且偏移随距离增长。默认开着。
-        self.declare_parameter('shadow_fix', True)
+        #: "从相机指向方块"的方向系统性偏出去，且偏移随距离增长。
+        #:
+        #: 2026-10-30 起默认**关掉**：perception 的 `detection.shadow_bias()` 已经
+        #: 减过一次，这里再减就是修两倍（真机这点上等于多修了 28 mm，把方块往
+        #: 相机方向拽）。要动这个模型的系数，改 perception 的 shadow_bias_scale。
+        self.declare_parameter('shadow_fix', False)
         self.declare_parameter('shadow_fix_scale', 1.0)
+        #: 量出来的固定视觉偏差：绕相机位置转 yaw 度、缩放、再平移（米）。
+        #: 默认是恒等变换，不改变任何行为；填法见 tools/fit_grasp_correction.py
+        #: 的结论，或者 docs 里的标定步骤。
+        self.declare_parameter('vision_yaw_deg', 0.0)
+        self.declare_parameter('vision_scale', 1.0)
+        self.declare_parameter('vision_shift_x_m', 0.0)
+        self.declare_parameter('vision_shift_y_m', 0.0)
         #: 相机在 base_link 里的位置（xacro 里 camera_offset_* 的值）。
         self.declare_parameter('camera_x_m', -0.302)
         self.declare_parameter('camera_y_m', 0.317)
@@ -249,6 +260,8 @@ class PickPlaceNode(Node):
         self.planned_pre_grasp = None
         #: 影子修正只打一次日志（每帧都打会把终端刷爆）。
         self.shadow_logged = False
+        #: 视觉相似变换修正也只打一次。
+        self.transform_logged = False
         #: 经 IK 预检之后真正用的位姿（label -> 位置）。“退开”那一步直接复用
         #: 起手位，不再问一遍 IK。
         self.fitted = {}
@@ -380,12 +393,12 @@ class PickPlaceNode(Node):
             self._gripper_mode = ''
 
     def _correct_shadow(self, dets):
-        """把单目"影子"偏移从检测点里减掉。
+        """把单目"影子"偏移从检测点里减掉（默认关闭，见参数处的说明）。
 
         这块的像素被投到桌面平面上，方块有 24 mm 高，于是检测点沿"从相机
         指向方块"的方向偏出去，偏移随距离线性增长（见 geometry.shadow_correction
-        的推导真机数据）。不修它的话，"抓不准"永远是一个随位置变化的偏差 ——
-        填死一个 `grasp_offset` 只能修好一条弧线。
+        的推导真机数据）。**perception 已经在 detection.shadow_bias 里减过一次**，
+        这里再减就是 2 倍，所以默认关掉；留着是为了标定时能单独比较两种模型。
         """
         if not bool(self.get_parameter('shadow_fix').value):
             return dets
@@ -419,6 +432,45 @@ class PickPlaceNode(Node):
                 [det.position[0] + shift[0], det.position[1] + shift[1],
                  det.position[2]],
                 det.yaw_rad, det.quaternion, det.extent_m, det.distance_m))
+        return fixed
+
+    def _correct_transform(self, dets):
+        """把量出来的固定视觉偏差（旋转/缩放/平移）加到检测点上。
+
+        2026-10-30 真机：方块摆在实际 (0.000, 0.190)，检测出来是 (-0.024, 0.155)
+        —— 42 mm，而且方向不是沿相机射线，是绕相机转了约 7.4 度（到相机的距离
+        几乎不变）。这类偏差不能用影子公式修（那个只沿射线方向），只能用多组
+        "真值 vs 检测"量出来拟合。默认四个参数是恒等变换，不动就什么都不改。
+        """
+        yaw_deg = float(self.get_parameter('vision_yaw_deg').value)
+        scale = float(self.get_parameter('vision_scale').value)
+        shift = (float(self.get_parameter('vision_shift_x_m').value),
+                 float(self.get_parameter('vision_shift_y_m').value))
+        if not dets or (abs(yaw_deg) < 1e-9 and abs(scale - 1.0) < 1e-12
+                        and abs(shift[0]) < 1e-12 and abs(shift[1]) < 1e-12):
+            return dets
+        pivot = (float(self.get_parameter('camera_x_m').value),
+                 float(self.get_parameter('camera_y_m').value))
+        fixed = []
+        for det in dets:
+            try:
+                xy = g.similarity_correction(
+                    det.position[:2], pivot, np.radians(yaw_deg), scale, shift)
+            except g.GeometryError as exc:
+                self.get_logger().warn('视觉修正跳过：{}'.format(exc))
+                fixed.append(det)
+                continue
+            fixed.append(Detection(
+                [float(xy[0]), float(xy[1]), det.position[2]],
+                det.yaw_rad + np.radians(yaw_deg), det.quaternion, det.extent_m,
+                det.distance_m))
+        if not self.transform_logged:
+            self.transform_logged = True
+            self.get_logger().info(
+                '视觉修正：绕相机 ({:+.3f}, {:+.3f}) 转 {:+.2f} 度、缩放 {:.3f}、'
+                '平移 ({:+.0f}, {:+.0f}) mm'.format(
+                    pivot[0], pivot[1], yaw_deg, scale,
+                    shift[0] * 1e3, shift[1] * 1e3))
         return fixed
 
     def _with_place_point(self, plan):
@@ -644,7 +696,7 @@ class PickPlaceNode(Node):
                                   float(np.linalg.norm([pos.x, pos.y, pos.z]))))
         if not dets:
             return
-        dets = self._correct_shadow(dets)
+        dets = self._correct_transform(self._correct_shadow(dets))
         plan, reasons = grasp_planner.first_graspable(
             dets, self.gripper_model, limits=self.limits,
             approach_m=float(self.get_parameter('approach_m').value),

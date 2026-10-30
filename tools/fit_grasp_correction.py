@@ -21,6 +21,9 @@
     python tools/fit_grasp_correction.py points.csv
     python tools/fit_grasp_correction.py --inline "0.10,0.16,0.080,0.153,0.040,0.140"
     python tools/fit_grasp_correction.py points.csv --mirror-x   # 已知标反了，按镜像读
+    python tools/fit_grasp_correction.py points.csv --pivot -0.302,0.317
+        # 换算成 pick_place 的 vision_yaw_deg / vision_scale / vision_shift_*
+        # （--inline 的行首是负数时 argparse 会把它当选项，写成 --inline="-0.1,..."）
 
 CSV 每行六个数，单位米::
 
@@ -148,6 +151,34 @@ def residual_rms(res):
     return float(np.sqrt((res ** 2).sum(axis=1).mean()))
 
 
+def similarity_params(M, t, pivot):
+    """把 `x' = M x + t` 改成"绕 pivot 转 + 缩放 + 平移"的四个参数。
+
+    pick_place 的视觉修正（`_correct_transform`）就是这种形状：
+
+        x' = pivot + scale * R(yaw) * (x - pivot) + shift
+
+    所以给了 pivot 之后四个参数唯一确定。之所以要换成这个形状，是因为
+    "旋转"只有绕某个点才有意义：同一个刚体变换，绕原点和绕相机写出来的
+    平移量能差好几厘米，直接抄 `t` 会修错地方。
+
+    返回 (转角度数, 缩放, 平移向量, 各向异性残差)。最后一项是 `M` 里
+    被"转+缩放"吃不掉的剪切：很小的数（< 0.01）说明缩放是各向同性的，
+    模型够用；大了说明问题出在某个长度/高度估错，不是标定能修的。
+    """
+    U, sv, Vt = np.linalg.svd(M)
+    R = U @ Vt
+    if np.linalg.det(R) < 0:                # 反射：任何相似变换都做不出来
+        Vt[-1] *= -1
+        R = U @ Vt
+    scale = float(np.sqrt(abs(np.linalg.det(M))))
+    yaw = float(np.arctan2(R[1, 0], R[0, 0]))
+    shift = (M - np.eye(2)) @ pivot + t
+    P = R.T @ M
+    shear = float(np.abs(P - scale * np.eye(2)).max() / max(scale, 1e-9))
+    return np.degrees(yaw), scale, shift, shear
+
+
 def symmetric_about(src, axis, tol=0.02):
     """这组点在某个坐标上是不是成对的（±x 都有点）。
 
@@ -183,6 +214,10 @@ def main():
                     help='输入单位，默认米')
     ap.add_argument('--mirror-x', action='store_true',
                     help='x 已知标反了，按取反后的真值来算')
+    ap.add_argument('--pivot', metavar='X,Y',
+                    help='视觉修正要绕的点（相机正下方），单位米。给了就把拟合结果'
+                         '直接换算成 pick_place 的 vision_yaw_deg / vision_scale / '
+                         'vision_shift_x_m / vision_shift_y_m')
     args = ap.parse_args()
 
     if args.inline:
@@ -236,6 +271,45 @@ def main():
         src = truth if src_cols == (0, 2) else target
         dst = target if dst_cols == (2, 4) else actual
         verdicts[name] = fit_stage(name, src, dst)
+
+    if args.pivot:
+        try:
+            px, py = (float(s) for s in args.pivot.split(','))
+        except ValueError:
+            ap.error('--pivot 要写成 "x,y" 两个数，单位米')
+        pivot = np.array([px, py])
+        _, vis = verdicts['视觉（目标 - 真值）']
+        print(f'\n== 填进 config/pick_place.yaml 的视觉修正（绕 ({px:+.3f}, {py:+.3f}) m）')
+        for model in ('刚体', '仿射'):
+            if model not in vis:
+                continue
+            if model == '刚体':
+                th = vis[model]['theta']
+                M = np.array([[np.cos(th), -np.sin(th)],
+                              [np.sin(th), np.cos(th)]])
+            else:
+                M = vis[model]['M']
+            # 上面拟合出来的是"真值 -> 检测"；节点要的是反过来的
+            # "检测 -> 真值"，所以先求逆，再换算成绕 pivot 的四个参数。
+            try:
+                Minv = np.linalg.inv(M)
+            except np.linalg.LinAlgError:
+                print(f'   「{model}」不可逆，跳过')
+                continue
+            tinv = -Minv @ vis[model]['t']
+            yaw, sc, shift, shear = similarity_params(Minv, tinv, pivot)
+            print(f'   「{model}」拟合（残差 RMS {vis[model]["rms"] * 1000:.1f} mm）：')
+            print(f'     vision_yaw_deg:   {yaw:+.2f}')
+            print(f'     vision_scale:     {sc:.3f}')
+            print(f'     vision_shift_x_m: {shift[0]:+.4f}')
+            print(f'     vision_shift_y_m: {shift[1]:+.4f}')
+            if shear > 0.01:
+                print(f'     注意：还剩 {shear:.3f} 的剪切吃不掉（不是转+缩放能表达的），'
+                      f'说明某个长度或高度估错了，别硬拿这四个数去盖')
+        if '平移' in vis and '刚体' not in vis:
+            t = vis['平移']['t']
+            print(f'   点太少，只能当纯平移：'
+                  f'vision_shift_x_m: {t[0]:+.4f}  vision_shift_y_m: {t[1]:+.4f}')
 
     print('\n' + '=' * 70)
     print('怎么看这些数：')

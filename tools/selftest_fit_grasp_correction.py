@@ -198,6 +198,33 @@ def check_parser(mod):
         fail('第一行数值读错了')
 
 
+def check_similarity_params(mod):
+    """绕 pivot 的"转+缩放+平移"必须能原样重建那个刚体变换。"""
+    print('\n7. 换成"绕 pivot 转+缩放"的参数量，能不能还原原来的变换')
+    pivot = np.array([-0.302, 0.317])
+    src = grid()
+    # 和 geometry.similarity_correction 同一套约定：x' = pivot + s R (x - pivot) + shift
+    th = np.radians(7.4)
+    R = np.array([[np.cos(th), -np.sin(th)], [np.sin(th), np.cos(th)]])
+    scale_want = 0.90
+    M = scale_want * R
+    t = np.array([0.004, -0.006])
+    want = src @ M.T + t
+    yaw, sc, shift, shear = mod.similarity_params(M, t, pivot)
+    close('转角', yaw, 7.4, 1e-9)
+    close('缩放', sc, scale_want, 1e-12)
+    if shear < 1e-9:
+        ok('各向同性，没有剪切残差')
+    else:
+        fail(f'各向同性的数据解出剪切 {shear:.4f}，公式推错了')
+    rebuilt = pivot + sc * (src - pivot) @ R.T + shift
+    err = float(np.abs(rebuilt - want).max())
+    if err < 1e-9:
+        ok(f'重建误差 {err:.2e} m')
+    else:
+        fail(f'重建误差 {err:.2e} m，四个参数没把变换还原完整')
+
+
 def main():
     print('=' * 68)
     print('SELFTEST  fit_grasp_correction')
@@ -214,6 +241,7 @@ def main():
     check_mirror_ambiguous(mod)
     check_too_few_points(mod)
     check_parser(mod)
+    check_similarity_params(mod)
 
     print()
     print('=' * 68)

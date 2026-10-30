@@ -92,6 +92,11 @@ class VisionNode(Node):
         # 已经把定位钉到毫米级，全用只是让 2 Hz 的节点更卡。
         self.declare_parameter('depth_step', 2)
         self.declare_parameter('depth_max_range', depth3d.DEFAULT_MAX_RANGE_M)
+        # 单目影子偏置的系数：`detection.shadow_bias()` 按"半个物体高"修，这个
+        # 系数是它的乘子。1.0 = 照模型全修，0 = 完全不修（标定时想看原始偏差
+        # 就用 0）。2026-10-30 之前这里和 pick_place 的 shadow_fix 各修了一次，
+        # 等于修两倍；现在只由这里修。改这个值不用改代码。
+        self.declare_parameter('shadow_bias_scale', 1.0)
         # 打开后每隔一阵用整幅深度图拟合地面，报相机真实的倾角和离地高度。
         self.declare_parameter('calibrate_plane', False)
 
@@ -358,7 +363,8 @@ class VisionNode(Node):
                 detections = detection.detections_from_blobs(
                     blobs, self.camera, T, self.table_z, self.object_edge,
                     max_edge_error_m=self.max_edge_error, rejects=rejects,
-                    centres=centres)
+                    centres=centres,
+                    object_height_m=self.object_edge * self.shadow_bias_scale)
             except geometry.GeometryError as exc:
                 self.get_logger().error('算抓取点失败：{}'.format(exc))
                 return

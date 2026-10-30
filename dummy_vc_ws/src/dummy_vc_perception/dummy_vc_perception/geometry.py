@@ -248,6 +248,38 @@ def monocular_planar_inflation(object_height_m, camera_height_above_plane_m):
     return z / (z - h)
 
 
+def similarity_correction(position_xy, pivot_xy, yaw_rad, scale=1.0,
+                          shift_xy=(0.0, 0.0)):
+    """绕 pivot 转 yaw、缩放 scale、再平移 —— 现场量出来的固定偏差就用它修。
+
+    为什么需要它：2026-10-30 真机把方块摆在实际 (0.000, 0.190)，日志里检测却是
+    (-0.024, 0.155)，42 mm 的差。方向不是"沿相机射线偏出去"（影子偏置那个模型
+    的方向），而是绕着相机位置**转了 7.4 度** —— 到相机的距离几乎没变。相机
+    位姿、内参主点、装配角度任何一个错都能造出这种差，公式推不出来，只能量。
+
+    所以这里不做任何物理假设：就是给出一个 (yaw, scale, shift) 的相似变换，
+    参数由"真值 - 检测"几组点拟合得到（tools/fit_grasp_correction.py 会给刚体
+    和仿射两种解，刚体解直接就是 yaw + shift）。identity（yaw=0、scale=1、
+    shift=0）时原样返回。
+    """
+    p = np.asarray(position_xy, float).reshape(-1)
+    if p.size != 2:
+        raise GeometryError('similarity_correction 要二维点：position={}'
+                            .format(p.size))
+    pivot = np.asarray(pivot_xy, float).reshape(-1)
+    if pivot.size != 2:
+        raise GeometryError('similarity_correction 的 pivot 要二维：pivot={}'
+                            .format(pivot.size))
+    s = float(scale)
+    if not np.isfinite(s) or s <= 0.0:
+        raise GeometryError('缩放必须是正数：{}'.format(scale))
+    c = math.cos(float(yaw_rad))
+    sn = math.sin(float(yaw_rad))
+    d = p - pivot
+    rotated = np.array([d[0] * c - d[1] * sn, d[0] * sn + d[1] * c])
+    return pivot + s * rotated + np.asarray(shift_xy, float).reshape(-1)
+
+
 def object_center_on_table(x, y, table_z, height_m):
     """桌面上一个高 height_m 的物体的几何中心 —— 顶抓的抓取点高度取它。"""
     return np.array([float(x), float(y), float(table_z) + float(height_m) / 2.0])
