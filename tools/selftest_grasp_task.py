@@ -263,6 +263,25 @@ def check_planner(gripper, planner):
         fail('frame=table 与 frame=base 对同一高度算出了不同的 z')
     else:
         ok('两种 frame 写法能对上（省得再自己减 table_z）')
+    # (d) 放置高度还能"再抬高几个边长"（2026-10-31：松手时物块蹭台面）
+    wp_s = planner.pick_place_waypoints(plan, (-0.175, 0.090), ground,
+                                        place_surface_m=0.055,
+                                        place_clearance_m=0.003)
+    close('松手时物块底面停在台面上方 3 mm',
+          wp_s.place[2] - (ground + 0.055),
+          plan.tcp_offset_m + 0.5 * plan.object_edge_m + 0.003, 1e-12)
+    wp_l = planner.pick_place_waypoints(plan, (-0.175, 0.090), ground,
+                                        place_surface_m=0.055,
+                                        place_clearance_m=0.003,
+                                        place_lift_edges=0.5)
+    close('再抬 0.5 个边长 = 再高半个边长', wp_l.place[2] - wp_s.place[2],
+          0.5 * plan.object_edge_m, 1e-12)
+    wp_l1 = planner.pick_place_waypoints(plan, (-0.175, 0.090), ground,
+                                         place_z=0.055, place_z_frame='table',
+                                         place_lift_edges=1.0)
+    close('place_z 的写法也吃这个抬高', wp_l1.place[2] - wp_t.place[2],
+          plan.object_edge_m, 1e-12)
+
     try:
         planner.pick_place_waypoints(plan, (-0.175, 0.090), ground,
                                      place_z=0.055, place_z_frame='floor')

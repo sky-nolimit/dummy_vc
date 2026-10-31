@@ -163,6 +163,10 @@ class PickPlaceNode(Node):
         #: 松手时物块底面离台面多高（米）。留一点余量：手指张开、物块轻轻
         #: 落下去几毫米，比"贴着台面松手"更不容易蹭倒。
         self.declare_parameter('place_release_clearance_m', 0.003)
+        #: 再抬高几个物块边长（无量纲）。默认 0，不改变原来的高度。
+        #: 2026-10-31 真机：松手时物块还是蹭台面，用户要求再抬半个边长 → 填 0.5。
+        #: 它是加在上面算完的 z 上，松手后物块会掉这么高，落地会偏，别随手调大。
+        self.declare_parameter('place_lift_edges', 0.0)
         #: 抓取点补偿（base_link，米）。视觉 + 执行合起来的系统性偏差，按实测填，
         #: 默认 0。见 tools/fit_grasp_correction.py。
         self.declare_parameter('grasp_offset_x_m', 0.0)
@@ -522,6 +526,7 @@ class PickPlaceNode(Node):
         frame = str(params('place_z_frame').value).strip()
         surface = float(params('place_surface_m').value)
         clearance = float(params('place_release_clearance_m').value)
+        lift_edges = float(params('place_lift_edges').value)
         try:
             wp = grasp_planner.pick_place_waypoints(
                 plan,
@@ -532,7 +537,8 @@ class PickPlaceNode(Node):
                 place_z=None if place_z < -100.0 else place_z,
                 place_z_frame=frame,
                 place_surface_m=None if surface < -100.0 else surface,
-                place_clearance_m=clearance)
+                place_clearance_m=clearance,
+                place_lift_edges=lift_edges)
         except Exception as exc:                # noqa: BLE001
             self.get_logger().warn(
                 '放置点算不出来（{}），这轮就放回抓取点上方'.format(exc))
@@ -554,6 +560,11 @@ class PickPlaceNode(Node):
         else:
             how = '（base_link z，离工作面 {:.1f} mm）'.format(
                 (wp.place[2] - float(params('table_z').value)) * 1e3)
+        if lift_edges:
+            # 每个分支的 how 都以'）'收尾，这里把它换成"再抬高…）"
+            how = '{} + 再抬高 {:.2f} 个边长（{:.1f} mm））'.format(
+                how[:-1], lift_edges,
+                lift_edges * float(plan.object_edge_m) * 1e3)
         self.get_logger().info(
             '放置点 ({:.3f}, {:.3f}, {:+.3f}) m{}'.format(
                 wp.place[0], wp.place[1], wp.place[2], how))
