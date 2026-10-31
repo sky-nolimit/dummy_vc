@@ -185,6 +185,12 @@ class PickPlaceNode(Node):
         self.declare_parameter('vision_scale', 1.0)
         self.declare_parameter('vision_shift_x_m', 0.0)
         self.declare_parameter('vision_shift_y_m', 0.0)
+        #: 2D 单应修正（8 个数，h33 固定 1）：把检测的 (x, y) 映到真值 (x, y)。
+        #: 物体都落在同一张桌面上，工具面到工具面的映射本身就是单应，能比"转+
+        #: 缩放+平移"多吃掉一块透视偏差。2026-10-31 真机 11 个点：留一验证
+        #: 4.3 mm（平移 18.9、仿射 8.8；修之前平均 54.6）。全零 = 不用。
+        #: 拟合：tools/fit_vision_homography.py points.csv
+        self.declare_parameter('vision_homography', [0.0] * 8)
         #: 相机在 base_link 里的位置（xacro 里 camera_offset_* 的值）。
         self.declare_parameter('camera_x_m', -0.302)
         self.declare_parameter('camera_y_m', 0.317)
@@ -262,6 +268,7 @@ class PickPlaceNode(Node):
         self.shadow_logged = False
         #: 视觉相似变换修正也只打一次。
         self.transform_logged = False
+        self.homography_logged = False
         #: 经 IK 预检之后真正用的位姿（label -> 位置）。“退开”那一步直接复用
         #: 起手位，不再问一遍 IK。
         self.fitted = {}
@@ -435,13 +442,21 @@ class PickPlaceNode(Node):
         return fixed
 
     def _correct_transform(self, dets):
-        """把量出来的固定视觉偏差（旋转/缩放/平移）加到检测点上。
+        """把量出来的视觉偏差加到检测点上。
 
-        2026-10-30 真机：方块摆在实际 (0.000, 0.190)，检测出来是 (-0.024, 0.155)
-        —— 42 mm，而且方向不是沿相机射线，是绕相机转了约 7.4 度（到相机的距离
-        几乎不变）。这类偏差不能用影子公式修（那个只沿射线方向），只能用多组
-        "真值 vs 检测"量出来拟合。默认四个参数是恒等变换，不动就什么都不改。
+        优先走 `vision_homography`（2D 单应，8 个数）：物体都落在同一张桌面上，
+        工具面到工具面的映射本身就是单应，能把"转/缩放/平移"表达不了的透视偏差
+        一起吃掉。2026-10-30 真机：方块实际 (0.000, 0.190)、检测 (-0.024, 0.155)
+        —— 42 mm，方向是绕相机转了 7 度多，影子公式（只沿射线）修不到这种；
+        2026-10-31 用 11 个点拟合后留一误差 4.3 mm。两边参数都是空的默认值，
+        什么都不填时这里不改任何数。
+
+        单应只在标定过的范围里可信（这批点是 x -0.10~+0.10、y 0.15~0.35 m）。
         """
+        matrix = [float(v) for v in
+                  self.get_parameter('vision_homography').value]
+        if len(matrix) == 8 and any(abs(v) > 1e-12 for v in matrix):
+            return self._correct_homography(dets, matrix)
         yaw_deg = float(self.get_parameter('vision_yaw_deg').value)
         scale = float(self.get_parameter('vision_scale').value)
         shift = (float(self.get_parameter('vision_shift_x_m').value),
@@ -471,6 +486,27 @@ class PickPlaceNode(Node):
                 '平移 ({:+.0f}, {:+.0f}) mm'.format(
                     pivot[0], pivot[1], yaw_deg, scale,
                     shift[0] * 1e3, shift[1] * 1e3))
+        return fixed
+
+    def _correct_homography(self, dets, matrix):
+        """按 2D 单应挪检测点。方块的 yaw 不动：单应只说明"面上的点怎么挪"，
+        不说明方块绕自己竖轴转了多少，硬套线性部分反而会把朝向拧歪。"""
+        fixed = []
+        for det in dets:
+            try:
+                xy = g.homography_correction(det.position[:2], matrix)
+            except g.GeometryError as exc:
+                self.get_logger().warn('单应修正跳过：{}'.format(exc))
+                fixed.append(det)
+                continue
+            fixed.append(Detection(
+                [float(xy[0]), float(xy[1]), det.position[2]],
+                det.yaw_rad, det.quaternion, det.extent_m, det.distance_m))
+        if not self.homography_logged:
+            self.homography_logged = True
+            self.get_logger().info(
+                '视觉修正：2D 单应 [{}]'.format(
+                    ', '.join('{:.4f}'.format(v) for v in matrix)))
         return fixed
 
     def _with_place_point(self, plan):

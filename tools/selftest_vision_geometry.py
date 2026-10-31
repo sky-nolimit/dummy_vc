@@ -1129,6 +1129,61 @@ def check_vision_correction(geometry):
     ok('缩放非正/维度不对时抛 GeometryError')
 
 
+def check_homography(geometry):
+    """2D 单应：恒等、平移、从点反解（含仿射特例）、退化要报错。"""
+    print('--- 14. 2D 单应修正（桌面上的检测 -> 真值）')
+    identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+    close('恒等单应不改点',
+          geometry.homography_correction((0.12, 0.23), identity),
+          np.array([0.12, 0.23]), 1e-12)
+    shift = [1.0, 0.0, 0.025, 0.0, 1.0, -0.040, 0.0, 0.0]
+    close('单应能表达平移',
+          geometry.homography_correction((0.0, 0.2), shift),
+          np.array([0.025, 0.160]), 1e-12)
+
+    # 反解：给一组"检测 = 仿射(真值)"的点（仿射是单应的特例），拟合出来必须能
+    # 把每个检测点原样送回真值 —— 顺便验证 h33 归一化和点数多于 4 时的最小二乘。
+    truth = np.array([[0.00, 0.15], [0.10, 0.15], [0.10, 0.35], [0.00, 0.35],
+                      [-0.10, 0.25], [0.05, 0.30]])
+    det = truth @ np.array([[0.90, 0.15], [-0.12, 1.08]]) + np.array([0.02, -0.03])
+    matrix = geometry.homography_from_points(det, truth)
+    back = np.array([geometry.homography_correction(p, matrix) for p in det])
+    err = float(np.abs(back - truth).max())
+    if err < 1e-9:
+        ok(f'从点反解的单应能还原到 {err * 1e6:.1f} um 以内')
+    else:
+        fail(f'反解的单应还原不了原点，最大差 {err * 1e3:.2f} mm')
+
+    # 四点正好够、共线不够、少于 4 组不够，都要抛 GeometryError
+    quad = truth[:4]
+    matrix4 = geometry.homography_from_points(quad + [0.01, 0.02], quad)
+    back4 = np.array([geometry.homography_correction(p, matrix4)
+                      for p in quad + [0.01, 0.02]])
+    if float(np.abs(back4 - quad).max()) < 1e-9:
+        ok('4 个点也能定出单应')
+    else:
+        fail('4 个点的单应还原不回去')
+    line = np.array([[0.0, 0.0], [0.1, 0.0], [0.2, 0.0], [0.3, 0.0]])
+    for label, src, dst in (
+            ('共线', line, line + [0.0, 0.01]),
+            ('只有 3 组', line[:3], line[:3] + [0.0, 0.01]),
+            ('维度不对', truth[:4, :1], truth[:4])):
+        try:
+            geometry.homography_from_points(src, dst)
+        except geometry.GeometryError:
+            continue
+        fail(f'{label}的点没有抛 GeometryError')
+    ok('共线/点数不够/维度不对时抛 GeometryError')
+    for bad in ([1.0, 0.0], [float('nan')] + identity[1:],
+                [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 0.0]):
+        try:
+            geometry.homography_correction((1.0, 1.0), bad)
+        except geometry.GeometryError:
+            continue
+        fail(f'单应参数 {bad} 没抛 GeometryError')
+    ok('参数个数不对/非有限/分母退化时抛 GeometryError')
+
+
 def main():
     print(f'reading {os.path.relpath(PKG_ROOT, REPO)}')
     geometry, gripper, detection, depth3d = load_modules()
@@ -1151,6 +1206,7 @@ def main():
     check_depth(geometry, depth3d, detection)
     check_shadow_correction(geometry)
     check_vision_correction(geometry)
+    check_homography(geometry)
 
     print()
     if FAILURES:

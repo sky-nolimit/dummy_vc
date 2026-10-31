@@ -280,6 +280,68 @@ def similarity_correction(position_xy, pivot_xy, yaw_rad, scale=1.0,
     return pivot + s * rotated + np.asarray(shift_xy, float).reshape(-1)
 
 
+def homography_correction(position_xy, matrix):
+    """用 8 个数的单应矩阵，把"检测到"的平面点映到真值上。
+
+    为什么用单应而不是相似/仿射：2026-10-31 真机 11 个点量下来，
+    "平移+缩放"留一验证误差 14 mm、仿射 9 mm、单应 4.5 mm。工具面到工具面的
+    映射本身就是单应（透视投影把平面映成平面），相机的位姿、俯仰、主点任何
+    一个不准，都落在这个模型里；反过来说，只要物体还在同一张桌面上，它比
+    经验公式更站得住。
+
+    matrix 是行主序的 8 个数 `h11 h12 h13 h21 h22 h23 h31 h32`，`h33` 固定 1。
+    identity 等于 `[1, 0, 0, 0, 1, 0, 0, 0]`。
+    """
+    p = np.asarray(position_xy, float).reshape(-1)
+    if p.size != 2:
+        raise GeometryError('homography_correction 要二维点：position={}'
+                            .format(p.size))
+    m = np.asarray(matrix, float).reshape(-1)
+    if m.size != 8:
+        raise GeometryError(
+            '单应矩阵要 8 个数（h11 h12 h13 h21 h22 h23 h31 h32，h33 固定 1）：'
+            '收到 {} 个'.format(m.size))
+    if not np.all(np.isfinite(m)):
+        raise GeometryError('单应矩阵里有非有限数：{}'.format(list(m)))
+    h = np.append(m, 1.0).reshape(3, 3)
+    v = h @ np.array([p[0], p[1], 1.0])
+    if not np.all(np.isfinite(v)) or abs(v[2]) < 1e-9:
+        raise GeometryError('单应矩阵在 ({:.4f}, {:.4f}) 处退化（分母 {:.3g}）'
+                            .format(p[0], p[1], v[2]))
+    return np.array([v[0] / v[2], v[1] / v[2]])
+
+
+def homography_from_points(src, dst):
+    """由至少 4 组对应点拟合 src -> dst 的单应，返回 8 个数（见上）。
+
+    DLT（直接线性变换）的最小二乘解。点必须不共线，否则矩阵退化，这里会
+    检查并抛 GeometryError，而不是返回一个看着能用、实际把点甩飞的矩阵。
+    """
+    s = np.asarray(src, float)
+    d = np.asarray(dst, float)
+    if s.ndim != 2 or s.shape[1] != 2 or s.shape != d.shape:
+        raise GeometryError('拟合单应要两组同样形状的 (N, 2) 点：src={} dst={}'
+                            .format(s.shape, d.shape))
+    if len(s) < 4:
+        raise GeometryError('拟合单应至少要 4 组点：收到 {} 组'.format(len(s)))
+    if not (np.all(np.isfinite(s)) and np.all(np.isfinite(d))):
+        raise GeometryError('对应点里有非有限数')
+    rows = []
+    for (x, y), (u, v) in zip(s, d):
+        rows.append([-x, -y, -1.0, 0.0, 0.0, 0.0, u * x, u * y, u])
+        rows.append([0.0, 0.0, 0.0, -x, -y, -1.0, v * x, v * y, v])
+    _, sv, vt = np.linalg.svd(np.asarray(rows, float))
+    h = vt[-1].reshape(3, 3)
+    if abs(h[2, 2]) < 1e-12:
+        raise GeometryError('单应拟合退化：h33≈0（点可能共线或重复）')
+    h = h / h[2, 2]
+    if sv[-2] < 1e-12:
+        raise GeometryError('单应拟合退化：对应点共线，解不唯一')
+    return [float(v) for v in (h[0, 0], h[0, 1], h[0, 2],
+                               h[1, 0], h[1, 1], h[1, 2],
+                               h[2, 0], h[2, 1])]
+
+
 def object_center_on_table(x, y, table_z, height_m):
     """桌面上一个高 height_m 的物体的几何中心 —— 顶抓的抓取点高度取它。"""
     return np.array([float(x), float(y), float(table_z) + float(height_m) / 2.0])
