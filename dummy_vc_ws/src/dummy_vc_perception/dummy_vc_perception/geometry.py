@@ -311,6 +311,26 @@ def homography_correction(position_xy, matrix):
     return np.array([v[0] / v[2], v[1] / v[2]])
 
 
+def outside_region(position_xy, region):
+    """检测点是否落在标定覆盖框外？
+
+    `region` 是 `[x0, x1, y0, y1]`（base_link，米），两个方向谁大谁小都行。
+    框外的单应是**外推**：11 个标定点只覆盖 x −0.10~+0.10、y 0.15~0.35 m，
+    出了这个范围，同一套 8 个数能把 4 mm 的残差放大到几十 mm，而它不会报错、
+    看日志也看不出来。所以调用方至少应该喊一声。
+    """
+    r = np.asarray(region, float).reshape(-1)
+    if r.size != 4:
+        raise GeometryError('标定覆盖框要 4 个数 [x0, x1, y0, y1]：收到 {} 个'
+                            .format(r.size))
+    p = np.asarray(position_xy, float).reshape(-1)
+    if p.size != 2:
+        raise GeometryError('outside_region 要二维点：position={}'.format(p.size))
+    x_lo, x_hi = min(r[0], r[1]), max(r[0], r[1])
+    y_lo, y_hi = min(r[2], r[3]), max(r[2], r[3])
+    return not (x_lo <= p[0] <= x_hi and y_lo <= p[1] <= y_hi)
+
+
 def homography_from_points(src, dst):
     """由至少 4 组对应点拟合 src -> dst 的单应，返回 8 个数（见上）。
 

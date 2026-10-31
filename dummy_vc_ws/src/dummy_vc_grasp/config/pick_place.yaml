@@ -99,6 +99,10 @@ pick_place_node:
     # 重新拟合：python tools/fit_vision_homography.py points.csv
     # 单应 8 个数按 h11 h12 h13 h21 h22 h23 h31 h32 排（h33 固定 1），全零 = 不修。
     vision_homography: [0.946544, -0.064271, -0.000145, 0.221230, 1.218887, 0.031054, 0.522664, 0.470759]
+    # 上面那套单应标定时覆盖的范围 [x0, x1, y0, y1]（base_link，米）。检测点出框
+    # 只会在日志里喊一声（不拦）：框外是外推，误差可能从 4 mm 涨到几十毫米。
+    # 换到别的区域抓，先在这个区域重新标一遍，再改这里的框。
+    vision_homography_region: [-0.10, 0.10, 0.15, 0.35]
     # 下面四个是单应的弱化版（绕相机转/缩放/平移），单应全零时才生效；
     # 默认恒等变换。拟合：python tools/fit_grasp_correction.py points.csv --pivot -0.302,0.317
     vision_yaw_deg: 0.0                  # 绕相机正上方转多少度

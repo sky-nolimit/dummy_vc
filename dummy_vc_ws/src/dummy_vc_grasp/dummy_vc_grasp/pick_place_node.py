@@ -199,6 +199,11 @@ class PickPlaceNode(Node):
         #: 4.3 mm（平移 18.9、仿射 8.8；修之前平均 54.6）。全零 = 不用。
         #: 拟合：tools/fit_vision_homography.py points.csv
         self.declare_parameter('vision_homography', [0.0] * 8)
+        #: 上面那套单应标定时覆盖的范围（base_link，米）：[x0, x1, y0, y1]。
+        #: 2026-10-31 的 11 个点在 x −0.10~+0.10、y 0.15~0.35 m 内。检测落在
+        #: 框外时单应是外推，误差会从 4 mm 涨到几十 mm 且不报错，所以日志里喊一次。
+        self.declare_parameter('vision_homography_region',
+                               [-0.10, 0.10, 0.15, 0.35])
         #: 相机在 base_link 里的位置（xacro 里 camera_offset_* 的值）。
         self.declare_parameter('camera_x_m', -0.302)
         self.declare_parameter('camera_y_m', 0.317)
@@ -277,6 +282,8 @@ class PickPlaceNode(Node):
         #: 视觉相似变换修正也只打一次。
         self.transform_logged = False
         self.homography_logged = False
+        #: 标定框外的警告只喊一次，免得每帧刷屏
+        self._region_warned = False
         #: 经 IK 预检之后真正用的位姿（label -> 位置）。“退开”那一步直接复用
         #: 起手位，不再问一遍 IK。
         self.fitted = {}
@@ -498,8 +505,13 @@ class PickPlaceNode(Node):
 
     def _correct_homography(self, dets, matrix):
         """按 2D 单应挪检测点。方块的 yaw 不动：单应只说明"面上的点怎么挪"，
-        不说明方块绕自己竖轴转了多少，硬套线性部分反而会把朝向拧歪。"""
+        不说明方块绕自己竖轴转了多少，硬套线性部分反而会把朝向拧歪。
+
+        检测点落在标定框外时只喊一声（不拦）：单应在外推区可能差几十毫米，
+        但总比不修强，而且真拦下来就完全抓不到了。
+        """
         fixed = []
+        region = list(self.get_parameter('vision_homography_region').value)
         for det in dets:
             try:
                 xy = g.homography_correction(det.position[:2], matrix)
@@ -507,6 +519,20 @@ class PickPlaceNode(Node):
                 self.get_logger().warn('单应修正跳过：{}'.format(exc))
                 fixed.append(det)
                 continue
+            if not self._region_warned and region:
+                try:
+                    if g.outside_region(xy, region):
+                        self._region_warned = True
+                        self.get_logger().warn(
+                            '检测点 ({:+.3f}, {:+.3f}) 落在单应标定框外（x {}~{}、'
+                            'y {}~{}）：修正值是外推，可能偏几十毫米。要在这个区域'
+                            '用得重新标定'.format(
+                                xy[0], xy[1], min(region[0], region[1]),
+                                max(region[0], region[1]),
+                                min(region[2], region[3]),
+                                max(region[2], region[3])))
+                except g.GeometryError:
+                    pass                    # 框参数写坏了就算了，不影响抓取
             fixed.append(Detection(
                 [float(xy[0]), float(xy[1]), det.position[2]],
                 det.yaw_rad, det.quaternion, det.extent_m, det.distance_m))
@@ -531,10 +557,16 @@ class PickPlaceNode(Node):
         surface = float(params('place_surface_m').value)
         clearance = float(params('place_release_clearance_m').value)
         lift_edges = float(params('place_lift_edges').value)
+        # 放置点也要吃同一个执行偏差：`grasp_offset_*` 修的是"机械臂把命令位置
+        # 执行偏了"这件事，它跟抓取还是放置无关。只修抓取的话，方块会被搬到
+        # 离放置点同样远的地方（2026-10-31 实测是 38 mm）。
+        off_x = float(params('grasp_offset_x_m').value)
+        off_y = float(params('grasp_offset_y_m').value)
         try:
             wp = grasp_planner.pick_place_waypoints(
                 plan,
-                (float(params('place_x').value), float(params('place_y').value)),
+                (float(params('place_x').value) + off_x,
+                 float(params('place_y').value) + off_y),
                 float(params('table_z').value),
                 approach_m=float(params('approach_m').value),
                 lift_m=float(params('lift_m').value),
@@ -569,9 +601,13 @@ class PickPlaceNode(Node):
             how = '{} + 再抬高 {:.2f} 个边长（{:.1f} mm））'.format(
                 how[:-1], lift_edges,
                 lift_edges * float(plan.object_edge_m) * 1e3)
+        note = ''
+        if off_x or off_y:
+            note = '，已含执行偏差 {:+.0f}/{:+.0f} mm'.format(off_x * 1e3,
+                                                         off_y * 1e3)
         self.get_logger().info(
-            '放置点 ({:.3f}, {:.3f}, {:+.3f}) m{}'.format(
-                wp.place[0], wp.place[1], wp.place[2], how))
+            '放置点 ({:.3f}, {:.3f}, {:+.3f}) m{}{}'.format(
+                wp.place[0], wp.place[1], wp.place[2], how, note))
         return replace(plan, waypoints=wp)
 
     def _gripper_ready_to_move(self):

@@ -1183,6 +1183,33 @@ def check_homography(geometry):
         fail(f'单应参数 {bad} 没抛 GeometryError')
     ok('参数个数不对/非有限/分母退化时抛 GeometryError')
 
+    # 标定覆盖框：框外=外推，必须能判出来（2026-10-31 那 11 个点只覆盖
+    # x −0.10~+0.10、y 0.15~0.35，出了这个范围单应会把 4 mm 放大到几十 mm）
+    region = [-0.10, 0.10, 0.15, 0.35]
+    inside = geometry.outside_region((0.0, 0.20), region)
+    if inside:
+        fail('框内的点被当成框外了')
+    else:
+        ok('标定框内判成框内')
+    for label, p in (('x 偏小', (-0.15, 0.20)), ('x 偏大', (0.12, 0.20)),
+                     ('y 偏小', (0.0, 0.10)), ('y 偏大', (0.0, 0.40))):
+        if not geometry.outside_region(p, region):
+            fail(f'{label} 的点 {p} 没被判成框外')
+            break
+    else:
+        ok('四个方向出框都能判出来')
+    # 框的写反了（x0 > x1）也得认，不能因为顺序就把整片区域判成框外
+    if geometry.outside_region((-0.05, 0.20), [0.10, -0.10, 0.35, 0.15]):
+        fail('框的两个方向写反了就判错了')
+    else:
+        ok('框的端点写反了也能认')
+    for bad in ([-0.1, 0.1, 0.15], [0.0, 0.0, 0.0, 0.0, 0.0]):
+        try:
+            geometry.outside_region((0.0, 0.2), bad)
+        except geometry.GeometryError:
+            continue
+        fail(f'框参数 {bad} 没抛 GeometryError')
+
 
 def main():
     print(f'reading {os.path.relpath(PKG_ROOT, REPO)}')
