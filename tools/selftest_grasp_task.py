@@ -155,6 +155,21 @@ def check_planner(gripper, planner):
     close('起手位在抓取点上方 80 mm', wp.pre_grasp - wp.grasp, [0, 0, 0.08], 1e-12)
     close('抬升位在抓取点上方 100 mm', wp.lift - wp.grasp, [0, 0, 0.10], 1e-12)
     close('开口 = 边长 + 2 mm', plan.open_width_m, 0.024 + 0.002, 1e-12)
+    # 2026-10-31：开口按比例放大，给"执行偏差"留容差。1.0 必须还是原来的
+    # 边长+2 mm，1.8 是 24×1.8+2 = 45.2 mm（侧向容差 ±10.6 mm）。
+    wide = planner.plan_grasp(good, model, open_ratio=1.8)
+    close('open_ratio=1.8：开口 = 边长×1.8 + 2 mm', wide.open_width_m,
+          0.024 * 1.8 + 0.002, 1e-12)
+    close('放大开口不动抓取点', wide.waypoints.grasp, plan.waypoints.grasp, 1e-12)
+    try:
+        planner.plan_grasp(good, model, open_ratio=0.5)
+    except ValueError as exc:
+        if '1.0' in str(exc):
+            ok('open_ratio < 1 立刻报错（开口比方块还窄）')
+        else:
+            fail(f'open_ratio<1 的报错没讲清楚：{exc}')
+    else:
+        fail('open_ratio=0.5 竟然没报错')
     # 2026-10-22 真机日志里的拟合尺寸：长边是方块投到地面的"影子"，被低机位
     # 拉长到方块的 3.6 倍，只有短边挨着真实尺寸。vision 现在发的 bbox.size 是
     # 标称方框（不是这个拟合尺寸），这条断言守的是"哪天把拟合尺寸接进来"。

@@ -126,7 +126,8 @@ def plan_grasp(detection, model: gr.FingerOpeningModel,
                tip_to_centre_m: float = DEFAULT_TIP_TO_CENTRE_M,
                fingertip_clearance_m: float = DEFAULT_FINGERTIP_CLEARANCE_M,
                object_offset=(0.0, 0.0),
-               yaw_snap_deg: float = DEFAULT_YAW_SNAP_DEG) -> GraspPlan:
+               yaw_snap_deg: float = DEFAULT_YAW_SNAP_DEG,
+               open_ratio: float = 1.0) -> GraspPlan:
     """由一次检测生成抓取计划；不能抓就抛 NotGraspable，原因写在消息里。
 
     `detection.position` 是**方块中心**（视觉给的就是这个），而 `gripper_tcp`
@@ -173,9 +174,16 @@ def plan_grasp(detection, model: gr.FingerOpeningModel,
                 p[2], limits.max_height_m))
 
     edge = _object_edge(detection)
-    # 宽度是纯算术（边长 + 2 mm 余量），未实测的模型也能算；真正的闸门在
-    # command_for_width()，只有状态机走到合爪那一步才会碰它。
-    open_width = model.grasp_width_for(edge)
+    # 宽度 = 边长 × open_ratio + 2 mm 余量。默认 1.0，就是原来的"边长 + 2 mm"。
+    # 2026-10-31 真机：26 mm 的开口对 24 mm 方块只有每侧 1 mm 的侧向容差，
+    # 执行误差一到 10 mm 就是"手指顶在棱上、把方块推走"。开口放大 k 倍，
+    # 侧向容差变成 (k−1)·边长/2，姿态容差也跟着变大；代价是手指要多开合一段。
+    # 真正的闸门仍在 command_for_width()，最大开口超了这里就拒。
+    if not float(open_ratio) >= 1.0:
+        raise ValueError(
+            'open_ratio 不能小于 1.0（开口比方块还窄就夹不到）：{}'.format(
+                open_ratio))
+    open_width = model.grasp_width_for(edge * float(open_ratio))
 
     # 手指要张得开：开口不能小于方块，也不能超过实测的最大开口。
     if open_width > model.width_open_m.value + 1e-9:

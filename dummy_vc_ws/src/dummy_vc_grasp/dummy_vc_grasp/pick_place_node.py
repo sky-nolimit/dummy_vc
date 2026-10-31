@@ -171,6 +171,10 @@ class PickPlaceNode(Node):
         #: 默认 0。见 tools/fit_grasp_correction.py。
         self.declare_parameter('grasp_offset_x_m', 0.0)
         self.declare_parameter('grasp_offset_y_m', 0.0)
+        #: 下探前的开口 = 边长 × 这个比例 + 2 mm。默认 1.0（= 边长 + 2 mm）。
+        #: 2026-10-31 真机：26 mm 开口对 24 mm 方块每侧只剩 1 mm 容差，执行误差
+        #: 一有 10 mm 就顶在棱上把方块推走。调大比例，侧向容差 = (比例−1)·边长/2。
+        self.declare_parameter('grasp_open_ratio', 1.0)
         #: 抓取朝向量化到多少度。90 = 只分横着夹/竖着夹；0 = 照抄视觉的 yaw。
         self.declare_parameter('grasp_yaw_snap_deg',
                                grasp_planner.DEFAULT_YAW_SNAP_DEG)
@@ -751,7 +755,8 @@ class PickPlaceNode(Node):
             object_offset=(float(self.get_parameter('grasp_offset_x_m').value),
                            float(self.get_parameter('grasp_offset_y_m').value)),
             yaw_snap_deg=float(
-                self.get_parameter('grasp_yaw_snap_deg').value))
+                self.get_parameter('grasp_yaw_snap_deg').value),
+            open_ratio=float(self.get_parameter('grasp_open_ratio').value))
         for why in reasons:
             self.get_logger().info('跳过：{}'.format(why))
         if plan is None:
