@@ -74,3 +74,11 @@ reference/**/node_modules/
 # 需要看它的时候直接读 `reference/Firmware/esp32-iot/`。
 reference/Firmware/esp32-iot/
 
+
+# --- tools/ 下的开发工具（2026-10-31 起不再入仓，只留本地）---
+#
+# 这些探测/标定/检查脚本与"把机器人跑起来"无关，改动频繁、只在开发机上用。
+# 文件仍然在磁盘上、照常可跑，只是不进版本库；需要它们时看本地 tools/。
+# 保留 tools/README.md 本身，用来说明这件事。
+tools/*
+!tools/README.md
