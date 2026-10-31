@@ -170,6 +170,20 @@ def check_planner(gripper, planner):
             fail(f'open_ratio<1 的报错没讲清楚：{exc}')
     else:
         fail('open_ratio=0.5 竟然没报错')
+    # 2026-10-31：换大一点的方块时 1.8 倍会算到上限之外，以前直接拒抓。
+    # 现在截到上限照抓，并让 plan 记住"被截过"。
+    if wide.open_clamped:
+        fail('24 mm 方块 45.2 mm 开口不该被截')
+    else:
+        ok('24 mm 方块没到上限，不截')
+    big = FakeDetection([0.0, 0.30, ground + 0.015], extent=(0.030, 0.030))
+    big_plan = planner.plan_grasp(big, model, open_ratio=1.8)
+    close('30 mm 方块 ×1.8 = 56 mm 截到上限 55 mm', big_plan.open_width_m,
+          model.width_open_m.value, 1e-12)
+    if big_plan.open_clamped:
+        ok('截了口之后 plan.open_clamped 为真（节点据此报警）')
+    else:
+        fail('截了口却没标记 open_clamped')
     # 2026-10-22 真机日志里的拟合尺寸：长边是方块投到地面的"影子"，被低机位
     # 拉长到方块的 3.6 倍，只有短边挨着真实尺寸。vision 现在发的 bbox.size 是
     # 标称方框（不是这个拟合尺寸），这条断言守的是"哪天把拟合尺寸接进来"。

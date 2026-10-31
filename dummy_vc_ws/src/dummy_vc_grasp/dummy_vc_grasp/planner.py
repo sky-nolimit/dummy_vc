@@ -64,6 +64,9 @@ class GraspPlan:
     #: 夹持中心（TCP）比方块中心高多少。手指有 17.5 mm 长，不停高一点就会
     #: 插进桌子 —— 见 plan_grasp() 的 docstring。
     tcp_offset_m: float = 0.0
+    #: 算出来的开口超过夹爪最大开口、被截到了上限。截了照样能抓，只是侧向/
+    #: 姿态容差比 open_ratio 想要的窄，调用方该把这件事喊出来。
+    open_clamped: bool = False
 
     def describe(self):
         wp = self.waypoints
@@ -185,11 +188,12 @@ def plan_grasp(detection, model: gr.FingerOpeningModel,
                 open_ratio))
     open_width = model.grasp_width_for(edge * float(open_ratio))
 
-    # 手指要张得开：开口不能小于方块，也不能超过实测的最大开口。
-    if open_width > model.width_open_m.value + 1e-9:
-        raise NotGraspable(
-            '要 {:.1f} mm 开口，夹爪最大只有 {:.1f} mm'.format(
-                open_width * 1e3, model.width_open_m.value * 1e3))
+    # 开口超上限就截到上限，别拒抓：55 mm 对 30 mm 方块还有每侧 12 mm 容差，
+    # 拒抓等于"明明能夹却不动"。截了多少由 plan.open_clamped 告诉调用方。
+    max_open = float(model.width_open_m.value)
+    clamped = open_width > max_open + 1e-9
+    if clamped:
+        open_width = max_open
 
     tcp_offset = fingertip_clearance_m + tip_to_centre_m - 0.5 * edge
     grasp_point = np.array([p[0], p[1], p[2] + tcp_offset], float)
@@ -205,7 +209,8 @@ def plan_grasp(detection, model: gr.FingerOpeningModel,
     return GraspPlan(waypoints=wp, object_edge_m=edge, open_width_m=open_width,
                      yaw_rad=yaw, reach_m=reach,
                      gripper_ready=bool(model.verified),
-                     tcp_offset_m=float(tcp_offset))
+                     tcp_offset_m=float(tcp_offset),
+                     open_clamped=clamped)
 
 
 def pick_place_waypoints(plan: GraspPlan, place_xy, table_z, approach_m=0.08,

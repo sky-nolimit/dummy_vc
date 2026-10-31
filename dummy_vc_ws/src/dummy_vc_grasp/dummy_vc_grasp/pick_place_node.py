@@ -167,6 +167,9 @@ class PickPlaceNode(Node):
         #: 2026-10-31 真机：松手时物块还是蹭台面，用户要求再抬半个边长 → 填 0.5。
         #: 它是加在上面算完的 z 上，松手后物块会掉这么高，落地会偏，别随手调大。
         self.declare_parameter('place_lift_edges', 0.0)
+        #: 松手后回读一次开口，确认方块真的脱开了。张开后开口还卡在方块附近
+        #: = 方块被指头带住了，等手臂一退就会拖走 —— 这时认输比继续退更安全。
+        self.declare_parameter('place_release_check', True)
         #: 抓取点补偿（base_link，米）。视觉 + 执行合起来的系统性偏差，按实测填，
         #: 默认 0。见 tools/fit_grasp_correction.py。
         self.declare_parameter('grasp_offset_x_m', 0.0)
@@ -680,6 +683,31 @@ class PickPlaceNode(Node):
             '合爪：方块 {:.1f} mm，下发 {:.1f} mm（窄 {:.1f} mm 预压），等回读…'
             .format(edge_m * 1e3, target * 1e3, (edge_m - target) * 1e3))
 
+    def _check_released(self):
+        """松手判据：张开后的回读宽度还卡在方块附近，说明方块没脱开。
+
+        只在放置那一步（OPEN_GRIPPER）判：全开 55 mm、夹着方块时回读停在边长
+        附近，两者差得远，取中间当界就够。没有回读就只提示、不判死。
+        """
+        if not bool(self.get_parameter('place_release_check').value):
+            return
+        if self.machine.state is not task_mod.State.OPEN_GRIPPER:
+            return
+        width = self.gripper_width_m
+        if width is None:
+            self.get_logger().warn('松手后没有夹爪回读，无法确认方块是否脱开')
+            return
+        edge = float(self.plan.object_edge_m) if self.plan else 0.0
+        open_m = float(self.get_parameter('gripper_open_m').value)
+        if width < 0.5 * (edge + open_m):
+            self._decide_failure(
+                '松手后开口只有 {:.1f} mm（方块 {:.1f} mm，全开 {:.1f} mm）：'
+                '方块还夹在指间，再退就会把它拖走'.format(
+                    width * 1e3, edge * 1e3, open_m * 1e3))
+            return
+        self.get_logger().info('松手确认：开口 {:.1f} mm，方块已脱开'.format(
+            width * 1e3))
+
     def _check_gripper(self):
         """合爪/张爪的等待逻辑。由 `_tick` 每 100 ms 调一次。"""
         mode = getattr(self, '_gripper_mode', '')
@@ -696,6 +724,7 @@ class PickPlaceNode(Node):
                 else:
                     self.get_logger().info('张爪：实测 {:.1f} mm'.format(
                         self.gripper_width_m * 1e3))
+                self._check_released()
             return
         result = gripper_gate_mod.verdict(
             self._gripper_target, self.gripper_width_m,
@@ -803,6 +832,13 @@ class PickPlaceNode(Node):
         self.plan = plan
         self.last_detection = dets[0]
         self.get_logger().info('抓到目标：{}'.format(plan.describe()))
+        if plan.open_clamped:
+            self.get_logger().warn(
+                '开口被截到夹爪上限 {:.1f} mm（grasp_open_ratio={:.2f} 想要的更宽）：'
+                '侧向容差只剩 ±{:.1f} mm'.format(
+                    plan.open_width_m * 1e3,
+                    float(self.get_parameter('grasp_open_ratio').value),
+                    (plan.open_width_m - plan.object_edge_m) * 0.5 * 1e3))
         self._decide(task_mod.Event.TARGET)
 
     # ------------------------------------------------------------------
