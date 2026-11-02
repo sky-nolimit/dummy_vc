@@ -1,12 +1,10 @@
 """工作面（地面 + 地台）的碰撞体，纯几何，不 import ROS。
 
-为什么需要这一层：规划器只认识 URDF 里的东西。桌子、地台都不在 URDF 里，
-于是"规划成功"只保证机械臂不会撞到它自己。抓取的最后一段是往下走，规划器
-不知道脚底下有地面，就会给出从桌面里穿过去的路径 —— 而且它是有理由的：
-按它知道的信息，那里什么都没有。
+规划器只认识 URDF 里的东西：桌子、地台都不在 URDF 里，于是"规划成功"只保证
+机械臂不会撞到它自己。抓取的最后一段是往下走，规划器不知道脚底下有地面，就会
+给出从桌面里穿过去的路径 —— 按它知道的信息，那里确实什么都没有。
 
-这个模块只算"盒子该多大、该放在哪"，与 ROS 无关，所以能在没有 ROS 的机器上
-用 `tools/selftest_grasp_task.py` 直接验：
+本模块只算"盒子该多大、该放在哪"，可以离线验，两条判据：
 
     * 地面的**顶面**必须正好在 `table_z`（差 1 mm 就等于多一层台阶）
     * 地台不能伸进 `base_link` 的实体里（顶面留 1 mm 余量），否则起始状态
@@ -32,9 +30,9 @@ DEFAULT_BASE_BOTTOM_Z_M = -0.0155
 #: 把"接触"也算碰撞，于是起始状态永远在碰撞里。
 DEFAULT_BASE_CLEARANCE_M = 0.001
 
-#: 地台是两层（2026-10-21 实测）：上层和底座一样大、高 1 cm，机械臂固定在它
-#: 上面；下层 20x20 cm、高 1.5 cm，中心在 base_link 的 +y 4 cm 处（前沿
-#: +14 cm、后沿 -6 cm，左右各留 5 cm）。
+#: 地台是两层（实测）：上层和底座一样大、高 1 cm，机械臂固定在它上面；
+#: 下层 20x20 cm、高 1.5 cm，中心在 base_link 的 +y 4 cm 处（前沿 +14 cm、
+#: 后沿 -6 cm，左右各留 5 cm）。
 DEFAULT_PLATFORM_UPPER_HEIGHT_M = 0.010
 DEFAULT_PLATFORM_LOWER_SIZE_M = 0.20
 DEFAULT_PLATFORM_LOWER_HEIGHT_M = 0.015
@@ -88,7 +86,7 @@ def base_platform_boxes(table_z=None, footprint_m=DEFAULT_BASE_FOOTPRINT_M,
                         lower_size_m=DEFAULT_PLATFORM_LOWER_SIZE_M,
                         lower_height_m=DEFAULT_PLATFORM_LOWER_HEIGHT_M,
                         lower_center_y_m=DEFAULT_PLATFORM_LOWER_CENTER_Y_M):
-    """两层地台，2026-10-21 在整机上量出来的。
+    """两层地台，整机实测尺寸。
 
     上层：和底座（那个 10x10 cm 的黑盒子）一样大，高 1 cm，机械臂整个固定在
           它上面，所以它就在 base_link 正下方居中。

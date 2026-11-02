@@ -1,89 +1,79 @@
-# pick_place_node（阶段 5）的默认参数
+# pick_place_node 的默认参数
 #
-# 用法（VM 上）：
+# 用法（VM 上；move_group 与 vision_node 已经起着）：
 #   ros2 run dummy_vc_grasp pick_place_node --ros-args \
 #     --params-file $(ros2 pkg prefix dummy_vc_grasp)/share/dummy_vc_grasp/config/pick_place.yaml \
 #     -p auto_start:=true
-#
-# 前置：move_group 已经起来（moveit_hardware.launch.py 或 demo.launch.py 都行），
-# 以及 vision_node 正在发 /detected_objects。
 pick_place_node:
   ros__parameters:
     # ---- 接口 ----
     detections_topic: "/detected_objects"
     move_action: "/move_action"          # MoveIt 的 MoveGroup 动作
     planning_group: "dummy_arm"
-    ee_link: "gripper_tcp"               # 规划链的末端（xacro 里那个占位值）
+    ee_link: "gripper_tcp"               # 规划链末端（xacro 里的占位值）
     base_frame: "base_link"
 
     # ---- 安全 ----
-    # 默认只规划不执行：第一次上机先看它打算往哪儿走，别让没验过的链路驱动机械臂。
+    # 默认只规划不执行：第一次上机先看它打算往哪儿走，再让链路驱动机械臂。
     execute: false
     max_velocity_scaling: 0.15
     max_acceleration_scaling: 0.15
     planning_time_s: 5.0
 
     # ---- 抓取几何 ----
-    approach_m: 0.08                     # 起手位在抓取点上方多少
-    lift_m: 0.10                         # 合爪之后抬多少
-    # 放置点（首期由参数给定，不由视觉算）。base_link 坐标，米；负 x 在底座
-    # 右侧、+y 朝相机。用户实测要放 (-175, +90) mm。
+    approach_m: 0.08                     # 起手位高出抓取点（米）
+    lift_m: 0.10                         # 合爪后抬升（米）
+    # 放置点（参数给定，不由视觉算）。base_link 坐标，米；负 x 在底座
+    # 右侧、+y 朝相机。
     place_x: -0.175
     place_y: 0.090
-    # 放置点高度，两种写法，**优先用下面那个 place_surface_m**。
+    # 放置高度两种写法，**优先用 place_surface_m**。
     # 1) place_z 量的是 **TCP（夹持中心）** 的高度：
     #      'table'（默认）= 从桌面往上量；'base' = base_link 里的绝对 z
     #      （桌面在 -0.0405）。"TCP 在桌面上方 55 mm" → 0.055 + 'table'。
     # 2) place_surface_m 量的是 **放置台顶面** 的高度（人拿尺子量的台子）：
     #      节点按"松手时物块底面停在台面上方 place_release_clearance_m"倒推
-    #      TCP，自动把"夹持中心比方块中心高 tcp_offset、方块半个高"加进去。
+    #      TCP，自动把夹持中心偏移与半个方块高加进去。
     #
-    # 2026-10-30 踩过的坑：台子本身 55 mm 高，而 place_z 被填成 0.055 ——
-    # 那是 TCP 落在台面上，24 mm 的方块要陷进台面 20.5 mm，手指也插进台面。
-    # 现在台子高度写在 place_surface_m 里，place_z 保持 -999（不生效）。
+    # 别把台子高度填进 place_z：那是 TCP 落在台面上，方块会陷进台面、手指
+    # 也插进台面。台子高度写在 place_surface_m，place_z 保持 -999（不生效）。
     place_z: -999.0
     place_z_frame: table
     place_surface_m: 0.055               # 放置台顶面离桌面 55 mm（实测）
     place_release_clearance_m: 0.003     # 松手时物块底面离台面 3 mm
-    # 再抬高几个物块边长。2026-10-31 真机：按上面算完松手时物块还是蹭台面，
-    # 用户要求再抬半个边长 → 0.5（24 mm 方块 ≈ 12 mm）。0 = 不额外抬。
+    # 再抬高几个物块边长（0.5 = 半个边长，24 mm 方块约 12 mm）。0 = 不额外抬。
     # 注意物块松手后会掉这么高，落地位置会偏一点。
     place_lift_edges: 0.5
     # 松手后回读一次开口：还卡在方块附近就说明没脱开，判失败（再退会拖走方块）。
     # 没有回读只警告、不判死。
     place_release_check: true
 
-    # ---- 抓不准的补偿（2026-10-27 加）----
+    # ---- 抓不准的补偿 ----
     # 视觉和执行各有一段系统性偏差，量出来的数直接加在视觉给的抓取点上。
-    # 别猜：用 tools/fit_grasp_correction.py 拿实测点拟合，填均值即可。
-    # 2026-10-31 实测：把物块手动喂进夹爪、读视觉检测，换算成真值后与"目标"
-    # 相减，两个点给出同一个常数平移 (-17.1, -34.7) / (-17.1, -33.0) mm ——
-    # 说明是机械臂把命令位置执行偏了（模型/零点层面），不是视觉算错。
-    # 这两个数取均值、符号反过来（offset 是加在检测点上的）：
-    #   命令 = 真值 - d，d = 实际 - 命令
-    # 属于补偿，不是根治；根治要先用散开的点确认这个偏移是否全场恒定。
+    # 命令 = 真值 - d（d = 实际 - 命令），所以 offset 取的是 -d。
+    # 别猜，用实测点拟合填均值。属于补偿，不是根治；根治要先确认这个偏移
+    # 是否全场恒定。
     grasp_offset_x_m: 0.017
     grasp_offset_y_m: 0.034
     # 下探前的开口 = 边长 × 比例 + 2 mm。1.0 就是原来的"边长 + 2 mm"（24 mm
-    # 方块 → 26 mm），每侧只剩 1 mm 容差，执行误差一到 10 mm 就顶在棱上把方块
-    # 推走。2026-10-31 改成 1.8（24 mm → 45.2 mm），侧向容差 ±10.6 mm，
-    # 姿态容差也跟着变大；抓住之后再由 grasp_offset 修"夹得正不正"。
+    # 方块 → 26 mm），每侧只剩 1 mm 容差，执行误差一到 10 mm 就顶在棱上把
+    # 方块推走。1.8 给到 45.2 mm，侧向容差 ±10.6 mm，姿态容差也跟着变大；
+    # 抓住之后再由 grasp_offset 修"夹得正不正"。
     # 上限是实测最大开口 55 mm：算出来超了就截到 55 mm 照抓（日志会警告），
     # 不拒抓 —— 55 mm 对 30 mm 方块仍有每侧 12 mm 容差。
     grasp_open_ratio: 1.8
-    # 抓取朝向量化到多少度。方块是正方形、横着竖着都能夹，所以 90 度足够：
-    # 只要按 90 度量化，腕部就不用为了"迁就视觉给的 55.3 度"多转半圈。
-    # 设成 0 就完全照抄视觉的 yaw（2026-10-27 之前的默认行为）。
+    # 抓取朝向量化到多少度。方块是正方形、横竖都能夹，90 度足够：按 90 度
+    # 量化，腕部就不用为了"迁就视觉给的 55.3 度"多转半圈。
+    # 设成 0 就完全照抄视觉的 yaw。
     grasp_yaw_snap_deg: 90.0
-    # 单目"影子"修正。视觉把像素投到桌面平面上，可方块有 24 mm 高，于是检测点
-    # 沿"相机→方块"的射线偏出去，偏移 = 半个方块高 × (距相机的水平距离 / 相机
-    # 离桌面的高度)。这个偏差随位置线性变化，填一个固定 `grasp_offset` 只能修好
-    # 一条弧线，所以按几何修。
+    # 单目"影子"修正。视觉把像素投到桌面平面上，可方块有 24 mm 高，于是检测
+    # 点沿"相机→方块"的射线偏出去，偏移 = 半个方块高 × (距相机的水平距离 /
+    # 相机离桌面的高度)。这个偏差随位置线性变化，填一个固定 grasp_offset 只能
+    # 修好一条弧线，所以按几何修。
     #
-    # 2026-10-30：**默认关掉**。perception 的 `detection.shadow_bias()` 在单目路
-    # 上已经减过一次同样的量，这里再减就是修两倍（实测看起来是"往相机方向拉"）。
-    # 改由 perception 的 `shadow_bias_scale` 一处控制。留这个开关是为了标定时
-    # 能单独比较"修/不修"两种结果，不是日常要开的。
+    # **默认关掉**：perception 的 detection.shadow_bias() 在单目路上已经减过
+    # 一次同样的量，这里再减就是修两倍。改由 perception 的 shadow_bias_scale
+    # 一处控制。留这个开关是为了标定时能单独比较"修/不修"，不是日常要开的。
     shadow_fix: false
     shadow_fix_scale: 1.0                # 1.0 = 按半高公式全修；完全不修设 0
     camera_x_m: -0.302                   # 相机在 base_link 里的位置，和 URDF 同源
@@ -92,23 +82,18 @@ pick_place_node:
     table_z: -0.0405                     # 工作面；和 perception 的实测值同源
 
     # ---- 视觉固定偏差 ----
-    # 2026-10-30 真机：方块实际在 (0.000, 0.190)，视觉给 (-0.024, 0.155)，
-    # 差 42 mm。这个偏差不在"沿相机射线"的方向上（影子模型只能修那个方向），
-    # 单点等效于绕相机转约 -7.4 度，但单点分不开"转"和"缩放/平移"。
-    #
-    # 2026-10-31 用 11 个点（x -0.10~+0.10、y 0.15~0.35 m，每点记真值和日志里的
-    # base_link）量了一遍，留一验证：平移 18.9 mm、仿射 8.8 mm、2D 单应 4.3 mm
-    # （修之前平均 54.6 mm）。所以用下面的单应，不用"转/缩放/平移"那四个数。
-    # 它在标定范围外没量过，别拿它修远处的东西。
-    # 重新拟合：python tools/fit_vision_homography.py points.csv
+    # 不在"沿相机射线"方向上的固定偏差（影子模型只能修那个方向），用单应修。
+    # 实测残差：单应 4.3 mm、仿射 8.8 mm、平移 18.9 mm（修之前平均 54.6 mm），
+    # 所以用单应，不用"转/缩放/平移"那四个数。
     # 单应 8 个数按 h11 h12 h13 h21 h22 h23 h31 h32 排（h33 固定 1），全零 = 不修。
+    # 它在标定范围外没量过，别拿它修远处的东西。
     vision_homography: [0.946544, -0.064271, -0.000145, 0.221230, 1.218887, 0.031054, 0.522664, 0.470759]
     # 上面那套单应标定时覆盖的范围 [x0, x1, y0, y1]（base_link，米）。检测点出框
     # 只会在日志里喊一声（不拦）：框外是外推，误差可能从 4 mm 涨到几十毫米。
     # 换到别的区域抓，先在这个区域重新标一遍，再改这里的框。
     vision_homography_region: [-0.10, 0.10, 0.15, 0.35]
     # 下面四个是单应的弱化版（绕相机转/缩放/平移），单应全零时才生效；
-    # 默认恒等变换。拟合：python tools/fit_grasp_correction.py points.csv --pivot -0.302,0.317
+    # 默认恒等变换。
     vision_yaw_deg: 0.0                  # 绕相机正上方转多少度
     vision_scale: 1.0                    # 到相机的水平距离缩放
     vision_shift_x_m: 0.0                # 最后在 base 系里平移
@@ -117,8 +102,8 @@ pick_place_node:
     min_reach_m: 0.15
 
     # ---- 节奏 ----
-    # 等 /detected_objects 等多久算超时。别设太小：Orbbec 的合成节点容器起来
-    # 要十几秒，15 秒会把"相机还没起来"误报成"桌上没方块"（实测踩过）。
+    # 等 /detected_objects 等多久算超时。别设太小：相机节点容器起来要十几秒，
+    # 15 秒会把"相机还没起来"误报成"桌上没方块"。
     observe_timeout_s: 60.0
     action_timeout_s: 40.0               # 单个 MoveIt 目标最多等多久
     max_retries: 2                       # 可重试的步骤失败后最多再来几次
@@ -135,24 +120,22 @@ pick_place_node:
     cartesian_min_fraction: 0.95         # 直线覆盖率低于这个值就退回关节空间
 
     # ---- 可达性预检：顶抓姿态抬不高时往下压 ----
-    # 2026-10-22 真机：方块在 r≈0.30 m，起手位（抓取点 +80 mm）发过去 MoveIt
-    # 回 error_code=99999，ompl 报 "Unable to sample any valid states for goal
-    # tree"。离线 FK/IK 验算的结论是**够不着**、不是碰撞：夹爪 +y 朝下时，
-    # r=0.302 m 处 z 最多到 0.00 附近（抓取点上方约 20 mm），而 0.060 m 要
-    # 抬 60 mm。所以发目标前先问一次 /compute_ik，无解就往下压，压到下限还
-    # 无解就报"物体太远，挪近点"，不再让 MoveIt 白等 5 秒再给个空错误码。
+    # 顶抓时夹爪 +y 朝下，远处（r≈0.30 m）的起手位可能够不着：这时 MoveIt 回
+    # error_code=99999、ompl 报 "Unable to sample any valid states for goal
+    # tree"。所以发目标前先问一次 /compute_ik，无解就往下压，压到下限还无解
+    # 就报"物体太远，挪近点"，不让 MoveIt 白等 5 秒再给个空错误码。
     ik_service: "/compute_ik"
     ik_timeout_s: 0.2                    # 单次 IK 最多等多久（秒）
     approach_min_m: 0.005                # 起手位最多压到离抓取点多高（米）
     approach_step_m: 0.01                # 每次往下压多少（米）
 
     # ---- 夹爪：走 USB-CAN 旁路 ----
-    # 2026-10-27 定案：驱动里那条 `hand.*` 不能用。`hand.set_angle` 发的是
-    # 0x382，而在这块板子上 0x382 是**触发标定**（真机上把夹爪的编码器表擦了，
-    # 见 docs/04 的 A2-补充5）。现在夹爪由 `gripper_can_node` 直接走适配器：
-    #   /gripper/width   (std_msgs/Float64，毫米) —— 手指目标开口
-    #   /gripper/position(std_msgs/Float64，毫米) —— 0x3A3 回读
-    # 打开前先确认 can0 起来了（`ip -br link show can0`），否则合爪会一直报警。
+    # 驱动里那条 hand.* 不能用：hand.set_angle 发的是 0x382，而在这块板子上
+    # 0x382 是**触发标定**（真机上把夹爪的编码器标定表擦了）。夹爪改由
+    # gripper_can_node 直接走适配器：
+    #   /gripper/width    (std_msgs/Float64，毫米) —— 手指目标开口
+    #   /gripper/position (std_msgs/Float64，毫米) —— 0x3A3 回读
+    # 打开前先确认 can0 起来了（ip -br link show can0），否则合爪会一直报警。
     gripper_enabled: false               # true = 真的合爪；false = 走到竖直下降就停
     gripper_cmd_topic: "/gripper/width"
     gripper_state_topic: "/gripper/position"

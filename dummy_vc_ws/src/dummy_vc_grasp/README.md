@@ -5,14 +5,12 @@
 
 | 文件 | 依赖 | 能不能离线自测 |
 | --- | --- | --- |
-| `planner.py` | numpy + `dummy_vc_perception` 的几何层 | ✅ `tools/selftest_grasp_task.py` |
-| `scene_objects.py` | numpy + `dummy_vc_perception` 的实测值 | ✅ 同上（顶面/留缝/零厚度都验） |
-| `task.py` | 只有标准库 | ✅ 同上（把每条迁移边都走一遍） |
-| `pick_place_node.py` / `scene_node.py` | ROS 2 + `moveit_msgs` | ❌ 只能在 VM 上跑 |
+| `planner.py` | numpy + `dummy_vc_perception` 的几何层 | 能，纯 numpy |
+| `scene_objects.py` | numpy + `dummy_vc_perception` 的实测值 | 能（顶面/留缝/零厚度都验） |
+| `task.py` | 只有标准库 | 能（把每条迁移边都走一遍） |
+| `pick_place_node.py` / `scene_node.py` | ROS 2 + `moveit_msgs` | 不能，只能在 VM 上跑 |
 
-```bash
-python tools/selftest_grasp_task.py     # 不需要 ROS
-```
+离线自测、标定与检查脚本只在开发机上，不随仓库分发。
 
 ## 一次抓取的顺序
 

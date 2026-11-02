@@ -1,39 +1,26 @@
 """MoveIt demo: plan and drag in RViz WITHOUT the real arm.
 
-Purpose
--------
-Planning can be exercised with no hardware at all. `move_group` accepts the
-planned trajectory and the model follows the plan in RViz. That separates "the
-planner is configured correctly" from "the device accepts the trajectory" --
-two failures that look identical from the outside when you go straight to
-hardware.
-
-If this launch shows the arm moving along planned paths in RViz but the hardware
-launch does not, the fault is in the controller interface or the driver, not in
-the MoveIt configuration.
+Planning can be exercised with no hardware: `move_group` accepts the planned
+trajectory and the model follows the plan in RViz. That separates "the planner is
+configured correctly" from "the device accepts the trajectory" -- two failures that
+look identical when you go straight to hardware. If this launch moves the arm in
+RViz but the hardware launch does not, the fault is in the controller interface or
+the driver, not in the MoveIt configuration.
 
     ros2 launch dummy_vc_moveit_config demo.launch.py
-
-Unlike the hardware launch, this one runs `joint_state_publisher_gui`, because
-there is no driver publishing /joint_states. Drag the sliders to set a start
-state, then use the MotionPlanning panel.
-
     ros2 launch dummy_vc_moveit_config demo.launch.py gui:=false
 
-On this file's construction
----------------------------
-It deliberately uses only the MoveItConfigsBuilder methods that are safe across
-MoveIt releases, and it PRINTS what it loaded. An earlier version chained a
-method whose parameter names differ between releases, and the resulting error
-("Caught multiple exceptions when trying to load file") said nothing about the
-cause. Anything version-sensitive is therefore either avoided or reported:
+Unlike the hardware launch, this one runs `joint_state_publisher_gui` because no
+driver publishes /joint_states. Drag the sliders to set a start state, then use the
+MotionPlanning panel.
 
-  * `planning_scene_monitor` is not configured through the builder; move_group
-    uses its own defaults. Those defaults are adequate for planning, and the
-    values that matter for hardware (allowed_start_tolerance, execution duration
-    scaling) live in config/moveit_controllers.yaml, which IS loaded.
-  * `moveit_config.to_dict()` is printed, so a missing or wrong entry is visible
-    in the launch log instead of surfacing later as a mysterious planner failure.
+Construction: only MoveItConfigsBuilder methods that are safe across MoveIt
+releases, and it PRINTS what it loaded, so a missing entry is visible in the launch
+log instead of surfacing later as a mysterious planner failure. Anything
+version-sensitive is avoided or reported: `planning_scene_monitor` is not configured
+through the builder (move_group uses its own defaults, adequate for planning; the
+values that matter for hardware live in config/moveit_controllers.yaml, which IS
+loaded), and `moveit_config.to_dict()` is printed.
 """
 import os
 
@@ -52,14 +39,12 @@ def generate_launch_description():
 
     # The URDF is named EXPLICITLY instead of being left to inference.
     #
-    # MoveItConfigsBuilder otherwise has to work out where the URDF lives, and
-    # on Humble it only looks at `<share>/.setup_assistant` -- not at
-    # `config/.setup_assistant`. When that lookup fails it does NOT raise; it
+    # On Humble, MoveItConfigsBuilder only looks for `<share>/.setup_assistant` --
+    # not `config/.setup_assistant`. When that lookup fails it does NOT raise; it
     # logs `Cannot infer URDF ... using config/dummy2.urdf`, that file does not
-    # exist either, and you get an empty robot_description. The three errors
-    # this produces (empty robot_description in robot_state_publisher, missing
-    # robot_description in move_group, empty document in rviz2) mention neither
-    # the URDF nor the lookup.
+    # exist either, and you get an empty robot_description. The three resulting
+    # errors (empty robot_description in robot_state_publisher, missing one in
+    # move_group, empty document in rviz2) mention neither the URDF nor the lookup.
     #
     # Passing the path removes the guess. The check below turns the remaining
     # silent fallback into a loud failure.
@@ -68,7 +53,7 @@ def generate_launch_description():
         raise RuntimeError(
             f'URDF 不在 {urdf_path}。dummy2_urdf_description 没构建出来，'
             f'或者它的 urdf/ 没有装进 share/。先跑：\n'
-            f'    python3 tools/check_moveit_vm_paths.py\n'
+            f'    确认 install/ 下有 dummy2_urdf 的 share 目录\n'
             f'（不在这里静默回退，是因为回退的后果是一串指向别处的报错）')
 
     builder = MoveItConfigsBuilder(

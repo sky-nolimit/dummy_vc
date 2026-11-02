@@ -1,18 +1,12 @@
 """把工作面（地面 + 地台）发进 MoveIt 的 planning scene。
 
-不这么做的后果很具体：规划器不知道脚下有地面，于是"往下抓"的最后一段可以
-规划出一条从地面里穿过去的路径 —— 而且它认为自己是正确的。碰撞检查只看
-planning scene，URDF 里没有桌子。
+不发的话规划器不知道脚下有地面，"往下抓"的最后一段会规划出穿过地面的路径，
+而且它认为自己是正确的 —— 碰撞检查只看 planning scene，URDF 里没有桌子。
 
-为什么是**反复发**而不是只发一次：`/planning_scene` 的订阅端（move_group 的
-scene monitor）用的是什么 QoS 由 MoveIt 决定，只发一次的话，"场景节点先起、
-move_group 后起"这种情况就永远收不到。每 2 秒重发一次是最省事的稳妥做法
-（一条消息，几十字节）。
+要**反复发**而不是只发一次：`/planning_scene` 订阅端的 QoS 由 MoveIt 决定，
+只发一次的话，"场景节点先起、move_group 后起"就永远收不到，所以每 2 秒重发一次。
 
-关掉它：`ros2 run dummy_vc_grasp scene_node --ros-args -p publish:=false`，
-或者干脆不起这个节点。想要干净地移除时，用 `clear:=true` 发一条 REMOVE。
-
-    ros2 run dummy_vc_grasp scene_node
+关掉用 `--ros-args -p publish:=false`，干净移除用 `-p clear:=true` 发一条 REMOVE。
 """
 import rclpy
 from geometry_msgs.msg import Pose

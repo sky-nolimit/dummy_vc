@@ -1,25 +1,15 @@
-"""阶段 5 的 ROS 接线：订阅检测 -> 生成抓取路点 -> 让 MoveIt 走完 -> 夹爪。
+"""阶段 5 的 ROS 接线：订阅检测 → 生成抓取路点 → 让 MoveIt 走完 → 夹爪。
 
-这一层只做几件事，其余全在 `planner.py` / `task.py` 里（那两层能离线自测）：
+订阅 `/detected_objects`、下发 MoveIt 的 `MoveGroup` 目标、把结果翻译成状态机
+事件；规划与状态机在 `planner.py` / `task.py` 里（那两层能离线自测）。
 
-  1. 订阅 `/detected_objects`，把 `Detection3D` 转成 `SceneDetection`
-  2. 调 MoveIt 的 `MoveGroup` 动作（plan+execute 一个 goal 搞定，碰撞检查与
-     路径插值都还是 MoveIt 在管，不用自己拼轨迹）
-  3. 把动作结果翻译成状态机事件，按状态机给的 action 决定下一步
-  4. 走到合爪那一步时问 `gripper.FingerOpeningModel` 要角度；没实测就停
+**下降（APPROACH）不走关节空间规划**：关节空间只保证"某条无碰撞的关节轨迹
+存在"，最后 8 cm 可能斜着下去甚至从侧面绕，而抓取要求从正上方压下去，所以改用
+`GetCartesianPath` 算一条竖直直线；覆盖率低于 `cartesian_min_fraction` 才退回
+关节空间。地面与地台的碰撞体由 `scene_node.py` 加，不在 URDF 里。
 
-两处例外值得单独说：
-
-* **下降（APPROACH）不走关节空间规划**，改用 `GetCartesianPath` 算一条竖直
-  直线。关节空间规划只保证"某条无碰撞的关节轨迹存在"，于是最后 8 cm 可以是
-  斜着下去、甚至从侧面绕 —— 抓取恰恰要求从正上方压下去。算出来不够直
-  （`fraction < cartesian_min_fraction`）就退回关节空间并在日志里说清楚。
-* **碰撞体由 `scene_node.py` 负责**，这个节点只管"往哪走"。地面和地台不在
-  URDF 里，没有它们，规划器会认为脚下什么都没有。
-
-**默认不执行，只规划**（`execute:=false`）。理由：夹爪 A2 没解决、相机与机械臂
-还不能同时在线，这条链第一次上机时最该先看的是"它打算往哪儿走"，而不是让一台
-没验过的节点直接驱动机械臂。确认路点对了再加 `-p execute:=true`。
+**默认不执行，只规划**（`execute:=false`）：先看它打算往哪儿走，确认路点后再加
+`-p execute:=true`。
 """
 
 import time
@@ -51,8 +41,7 @@ from dummy_vc_grasp import scene_objects as scene
 from dummy_vc_grasp import task as task_mod
 
 
-#: MoveIt 的 error_code 翻译。负数那一串数字本身什么也没说，得配一句"下一步
-#: 该看哪儿"，不然真机上只能对着 -4 猜。
+#: MoveIt 的 error_code 翻译：负数本身看不出原因，得配一句"下一步该看哪儿"。
 _MOVEIT_ERROR_TEXT = {
     0: '失败（FAILURE，没细分原因）',
     -1: '规划失败（PLANNING_FAILED）：同一场景下没有可行路径',
@@ -80,8 +69,7 @@ def describe_moveit_error(code):
 class Detection(object):
     """`dummy_vc_perception.detection.SceneDetection` 的等价物。
 
-    视觉节点发的是 `Detection3DArray`，里面没有"拟合边长"这种字段，但有
-    bbox.size —— 边长就从 bbox 取，其余照抄。
+    视觉节点发的是 `Detection3DArray`，没有"拟合边长"这种字段，边长取 bbox.size。
     """
 
     def __init__(self, position, yaw_rad, quaternion, extent_m, distance_m):
@@ -107,28 +95,24 @@ class PickPlaceNode(Node):
         self.declare_parameter('base_frame', 'base_link')
 
         # -- 安全 -----------------------------------------------------------
-        # 默认只规划不执行：链路第一次上机时先看它打算往哪儿走。
+        # 默认只规划不执行：先确认路点，再开执行。
         self.declare_parameter('execute', False)
         self.declare_parameter('max_velocity_scaling', 0.15)
         self.declare_parameter('max_acceleration_scaling', 0.15)
         self.declare_parameter('planning_time_s', 5.0)
 
         # -- 夹爪 -----------------------------------------------------------
-        #
-        # 夹爪**不走驱动**：驱动里那条 `hand.*` 会把 0x382 当"设角度"发出去，而
-        # 在真板子上 0x382 是**触发标定**（详见 docs/04 的 A2 与 gripper_frames）。
-        # 现在走旁路：`gripper_can_node` 把 `/gripper/width`（毫米）编成 0x385，
-        # 把 0x3A3 回读发到 `/gripper/position`。这条通道 2026-10-27 真机验过。
-        #
-        # 默认 `gripper_enabled=False`：没有 USB-CAN 适配器的人跑这个 demo，
-        # 照样能验到"竖直下降"那一步，然后在合爪处停下 —— 与以前的默认行为一致。
+        # 夹爪**不走驱动**：驱动里的 `hand.*` 把 0x382 当"设角度"发出去，而真板子
+        # 上 0x382 是**触发标定**。走旁路：`gripper_can_node` 把 `/gripper/width`
+        # （毫米）编成 0x385，回读发到 `/gripper/position`。
+        # `gripper_enabled=False` 时不碰夹爪：能验到竖直下降，然后在合爪处停下。
         self.declare_parameter('gripper_enabled', False)
         self.declare_parameter('gripper_cmd_topic', '/gripper/width')
         self.declare_parameter('gripper_state_topic', '/gripper/position')
         #: 夹爪节点自报的零点状态（ready / default_zero / no_zero）。零点没量出来
-        #: 时它会拒绝一切移动命令，这里就在"开始动"之前先拦掉。
+        #: 时它会拒绝一切移动命令，所以要在"开始动"之前拦掉。
         self.declare_parameter('gripper_status_topic', '/gripper/status')
-        #: 张开到多宽。55 是机械满开，但 53 以上会顶到本体堵转，留一点余量
+        #: 张开到多宽：55 mm 是机械满开，53 mm 以上会顶到本体堵转，留一点余量
         self.declare_parameter('gripper_open_m', 0.050)
         #: 闭合时比方块窄多少（有这点预压才有夹持力）
         self.declare_parameter('gripper_clearance_m', 0.002)
@@ -147,64 +131,56 @@ class PickPlaceNode(Node):
         self.declare_parameter('place_x', 0.0)
         self.declare_parameter('place_y', 0.10)
         #: 放置点高度。小于 -100 表示没设，按"工作面 + approach_m"算。
-        #: 怎么量由 `place_z_frame` 决定：'table' = 从桌面往上量的高度（人拿尺子
-        #: 量的就是这种），'base' = base_link 里的绝对 z。桌面在 base_link 的
-        #: z = -0.0405，所以"桌面上方 55 mm"两种写法分别是 0.055 / +0.0145。
-        #: **注意这是 TCP 的高度，不是放置台的高度**；放了台子就用下面的
-        #: `place_surface_m`，别用这个。
+        #: 口径由 `place_z_frame` 决定：'table' = 从桌面往上量（人拿尺子量的就是
+        #: 这种），'base' = base_link 里的绝对 z。桌面在 base_link 的 z = -0.0405，
+        #: 所以"桌面上方 55 mm"两种写法分别是 0.055 / +0.0145。
+        #: **这是 TCP 的高度，不是放置台的高度**；放了台子就用 `place_surface_m`。
         self.declare_parameter('place_z', -999.0)
         self.declare_parameter('place_z_frame', 'table')
         #: 放置台顶面离工作面多高（米）。设了就**优先于** `place_z`：节点按
         #: "松手时物块底面停在台面上方 place_release_clearance_m"倒推 TCP。
-        #: 2026-10-30 的坑：台子本身 55 mm 高，而 place_z 填的 55 mm 被当成
-        #: TCP 高度 —— 等于要 24 mm 的方块陷进台面 20.5 mm，手指也会插进台面。
-        #: 小于 -100 表示没有台子（直接用桌面）。
+        #: 别把台子高度填进 `place_z`：那会被当成 TCP 高度，24 mm 方块会陷进台面
+        #: 20.5 mm，手指也插进台面。小于 -100 表示没有台子（直接用桌面）。
         self.declare_parameter('place_surface_m', -999.0)
         #: 松手时物块底面离台面多高（米）。留一点余量：手指张开、物块轻轻
         #: 落下去几毫米，比"贴着台面松手"更不容易蹭倒。
         self.declare_parameter('place_release_clearance_m', 0.003)
-        #: 再抬高几个物块边长（无量纲）。默认 0，不改变原来的高度。
-        #: 2026-10-31 真机：松手时物块还是蹭台面，用户要求再抬半个边长 → 填 0.5。
-        #: 它是加在上面算完的 z 上，松手后物块会掉这么高，落地会偏，别随手调大。
+        #: 再抬高几个物块边长（无量纲），加在上面算完的 z 上，默认 0。
+        #: 松手后物块会掉这么高，落地会偏，别随手调大。
         self.declare_parameter('place_lift_edges', 0.0)
-        #: 松手后回读一次开口，确认方块真的脱开了。张开后开口还卡在方块附近
-        #: = 方块被指头带住了，等手臂一退就会拖走 —— 这时认输比继续退更安全。
+        #: 松手后回读一次开口，确认方块真的脱开。开口还卡在方块附近 = 方块被指头
+        #: 带住，手臂一退就会拖走，这时认输比继续退更安全。
         self.declare_parameter('place_release_check', True)
-        #: 抓取点补偿（base_link，米）。视觉 + 执行合起来的系统性偏差，按实测填，
-        #: 默认 0。见 tools/fit_grasp_correction.py。
+        #: 抓取点补偿（base_link，米）：视觉 + 执行合起来的系统性偏差，按实测填，
+        #: 默认 0。
         self.declare_parameter('grasp_offset_x_m', 0.0)
         self.declare_parameter('grasp_offset_y_m', 0.0)
         #: 下探前的开口 = 边长 × 这个比例 + 2 mm。默认 1.0（= 边长 + 2 mm）。
-        #: 2026-10-31 真机：26 mm 开口对 24 mm 方块每侧只剩 1 mm 容差，执行误差
-        #: 一有 10 mm 就顶在棱上把方块推走。调大比例，侧向容差 = (比例−1)·边长/2。
+        #: 比例 1.0 时 26 mm 开口对 24 mm 方块每侧只剩 1 mm 容差，执行误差一大就
+        #: 顶在棱上把方块推走。调大比例，侧向容差 = (比例−1)·边长/2。
         self.declare_parameter('grasp_open_ratio', 1.0)
         #: 抓取朝向量化到多少度。90 = 只分横着夹/竖着夹；0 = 照抄视觉的 yaw。
         self.declare_parameter('grasp_yaw_snap_deg',
                                grasp_planner.DEFAULT_YAW_SNAP_DEG)
         #: 单目"影子"修正：方块有高度、像素却被投到桌面平面上，检测点会沿
-        #: "从相机指向方块"的方向系统性偏出去，且偏移随距离增长。
-        #:
-        #: 2026-10-30 起默认**关掉**：perception 的 `detection.shadow_bias()` 已经
-        #: 减过一次，这里再减就是修两倍（真机这点上等于多修了 28 mm，把方块往
-        #: 相机方向拽）。要动这个模型的系数，改 perception 的 shadow_bias_scale。
+        #: "从相机指向方块"的方向偏出去，且偏移随距离增长。
+        #: 默认**关掉**：perception 的 `detection.shadow_bias()` 已经减过一次，这里
+        #: 再减就是修两倍。要动这个模型的系数，改 perception 的 shadow_bias_scale。
         self.declare_parameter('shadow_fix', False)
         self.declare_parameter('shadow_fix_scale', 1.0)
         #: 量出来的固定视觉偏差：绕相机位置转 yaw 度、缩放、再平移（米）。
-        #: 默认是恒等变换，不改变任何行为；填法见 tools/fit_grasp_correction.py
-        #: 的结论，或者 docs 里的标定步骤。
+        #: 默认是恒等变换，不改变任何行为。
         self.declare_parameter('vision_yaw_deg', 0.0)
         self.declare_parameter('vision_scale', 1.0)
         self.declare_parameter('vision_shift_x_m', 0.0)
         self.declare_parameter('vision_shift_y_m', 0.0)
         #: 2D 单应修正（8 个数，h33 固定 1）：把检测的 (x, y) 映到真值 (x, y)。
         #: 物体都落在同一张桌面上，工具面到工具面的映射本身就是单应，能比"转+
-        #: 缩放+平移"多吃掉一块透视偏差。2026-10-31 真机 11 个点：留一验证
-        #: 4.3 mm（平移 18.9、仿射 8.8；修之前平均 54.6）。全零 = 不用。
-        #: 拟合：tools/fit_vision_homography.py points.csv
+        #: 缩放+平移"多吃掉一块透视偏差。全零 = 不用。
         self.declare_parameter('vision_homography', [0.0] * 8)
         #: 上面那套单应标定时覆盖的范围（base_link，米）：[x0, x1, y0, y1]。
-        #: 2026-10-31 的 11 个点在 x −0.10~+0.10、y 0.15~0.35 m 内。检测落在
-        #: 框外时单应是外推，误差会从 4 mm 涨到几十 mm 且不报错，所以日志里喊一次。
+        #: 检测落在框外时单应是外推，误差会从几毫米涨到几十毫米且不报错，所以
+        #: 日志里喊一次。
         self.declare_parameter('vision_homography_region',
                                [-0.10, 0.10, 0.15, 0.35])
         #: 相机在 base_link 里的位置（xacro 里 camera_offset_* 的值）。
@@ -238,15 +214,12 @@ class PickPlaceNode(Node):
         self.declare_parameter('cartesian_min_fraction', 0.95)
 
         # -- 起手位够不着时往下压 -------------------------------------------
-        #
-        # 2026-10-22 真机：方块在 r≈0.30 m，起手位（抓取点正上方 80 mm）发过去
-        # 之后 MoveIt 回 error_code=99999，ompl 报
-        # "Unable to sample any valid states for goal tree"。原因不是碰撞，是
-        # **顶抓姿态下那个高度够不着**：夹爪 +y 朝下时，这条手臂在 r=0.302 m
-        # 处 z 只能到 0.00 附近（离线 FK/IK 验算，见 docs/04），而 0.060 m 要
-        # 高 60 mm。物体在 r≈0.27 m 以内时 8 cm 起手位是够的，一次改死
-        # approach_m 会牺牲近处的余量，所以这里**运行时问一次 IK**，够不着才
-        # 压低，压到离抓取点 approach_min_m 还不行就报清楚，别让 MoveIt 白等。
+        # **顶抓姿态下远处够不着**：夹爪 +y 朝下时，这条手臂在 r=0.302 m 处 z
+        # 只能到 0.00 附近，而起手位要 0.060 m，差 60 mm —— 此时 MoveIt 只会回
+        # error_code=99999（goal tree 采不到解），看不出为什么。物体在 r≈0.27 m
+        # 以内时 8 cm 起手位够得着，一次改死 approach_m 会牺牲近处的余量，所以
+        # 这里**运行时问一次 IK**，够不着才往下压；压到离抓取点 approach_min_m
+        # 仍无解就报清楚。
         self.declare_parameter('ik_service', '/compute_ik')
         self.declare_parameter('ik_timeout_s', 0.2)
         #: 起手位最多压到离抓取点多高（再低就没法竖直下降了）
@@ -259,8 +232,8 @@ class PickPlaceNode(Node):
         self.group_name = self.get_parameter('planning_group').value
         self.execute = bool(self.get_parameter('execute').value)
 
-        # 夹爪模型：**故意**用未实测的占位模型。真机上要先把阶段 0.5 量完，
-        # 再用 opening_endpoints_from_measurements() 换上，否则状态机不会合爪。
+        # 夹爪模型：**故意**用未实测的占位模型；实测后要先用
+        # opening_endpoints_from_measurements() 换上，否则状态机不会合爪。
         self.gripper_model = gr.unverified_placeholder_model()
         self.limits = grasp_planner.WorkspaceLimits(
             max_reach_m=float(self.get_parameter('max_reach_m').value),
@@ -276,9 +249,8 @@ class PickPlaceNode(Node):
         self.action_started = 0.0
         self.goal_handle = None
         self.current_label = ''
-        #: 只规划模式下，"到起手位"这条规划出来的轨迹。下降要从它的**末点**
-        #: 起算 —— 只规划时机械臂并没有真的动过去，用"当前状态"算出来的直线
-        #: 是从它真正站着的地方出发的，那不是我们要验的东西。
+        #: 只规划模式下"到起手位"这条规划出来的轨迹：下降要从它的**末点**起算
+        #: —— 只规划时机械臂没有真的动过去，用"当前状态"算出的直线不是要验的那条。
         self.planned_pre_grasp = None
         #: 影子修正只打一次日志（每帧都打会把终端刷爆）。
         self.shadow_logged = False
@@ -353,8 +325,7 @@ class PickPlaceNode(Node):
                 if bool(self.get_parameter('approach_cartesian').value)
                 else '退回关节空间规划（approach_cartesian=false）'))
         if not bool(self.get_parameter('auto_start').value):
-            # 不打印这一句的话，节点启动后安静地等触发，看起来就像卡死了
-            # （2026-10-22 真机上被当成"vision:=false 之后卡住"）。
+            # 不打印这一句，节点启动后会安静地等触发，看起来像卡死。
             self.get_logger().info(
                 '还没开始：等 {} 触发（auto_start=false）。检测从 {} 进来 —— '
                 '本节点不直接连相机，视觉由 vision_node 发；vision:=false 只表示'
@@ -420,10 +391,9 @@ class PickPlaceNode(Node):
     def _correct_shadow(self, dets):
         """把单目"影子"偏移从检测点里减掉（默认关闭，见参数处的说明）。
 
-        这块的像素被投到桌面平面上，方块有 24 mm 高，于是检测点沿"从相机
-        指向方块"的方向偏出去，偏移随距离线性增长（见 geometry.shadow_correction
-        的推导真机数据）。**perception 已经在 detection.shadow_bias 里减过一次**，
-        这里再减就是 2 倍，所以默认关掉；留着是为了标定时能单独比较两种模型。
+        检测点沿"从相机指向方块"的方向偏出去，偏移随距离线性增长。
+        **perception 已经在 detection.shadow_bias 里减过一次**，这里再减就是 2 倍，
+        所以默认关掉；留着是为了标定时能单独比较两种模型。
         """
         if not bool(self.get_parameter('shadow_fix').value):
             return dets
@@ -464,12 +434,7 @@ class PickPlaceNode(Node):
 
         优先走 `vision_homography`（2D 单应，8 个数）：物体都落在同一张桌面上，
         工具面到工具面的映射本身就是单应，能把"转/缩放/平移"表达不了的透视偏差
-        一起吃掉。2026-10-30 真机：方块实际 (0.000, 0.190)、检测 (-0.024, 0.155)
-        —— 42 mm，方向是绕相机转了 7 度多，影子公式（只沿射线）修不到这种；
-        2026-10-31 用 11 个点拟合后留一误差 4.3 mm。两边参数都是空的默认值，
-        什么都不填时这里不改任何数。
-
-        单应只在标定过的范围里可信（这批点是 x -0.10~+0.10、y 0.15~0.35 m）。
+        一起吃掉。单应只在标定过的范围里可信。两边参数都是默认值时这里不改任何数。
         """
         matrix = [float(v) for v in
                   self.get_parameter('vision_homography').value]
@@ -508,10 +473,9 @@ class PickPlaceNode(Node):
 
     def _correct_homography(self, dets, matrix):
         """按 2D 单应挪检测点。方块的 yaw 不动：单应只说明"面上的点怎么挪"，
-        不说明方块绕自己竖轴转了多少，硬套线性部分反而会把朝向拧歪。
+        不说明方块绕自己竖轴转了多少，硬套线性部分会把朝向拧歪。
 
-        检测点落在标定框外时只喊一声（不拦）：单应在外推区可能差几十毫米，
-        但总比不修强，而且真拦下来就完全抓不到了。
+        检测点落在标定框外时只喊一声（不拦）：外推区可能差几十毫米，但总比不修强。
         """
         fixed = []
         region = list(self.get_parameter('vision_homography_region').value)
@@ -549,10 +513,8 @@ class PickPlaceNode(Node):
     def _with_place_point(self, plan):
         """把参数里的放置点接进计划里。
 
-        2026-10-27 才发现的一个真 bug：`place_x`/`place_y` 声明了却从没被用过，
-        而 `plan_grasp(place_point=None)` 会把放置点填成**抓取点本身** —— 于是
-        "放置"这一步其实是原地松手，手臂一步都没挪。用户设的 (-175, +90) mm
-        完全没生效。
+        `place_x`/`place_y` 必须在这里显式传进去：`plan_grasp(place_point=None)`
+        会把放置点填成**抓取点本身**，"放置"就变成原地松手，手臂一步都没挪。
         """
         params = self.get_parameter
         place_z = float(params('place_z').value)
@@ -561,8 +523,8 @@ class PickPlaceNode(Node):
         clearance = float(params('place_release_clearance_m').value)
         lift_edges = float(params('place_lift_edges').value)
         # 放置点也要吃同一个执行偏差：`grasp_offset_*` 修的是"机械臂把命令位置
-        # 执行偏了"这件事，它跟抓取还是放置无关。只修抓取的话，方块会被搬到
-        # 离放置点同样远的地方（2026-10-31 实测是 38 mm）。
+        # 执行偏了"，跟抓取还是放置无关。只修抓取的话，方块会被搬到离放置点
+        # 同样远的地方。
         off_x = float(params('grasp_offset_x_m').value)
         off_y = float(params('grasp_offset_y_m').value)
         try:
@@ -616,9 +578,8 @@ class PickPlaceNode(Node):
     def _gripper_ready_to_move(self):
         """动手之前先确认夹爪知道自己的零在哪。
 
-        零点没量出来时，夹爪节点会拒绝一切移动命令；如果还照常伸手、下探，最后
-        一定是"合爪没夹到 → FAULT"，手臂白跑一趟还停在方块上。所以在这里先拦。
-        返回 False 表示已经判失败、不要继续。
+        零点没量出来时夹爪节点会拒绝一切移动命令，照常伸手、下探最后一定是
+        "合爪没夹到 → FAULT"，手臂白跑一趟还停在方块上。返回 False 表示已判失败。
         """
         if not bool(self.get_parameter('gripper_enabled').value):
             return True
@@ -627,7 +588,7 @@ class PickPlaceNode(Node):
         self._decide_failure(
             '夹爪的零点没量出来（{}={}）：夹爪节点拒绝移动命令，现在伸手下去只会'
             '空跑一趟。先停掉重来，确认夹爪节点启动时量到了合拢/张开两个止位；'
-            '量不到就跑 tools/gripper_home.py 单独量一次'.format(
+            '量不到就重跑夹爪节点让它重试'.format(
                 self.get_parameter('gripper_status_topic').value,
                 self.gripper_status))
         return False
@@ -640,8 +601,8 @@ class PickPlaceNode(Node):
         if not bool(self.get_parameter('gripper_enabled').value):
             return
         if not self.execute:
-            # 只规划模式下不去动夹爪：手臂根本没动，张/合都是在空气里演一遍，
-            # 徒增困惑（而且合爪会因为没夹到东西直接判 EMPTY 失败）。
+            # 只规划模式下不去动夹爪：手臂根本没动，张/合是在空气里演一遍，
+            # 而且合爪会因为没夹到东西直接判 EMPTY 失败。
             self.get_logger().info('只规划（execute=false）：不动夹爪')
             return
         width = float(self.get_parameter('gripper_open_m').value)
@@ -775,7 +736,7 @@ class PickPlaceNode(Node):
         else:
             self.get_logger().error(
                 '夹爪零点没量出来（/gripper/status={}）：夹爪节点会拒绝移动命令，'
-                '这次抓取走不到"夹住"。先跑 tools/gripper_home.py'.format(status))
+                '这次抓取走不到"夹住"。先确认夹爪零点已量出'.format(status))
 
     def _on_start(self, _msg):
         self.get_logger().info('收到开始信号：{}'.format(
@@ -879,10 +840,9 @@ class PickPlaceNode(Node):
     def _send_goal_fitted(self, position, quaternion, label):
         """先问一遍 `/compute_ik`：这个高度够得着吗？够不着就往下压。
 
-        压只改 z（x/y 与姿态不动），所以压完照样能竖直下降，只是下降行程短了；
-        下限是抓取点上方 `approach_min_m`。压到底还无解就报清楚 —— 那说明物体
-        已经出了"顶抓"这个姿态的作业范围，再让 MoveIt 去试也只是白等 5 秒。
-        问不到 IK 服务时按原目标发（和以前完全一样），不因为预检而变保守。
+        压只改 z（x/y 与姿态不动），压完照样能竖直下降，只是行程短了；下限是
+        抓取点上方 `approach_min_m`。压到底还无解就报清楚 —— 那说明物体已经出了
+        "顶抓"姿态的作业范围，再让 MoveIt 去试只是白等。问不到 IK 服务时按原目标发。
         """
         if not self.ik_client.service_is_ready():
             if not self.ik_client.wait_for_service(timeout_sec=0.5):
@@ -1269,10 +1229,9 @@ def _constraints(frame, link, position, quaternion):
     # 顶抓只要求"朝下"这个姿态，绕竖直轴的容差留一点，否则 IK 容易解不出来。
     ori.absolute_x_axis_tolerance = 0.02
     ori.absolute_y_axis_tolerance = 0.02
-    # 绕工具系 z 的容差 = 手指的自转。原来是 0.4 rad（23°），够腕部在里面随便
-    # 转：同一个方块每次停的朝向都不一样，规划出来的路径就带一堆"转半圈"的
-    # 无效动作（2026-10-27 真机反馈）。收紧到 0.05 rad（2.9°）以后，朝向由
-    # `snap_yaw` 量化过的目标唯一确定。
+    # 绕工具系 z 的容差 = 手指的自转。容差大（0.4 rad / 23°）时腕部能随便转，
+    # 同一个方块每次停的朝向都不一样，规划出来是一堆"转半圈"的无效动作；收紧到
+    # 0.05 rad（2.9°）后，朝向由 `snap_yaw` 量化过的目标唯一确定。
     ori.absolute_z_axis_tolerance = 0.05
 
     cons = Constraints()

@@ -1,8 +1,7 @@
-"""阶段 0 标定的一键启动。
+"""阶段 0 标定的一键启动：robot_state_publisher + 标定节点 + RViz。
 
-启动：robot_state_publisher + 标定节点 + RViz。
-不启动 dummy_controller —— 避免两个进程同时抢串口设备。
-标定结束后再启动 driver 做阶段 0.3 的对照。
+不启 dummy_controller：避免两个进程同时抢串口设备。标定结束后再启 driver
+做阶段 0.3 的对照。
 """
 import os
 

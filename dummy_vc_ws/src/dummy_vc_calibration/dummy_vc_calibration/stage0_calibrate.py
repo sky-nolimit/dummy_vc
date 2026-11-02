@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
 """Stage 0 hardware calibration node for the Dummy arm.
 
-Design: PREVIEW -> CONFIRM -> EXECUTE (two-phase commit).
-Any motion that touches hardware first enters PREVIEW and is shown in RViz.
-It is only sent to the device after an explicit /calib/confirm call.
-This prevents a mistyped command from driving the arm into something.
+Two-phase commit: PREVIEW -> CONFIRM -> EXECUTE.
+A motion that touches hardware first enters PREVIEW and is shown in RViz; it is
+sent to the device only after an explicit /calib/confirm call. That stops a
+mistyped command from driving the arm into something.
 
-NOTE: this file is deliberately ASCII-only. The workspace is edited on
-Windows and built on Ubuntu; non-ASCII in source files has already caused
-one silent encoding corruption. Chinese documentation lives in a local-only
-document instead -- the calibration manual (docs/02) is not committed, so it
-is NOT in a fresh clone. Ask whoever has the working copy if you need it.
+Keep this file ASCII-only: it is edited on Windows and built on Ubuntu.
 """
 import glob
 import math
@@ -33,10 +29,9 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 
 # ---------------------------------------------------------------------------
-# Make the vendored fibre library importable.
-# dummy_controller is installed as an ament_python package, so its top level
-# (which contains dummy_cli_tool/) ends up under install/<pkg>/lib/python3.x/
-# site-packages. That directory is not on sys.path by default.
+# Make the vendored fibre library importable. dummy_controller is an
+# ament_python package, so dummy_cli_tool/ lands in install/<pkg>/lib/python3.x/
+# site-packages, which is not on sys.path by default.
 # ---------------------------------------------------------------------------
 def _add_driver_to_path(logger=None):
     try:
@@ -71,8 +66,8 @@ except ImportError as _exc:  # noqa: BLE001
     _IMPORT_ERR = str(_exc)
 
 
-# URDF joint names. Note the driver currently publishes joint_1..joint_6
-# (a known mismatch, fixed in stage 1); the URDF is the source of truth.
+# URDF joint names. The driver publishes joint_1..joint_6; the URDF is the
+# source of truth.
 URDF_JOINTS = [f'dummy2_joint{i}' for i in range(1, 7)]
 FINGER_JOINTS = ['dummy2_finger_joint1', 'dummy2_finger_joint2']
 
@@ -102,9 +97,7 @@ class Stage0Calibrate(Node):
         self.declare_parameter('max_gripper_delta', 3.0)    # per-step guard
         self.declare_parameter('safe_current_limit', 1.0)   # conservative
         self.declare_parameter('dry_run', False)
-        # Full-open gripper angle in device units. Replace after step 0.4.
-        # Gripper full-open angle in device units, which are DEGREES.
-        # Confirmed by measurement: the arm's joint readback is in degrees.
+        # Gripper full-open angle in device units = DEGREES (measured).
         self.declare_parameter('hand_max_angle', 90.0)
 
         self.device_path = self.get_parameter('device_path').value
@@ -169,8 +162,6 @@ class Stage0Calibrate(Node):
         # IMPORTANT: dry_run only disables COMMANDING the hardware. It must
         # still connect and read back, otherwise read-only operations such as
         # /calib/compare_driver return a meaningless all-zero result.
-        # (That bug made the 0.3 cross-check report driver=0 device=0 for every
-        # joint, which looks like a valid measurement but is just no data.)
         self.get_logger().info('=' * 70)
         if not _HAVE_DRIVER:
             self.get_logger().error(f'cannot import dummy_cli_tool: {_IMPORT_ERR}')
@@ -179,10 +170,8 @@ class Stage0Calibrate(Node):
         else:
             self.connect_device()
 
-        # A loud, unmissable summary. The earlier version logged the
-        # connection result inside connect_device only, so a failed connection
-        # produced no obvious signal and the all-zero readback looked like a
-        # real measurement.
+        # A loud summary: a silent failed connection makes an all-zero
+        # readback look like a real measurement.
         self.get_logger().info('=' * 70)
         if self.robot is None:
             self._warn_no_device_once()
@@ -309,12 +298,9 @@ class Stage0Calibrate(Node):
         m.header.frame_id = 'base_link'
         m.ns = 'calib_status'
         m.id = 0
-        # ROS 2 does NOT have Marker.TEXT_VIEW_FAR_END (that is a ROS 1 name).
-        # The valid constants are: ARROW, CUBE, SPHERE, CYLINDER, LINE_STRIP,
-        # LINE_LIST, CUBE_LIST, SPHERE_LIST, POINTS, TEXT_VIEW_FACING, MESH,
-        # TRIANGLE_LIST, INSTANCED_LINE_LIST.
-        # TEXT_VIEW_FACING always faces the camera, which is what we want for
-        # a status readout.
+        # ROS 2 has no Marker.TEXT_VIEW_FAR_END (ROS 1 name). TEXT_VIEW_FACING
+        # is valid and always faces the camera, which is what a status readout
+        # wants.
         m.type = Marker.TEXT_VIEW_FACING
         m.action = Marker.ADD
         m.pose.position.z = 0.65
@@ -673,11 +659,9 @@ class Stage0Calibrate(Node):
     def on_timer(self):
         """Two independent jobs: read the device, then publish display data.
 
-        They are separated on purpose. A mistake in the display code (for
-        example an invalid Marker constant) must never stop the device
-        readback, otherwise a cosmetic bug silently destroys all calibration
-        data. That is exactly what happened once: a bad marker type made the
-        timer throw every 50 ms and no device data was ever captured.
+        Separated on purpose: a display bug (an invalid Marker constant, say)
+        must never stop the device readback, otherwise a cosmetic error
+        silently destroys all calibration data.
         """
         # --- job 1: device readback. Errors here are real problems. ---
         if self.robot is None:
@@ -731,7 +715,7 @@ class Stage0Calibrate(Node):
             '  ros2 service call /calib/safety_check std_srvs/srv/Trigger "{}"\n'
             '  # driver angle vs device raw angle (needs dummy_controller running)\n'
             '  ros2 service call /calib/compare_driver std_srvs/srv/Trigger "{}"\n'
-            '\nSee the calibration manual (local-only, docs/02) for the '
+            '\nSee the calibration manual (local-only) for the '
             'operating procedure.')
 
 

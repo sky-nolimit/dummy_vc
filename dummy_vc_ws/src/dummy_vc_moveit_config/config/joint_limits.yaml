@@ -1,18 +1,16 @@
 # Joint limits for MoveIt.
 #
-# These mirror the URDF limits, but MoveIt reads ITS OWN copy here -- the URDF
-# values are not used for planning limits. So the two can drift, and if they do,
-# MoveIt will plan into a range the device refuses while the URDF looks correct.
-# tools/check_moveit_config.py compares all three (URDF, this file, and the
-# measured device travel) and fails if they disagree.
+# MoveIt reads this copy, not the URDF: the URDF limits are not used for planning
+# limits. The two can drift, and if they do, MoveIt plans into a range the device
+# refuses while the URDF still looks correct.
 #
-# Provenance: the URDF limits are the DEVICE's measured travel, not vendor
-# values (see dummy2_urdf.xacro and tools/probe_range.py). They are repeated
-# here in radians because that is what MoveIt expects.
+# These are the DEVICE's measured travel, not vendor values (see
+# dummy2_urdf.xacro); they are repeated here in radians because that is what
+# MoveIt expects.
 #
-# The retracted (power-off) pose rests exactly on two of these bounds:
-# joint_2 at +1.3089969 and joint_3 at -1.5707963. Do not widen or narrow them
-# without re-checking that pose still parses as valid.
+# The retracted (power-off) pose rests exactly on two of these bounds: joint_2 at
+# +1.3089969 and joint_3 at -1.5707963. Do not widen or narrow them without
+# re-checking that pose still parses as valid.
 
 joint_limits:
   dummy2_joint1:
@@ -64,6 +62,5 @@ joint_limits:
     has_acceleration_limits: true
     max_acceleration: 100.0
 
-# 手指关节的限位在 URDF 里是 [0, 0.023]，移到这里会让 prismatic 的限位
-# 变成位置范围而不是角度范围，MoveIt 对两组用同一份文件时容易混淆，
-# 所以手指限位只留在 URDF 里，这里不重复。
+# 手指关节的限位留在 URDF 里（[0, 0.023]）。移到这里会让 prismatic 的限位变成
+# 位置范围而不是角度范围，MoveIt 对两组用同一份文件时容易混淆。

@@ -1,41 +1,24 @@
 #!/usr/bin/env python3
 """视觉链路的纯几何：像素 -> base_link 下的抓取位姿。
 
-这个文件里**没有 ROS、没有 OpenCV、没有 tf2**，只依赖 numpy。
-这样它能在没有 ROS 的机器上被离线自测（tools/selftest_vision_geometry.py），
-而自测要盯住的正是最难在现场调试的那部分：坐标轴约定。自测里专门有一条
-检查盯着"不许 import ROS/OpenCV"，免得以后顺手 import 进来，把离线自测
-变成跑不起来的东西。
-
+只依赖 numpy，不 import ROS、OpenCV、tf2，所以能在没有 ROS 的机器上离线自测。
 轴向约定（REP-103，长度米、角度弧度）：
 
   camera_color_optical_frame   x 右、y 下、z 前（朝景物）。光学系的轴向与
                                REP-103 不同，这个差异由 rpy=(-pi/2, 0, -pi/2)
-                               一次性转掉。本文件只跟光学系打交道，所以
-                               像素 (u, v) 与 (x, y) 直接对应。
-                               这个 frame 由相机驱动发布（orbbec_camera：
-                               camera_link -> camera_color_frame -> 光学系）；
-                               URDF 只负责挂载（base_link -> camera_link）和
-                               裸 USB 相机的 usb_camera_optical_frame。
+                               一次性转掉；本文件只跟光学系打交道，所以像素
+                               (u, v) 与 (x, y) 直接对应。这个 frame 由相机
+                               驱动发布，URDF 只负责挂载（base_link ->
+                               camera_link）和裸 USB 相机的 usb_camera_optical_frame。
   tool0 / gripper_tcp          +y 是从手腕指向两指夹持中心的"接近方向"，
                                ±x 是两指开合方向（dummy2_finger_jointN 的
-                               axis 就是 ±x；link7 -> tool0 -> gripper_tcp
-                               两段 origin 也都在 +y 上）。
+                               axis 就是 ±x）。
   顶抓（top-down）             gripper_tcp 的 +y 必须朝下（base_link 的 -z），
-                               这样它沿 +y 靠近物体；两指开合方向落在桌面内，
-                               绕竖直轴转 yaw 去贴合方块的一条边。
+                               两指开合方向落在桌面内，绕竖直轴转 yaw 贴合方块的一条边。
 
-  ⚠ docs/01-视觉抓取方案.md 的"阶段 4"里写的是"tool0 的 +y（两指接近方向）
-    与桌面平行"——这句话与同一句里的"顶抓"自相矛盾：顶抓时 +y 是朝下的，
-    否则夹爪是横着从侧面伸过去的。URDF 是权威（见上），本文件按 +y 朝下实现。
-    现场若发现方向反了，要改的是这里一处常数，不是散落各处的矩阵。
-
-单目兜底的限制（相机没到货时用 driver 里现成的 USB 相机，就得靠它）：
-
-    把像素投到 z = 桌面高度 的平面上，等价于假设"物体是贴在桌面上的平面图形"。
-    真实物体有高度 h，它的顶面中心会被按 camera_height / (camera_height - h)
-    的倍率往外推（见 monocular_planar_inflation）：0.6 m 高、50 mm 的方块就是
-    9%，十几毫米。所以单目路线只能把数据通路跑通，验收精度得靠深度相机。
+单目兜底：把像素投到 z = 桌面高度 的平面上，等价于假设"物体是贴在桌面上的平面图形"。
+真实物体有高度 h，它的顶面中心会被按 camera_height / (camera_height - h) 的倍率
+往外推（见 monocular_planar_inflation）：0.6 m 高、50 mm 的方块就是 9%，十几毫米。
 """
 import math
 from dataclasses import dataclass
@@ -47,7 +30,7 @@ import numpy as np
 class GeometryError(RuntimeError):
     """几何上做不到：射线与平面平行、交点在相机背后、旋转矩阵退化等。
 
-    宁可让上层报错，也不要发布一个悄悄算错的抓取点。
+    宁可让上层报错，也不发布一个悄悄算错的抓取点。
     """
 
 
@@ -60,12 +43,10 @@ class PinholeCamera:
 
     只取 `CameraInfo.d` 的**前 5 个**：(k1, k2, p1, p2, k3)，即 plumb_bob。
 
-    有的驱动会发 8 个系数（本仓库的 Orbbec Gemini 335L 就是：它把
-    `distortion_model` 写成 plumb_bob，`d` 却是 rational_polynomial 的
-    `(k1, k2, p1, p2, k3, k4, k5, k6)` 顺序）。多出来的 k4..k6 在 plumb_bob
-    公式里没有位置，这里丢掉它们并把个数记在 `ignored_distortion` 里，让上层
-    能 warn 一句，而不是静默丢——Gemini 335L 实测这三个都是 0，丢掉没有代价，
-    但换成别的相机就得重新判断。
+    有的驱动会发 8 个系数（本仓库的 Orbbec Gemini 335L 就是：`distortion_model`
+    写 plumb_bob，`d` 却是 rational_polynomial 的
+    `(k1, k2, p1, p2, k3, k4, k5, k6)` 顺序）。多出的 k4..k6 在 plumb_bob
+    公式里没有位置，这里丢掉并把个数记在 `ignored_distortion` 里，让上层能 warn。
     """
 
     def __init__(self, fx, fy, cx, cy, width=None, height=None,
@@ -121,8 +102,7 @@ class PinholeCamera:
     def undistort_pixel(self, u, v, iterations=30, tolerance=1e-14):
         """像素 -> 去畸变后的归一化坐标 (x, y)。
 
-        plumb_bob 没有闭式逆，用定点迭代。不收敛时抛异常而不是返回一个
-        看起来像模像样的错值。
+        plumb_bob 没有闭式逆，用定点迭代；不收敛时抛异常而不是返回一个错值。
         """
         mx = (float(u) - self.cx) / self.fx
         my = (float(v) - self.cy) / self.fy
@@ -250,17 +230,10 @@ def monocular_planar_inflation(object_height_m, camera_height_above_plane_m):
 
 def similarity_correction(position_xy, pivot_xy, yaw_rad, scale=1.0,
                           shift_xy=(0.0, 0.0)):
-    """绕 pivot 转 yaw、缩放 scale、再平移 —— 现场量出来的固定偏差就用它修。
+    """绕 pivot 转 yaw、缩放 scale、再平移 —— 现场量出来的固定偏差用它修。
 
-    为什么需要它：2026-10-30 真机把方块摆在实际 (0.000, 0.190)，日志里检测却是
-    (-0.024, 0.155)，42 mm 的差。方向不是"沿相机射线偏出去"（影子偏置那个模型
-    的方向），而是绕着相机位置**转了 7.4 度** —— 到相机的距离几乎没变。相机
-    位姿、内参主点、装配角度任何一个错都能造出这种差，公式推不出来，只能量。
-
-    所以这里不做任何物理假设：就是给出一个 (yaw, scale, shift) 的相似变换，
-    参数由"真值 - 检测"几组点拟合得到（tools/fit_grasp_correction.py 会给刚体
-    和仿射两种解，刚体解直接就是 yaw + shift）。identity（yaw=0、scale=1、
-    shift=0）时原样返回。
+    不做物理假设：就是一个 (yaw, scale, shift) 相似变换，参数由"真值 - 检测"
+    几组点拟合得到。identity（yaw=0、scale=1、shift=0）时原样返回。
     """
     p = np.asarray(position_xy, float).reshape(-1)
     if p.size != 2:
@@ -283,11 +256,8 @@ def similarity_correction(position_xy, pivot_xy, yaw_rad, scale=1.0,
 def homography_correction(position_xy, matrix):
     """用 8 个数的单应矩阵，把"检测到"的平面点映到真值上。
 
-    为什么用单应而不是相似/仿射：2026-10-31 真机 11 个点量下来，
-    "平移+缩放"留一验证误差 14 mm、仿射 9 mm、单应 4.5 mm。工具面到工具面的
-    映射本身就是单应（透视投影把平面映成平面），相机的位姿、俯仰、主点任何
-    一个不准，都落在这个模型里；反过来说，只要物体还在同一张桌面上，它比
-    经验公式更站得住。
+    平面到平面的映射本身就是单应（透视投影把平面映成平面），相机位姿、俯仰、
+    主点任何一个不准都落在这个模型里；只要物体还在同一张桌面上，它比经验公式更站得住。
 
     matrix 是行主序的 8 个数 `h11 h12 h13 h21 h22 h23 h31 h32`，`h33` 固定 1。
     identity 等于 `[1, 0, 0, 0, 1, 0, 0, 0]`。
@@ -315,9 +285,7 @@ def outside_region(position_xy, region):
     """检测点是否落在标定覆盖框外？
 
     `region` 是 `[x0, x1, y0, y1]`（base_link，米），两个方向谁大谁小都行。
-    框外的单应是**外推**：11 个标定点只覆盖 x −0.10~+0.10、y 0.15~0.35 m，
-    出了这个范围，同一套 8 个数能把 4 mm 的残差放大到几十 mm，而它不会报错、
-    看日志也看不出来。所以调用方至少应该喊一声。
+    框外是外推，同一套单应会把残差放大到几十毫米且不会报错，所以调用方至少应喊一声。
     """
     r = np.asarray(region, float).reshape(-1)
     if r.size != 4:
@@ -371,16 +339,13 @@ def shadow_correction(position_xy, camera_xy, camera_height_m, object_height_m,
                       scale=1.0):
     """把"方块投影到地面平面"造成的偏移拉回来（单目顶看的系统性偏差）。
 
-    这块用单目标定、把像素投到桌面平面上（z = table_z）之后，一个有高度的
-    方块不是投在它自己的位置上，而是被投到更远处：顶面（z = h）上的点沿视线
-    落到地面时会朝**远离相机**的方向走 `h·r/H`（r 是它到相机的水平距离，H 是
-    相机离平面的高度）。可见的侧面再往外糊一层，两者合起来的轮廓中心大约偏
-    `0.5·h·r/H` 那么多。
+    单目标定、把像素投到桌面平面（z = table_z）之后，有高度的方块不是投在它自己的
+    位置上，而是被投到更远处：顶面（z = h）上的点沿视线落到地面时会朝**远离相机**
+    的方向走 `h·r/H`（r 是它到相机的水平距离，H 是相机离平面的高度）。可见侧面再
+    往外糊一层，两者合起来的轮廓中心大约偏 `0.5·h·r/H`。
 
-    这就是 2026-10-27/28 真机上"方块明明摆在 (0, 0.22)，日志里却是 (0.020,
-    0.210)"的来路：偏移方向正是从相机指向方块的那条射线，大小随距离线性增长
-    —— 所以一个固定的平移补偿（`grasp_offset_*`）只能在某一条弧线上对，换个
-    位置就又错了。
+    偏移方向正是从相机指向方块的那条射线，大小随距离线性增长，所以固定的平移补偿
+    只能在某一条弧线上对，换个位置就又错了。
 
     返回**修正量**（2 元素向量，米）：加到被检测到的位置上就是真实位置。
     `scale` 用来现场微调（1.0 = 按上面的半影模型，0 = 关掉）。
@@ -502,7 +467,7 @@ class GraspWaypoints:
 
 def grasp_waypoints(grasp_point, yaw_rad, approach_m=0.08, lift_m=0.10,
                     place_point=None):
-    """由抓取点生成四个路点。默认的 8 cm / 10 cm 来自 docs/01 的阶段 5。"""
+    """由抓取点生成四个路点。默认 8 cm / 10 cm 是接近段与抬起段的高度。"""
     if approach_m <= 0.0 or lift_m <= 0.0:
         raise GeometryError(
             'approach/lift 必须为正：approach={} lift={}'.format(approach_m, lift_m))
@@ -558,18 +523,12 @@ class Measurement:
 class SceneMeasurements:
     """场景里那三个"必须实测、实测前只能拿占位值"的数。
 
-    散在 xacro / yaml / 代码里的时候，没人说得清现在到底验到了哪一步。
-    集中在这里，配一个 unmeasured()，节点启动时把还没量的报出来：
-
-        [WARN] 还没实测：table_z = 0.0 m (placeholder)
+    集中在这里，配一个 unmeasured()，节点启动时把还没量的报出来。
 
     table_z        base_link 下**工作面**的高度（米）—— 方块底面贴在这个平面上。
-                   有桌面时是桌面；本机这套**没有桌子，工件和底座在同一平面**，
-                   于是 z = 0（base_link 的原点就在底座底面，j1 在 z = 0.0805，
-                   是 78 mm 高的底座顶面）。量法：尺子量 base_link 原点所在平面
-                   到工作面的距离，同平面时就是 0。
+                   有桌面时是桌面；没有桌子时工件和底座在同一平面。
     tcp_offset_y   link7 端面到两指夹持中心的距离（米），也就是 URDF 里
-                   gripper_tcp 的偏移（docs/04 的 A1）。量法：卡尺。
+                   gripper_tcp 的偏移。
     object_edge    演示用方块的边长（米）。
     """
     table_z: Measurement
@@ -593,9 +552,7 @@ class SceneMeasurements:
 def default_scene_measurements() -> SceneMeasurements:
     """还没上真机时的占位值 —— 每一个都标了怎么量。
 
-    tcp_offset_y 取的是 xacro 里 `tcp_offset_y` 的占位值 0.06；table_z 与
-    object_edge 是为了让代码跑通而定的估计。真机验收前必须换成实测值，
-    describe_unmeasured() 就是用来在启动日志里把这几个数揪出来的。
+    真机验收前必须换成实测值，describe_unmeasured() 用来在启动日志里把这些数报出来。
     """
     return SceneMeasurements(
         table_z=Measurement(0.0, 'm', 'placeholder',
@@ -608,34 +565,28 @@ def default_scene_measurements() -> SceneMeasurements:
 
 
 def project_scene_measurements() -> SceneMeasurements:
-    """本机这套的实际数值（2026-10-16 由用户实测/确认）。
+    """本机这套的实际数值。
 
-    与 default_scene_measurements() 分开是有意的：默认值保持"全是占位"，
-    好让占位那条路径一直被测到；这一份是这台机器现在的真实状态，节点在
-    没有配置覆盖时用它，并且在日志里点名每个数的来历。
+    与 default_scene_measurements() 分开是有意的：默认值保持"全是占位"，好让占位
+    那条路径一直被跑到；这一份是这台机器的真实状态，节点在没有配置覆盖时用它。
 
-    - table_z = -0.0405：工作面是**地面**，不是底座底面。这台机器的底座垫在
-      一个约 2.5 cm 高的地台上，而 base_link 的原点也不在底座最底面 —— 它是
-      底座 stl 包围盒的中心，底面在 z = -0.0155（`base_link.stl` 的 z 范围
-      -15.5 ~ +83.5 mm）。所以地面在 base_link 里是 -(0.0155 + 0.025) =
-      -0.0405。方块放在地面上，抓取点的 z 就是 -0.0405 + 半个边长。
-      （2026-10-19 用户确认：地台约 2.5 cm、相机中心离地 16 cm、方块在地面上。）
-    - tcp_offset_y = 0.1125：link7 端面到两指夹持中心。2026-10-21 按实测重算：
-      腕部到指尖 130 mm（80 mm 是舵机/驱动板本体 + 50 mm 手指，手指里 15 mm
-      是滑动结构、35 mm 是夹取段），夹取中心在夹取段中点 ⇒ 离指尖 17.5 mm ⇒
-      离腕部 130 - 17.5 = 112.5 mm。旧的 15 mm 是量错了位置（量到的是腕部
-      外壳），它让 URDF 的手指比实物长 100 mm，一开碰撞检查就规划失败。
+    - table_z = -0.0405：工作面是**地面**，不是底座底面。base_link 的原点不在
+      底座最底面，而是底座 stl 包围盒中心，底面在 z = -0.0155（stl 的 z 范围
+      -15.5 ~ +83.5 mm）；底座又垫在约 2.5 cm 高的地台上，所以地面在 base_link 里
+      是 -(0.0155 + 0.025)。方块放在地面上，抓取点的 z 就是 -0.0405 + 半个边长。
+    - tcp_offset_y = 0.1125：link7 端面到两指夹持中心。腕部到指尖 130 mm，
+      夹取中心离指尖 17.5 mm，故 130 - 17.5 = 112.5 mm。
     - object_edge = 0.024：边长 24 mm 的方形方块。
 
     注意 tcp_offset_y 已经写进 `dummy2_urdf.xacro`（那里由
-    `gripper_wrist_to_tip_m - gripper_tip_to_centre_m` 算出来），两处必须
-    一致；改一处不改另一处，规划用的 TCP 和这里算的抓取点就会差几毫米。
+    `gripper_wrist_to_tip_m - gripper_tip_to_centre_m` 算出来），两处必须一致；
+    改一处不改另一处，规划用的 TCP 和这里算的抓取点就会差几毫米。
     """
     return SceneMeasurements(
         table_z=Measurement(-0.0405, 'm', 'measured',
                             '地面：底座底面 z=-0.0155（stl 包围盒）+ 2.5 cm 地台；方块放在地面上'),
         tcp_offset_y=Measurement(0.1125, 'm', 'measured',
-                                 '腕部→指尖 130 mm 减 夹取中心到指尖 17.5 mm（2026-10-21 尺量）'),
+                                 '腕部→指尖 130 mm 减 夹取中心到指尖 17.5 mm（尺量）'),
         object_edge=Measurement(0.024, 'm', 'measured',
                                 '方形方块，边长 24 mm'),
     )

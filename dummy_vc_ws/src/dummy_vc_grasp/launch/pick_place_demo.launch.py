@@ -6,21 +6,19 @@
   2. `scene_node`（把地面/地台发进 planning scene）
   3. `pick_place_node`（抓取规划 + 任务状态机）
 
-**不含机械臂驱动、也不含 MoveIt** —— 按 docs/08 的做法，它们各开一个终端，
-这样每层的日志和退出都各归各的。MoveIt 没起来时 `pick_place_node` 会报
-"MoveIt 动作服务器没连上"（这是它该报的错，不是这个 launch 的问题）。
+**不含机械臂驱动、也不含 MoveIt** —— 它们各开一个终端，这样每层的日志和
+退出都各归各的。MoveIt 没起来时 `pick_place_node` 会报"MoveIt 动作服务器
+没连上"（这是它该报的错，不是这个 launch 的问题）。
 
 **相机/视觉已经单独起过时，务必加 `vision:=false`。** 否则这里会再起一套
-`orbbec_camera` + `vision_node`：两个进程抢同一个 UVC 设备，第二个只会每十几秒
-刷一轮 `Failed to initialize device uvc_open failed: [Path: 2-1-2.0, Return
-Code: -6] status:115` / `Resetting device UID:`（`-6` = ENXIO，设备被占用），
-还会多一个 `robot_state_publisher` 和 `moveit_hardware.launch.py` 发同名 TF。
-2026-10-22 真机就是这么撞的，见 docs/04 的 G1。
+`orbbec_camera` + `vision_node`：两个进程抢同一个 UVC 设备，第二个只会一直
+重试、刷 `uvc_open failed`（`-6` = ENXIO，设备被占用），还会多一个
+`robot_state_publisher` 发同名 TF。
 
-`vision:=false` **只影响这里起不起相机和 vision_node**：`pick_place_node` 照样
-订阅 `/detected_objects`，所以另一个终端里 `vision_demo.launch.py` 起的
-vision_node 会照常喂数据。它自己从来不连相机 —— 别把"没数据"当成"没起相机"，
-先看 `ros2 topic echo --once /detected_objects` 和节点日志里那句
+`vision:=false` **只影响这里起不起相机和 vision_node**：`pick_place_node`
+照样订阅 `/detected_objects`，所以另一个终端里 `vision_demo.launch.py` 起的
+vision_node 会照常喂数据。它自己从来不连相机 —— 别把"没数据"当成"没起
+相机"，先看 `ros2 topic echo --once /detected_objects` 和节点日志里那句
 "收到第 1 条 /detected_objects"。
 
 节点默认**不会自己开始**（`auto_start:=false`）：启动后安静地等
@@ -33,8 +31,8 @@ vision_node 会照常喂数据。它自己从来不连相机 —— 别把"没�
 
 `execute:=true` 才会真的下发执行；默认只规划（`plan_only`）。
 
-夹爪是**另一条链路**（2026-10-27 起）：驱动里的 `hand.*` 不能用（`0x382` 在
-真板子上是触发标定），所以夹爪由 `gripper_can_node` 走 USB-CAN 适配器，话题
+夹爪是**另一条链路**：驱动里的 `hand.*` 不能用（`0x382` 在真板子上是触发
+标定），所以夹爪由 `gripper_can_node` 走 USB-CAN 适配器，话题
 `/gripper/width`（毫米）与 `/gripper/position`（回读）。`gripper:=true` 才会
 把那个节点一起起来；不起的话 `pick_place_node` 照样能走到竖直下降，然后在
 合爪处停下（这是默认，安全）。

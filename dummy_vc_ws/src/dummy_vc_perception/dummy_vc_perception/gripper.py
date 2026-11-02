@@ -1,25 +1,18 @@
 #!/usr/bin/env python3
 """夹爪开合模型：开口宽度 <-> hand.set_angle 指令值。
 
-为什么单独一个文件、还要一个"未实测就拒绝下发"的开关：
+URDF 里的夹爪几何与实物不符，hand.* 又会卡死整机，所以"开口对应多少角度"没有可信来源；
+未实测就按猜的线性关系下发，猜错方向就是夹碎或崩飞，因此这里拒绝下发。
 
-    docs/04 的 A1 写着 URDF 里的夹爪几何（0~0.023 m 行程、两指 origin）来自
-    原作者的通用模型，**与实物不符**；A2 又写着 hand.* 三个方法会卡死整机。
-    所以"开口 40 mm 对应 hand.angle 多少"这件事现在**没有任何可信来源**。
-
-    既然没有可信来源，代码能做的只有一件事：大声拒绝。按猜出来的线性关系
-    去夹，猜错的方向是"夹碎"或"崩飞"（docs/01 的风险 R9）。
-
-怎么变成可信的：按 docs/02 的阶段 0.5，夹几个已知厚度的物体，量出两个端点
-（开/合各一个），填成 Measurement(source='measured')，
-command_for_width() 才会返回指令值。
+量出开、合两个端点并填成 Measurement(source='measured') 后，
+command_for_width() 才返回指令值。
 """
 from dataclasses import dataclass
 from typing import List, Tuple
 
 from .geometry import GeometryError, Measurement
 
-#: 开口 = 边长 + 这个间隙（docs/01 的阶段 5 写的是"+2mm"）。
+#: 开口 = 边长 + 这个间隙（2 mm）。
 DEFAULT_GRASP_CLEARANCE_M = 0.002
 
 
@@ -29,10 +22,9 @@ class UnverifiedGripperModel(RuntimeError):
 
 @dataclass(frozen=True)
 class FingerOpeningModel:
-    """开口宽度 <-> hand.angle 的映射，按两段之间的线性插值。
+    """开口宽度 <-> hand.angle 的映射，两端点之间线性插值。
 
-    角度端点的正负不定（设备角度 0 点是哪一端还没实测），所以这里只要求
-    两个角度不相等，不去比大小。
+    设备角度 0 点对应哪一端尚未标定，所以只要求两个角度不相等，不比大小。
     """
     angle_open_deg: Measurement
     width_open_m: Measurement
@@ -65,7 +57,7 @@ class FingerOpeningModel:
                       if not getattr(self, n).is_measured)
 
     def angle_for_width(self, width_m):
-        """开口宽度 -> hand.angle 指令值。越界直接抛：范围外的开口不夹。"""
+        """开口宽度 -> hand.angle 指令值；超出实测范围直接抛。"""
         width = float(width_m)
         low = self.width_closed_m.value
         high = self.width_open_m.value
@@ -92,7 +84,7 @@ class FingerOpeningModel:
                 + ratio * (self.width_open_m.value - self.width_closed_m.value))
 
     def command_for_width(self, width_m):
-        """唯一允许用来生成 hand.set_angle 指令值的入口。未实测就抛。"""
+        """唯一允许用来生成 hand.set_angle 指令值的入口；未实测就抛。"""
         if not self.verified:
             raise UnverifiedGripperModel(
                 '夹爪开口↔角度映射还没实测（未量：{}），拒绝给出指令值。'
@@ -114,19 +106,17 @@ class FingerOpeningModel:
 
 
 def unverified_placeholder_model() -> FingerOpeningModel:
-    """一个纯粹用来把数据通路跑通的占位映射 —— 两个方向都可能反。
+    """把数据通路跑通的占位映射，开合两个方向都按占位值给出。
 
-    0.055 m 开口是 2026-10-21 尺量的实物最大开口（此前用 URDF 的 2x0.023
-    m 推算的 0.046 是错的：A1 说 URDF 那套夹爪几何与实物不符）。0 / 30 deg
-    来自设备角度范围 0~30（docs/04），哪一端对应开、哪一端对应合仍未实测；
-    A2 说 hand.* 会卡死整机。所以这个模型的 command_for_width() 永远抛
-    UnverifiedGripperModel —— 宽度有实测值，角度映射没有。
+    0.055 m 开口是尺量的实物最大开口；0 / 30 deg 来自设备角度范围，哪一端对应开、
+    哪一端对应合仍未实测。宽度有实测值、角度映射没有，所以 command_for_width()
+    永远抛 UnverifiedGripperModel。
     """
     return FingerOpeningModel(
         angle_open_deg=Measurement(0.0, 'deg', 'placeholder',
                                    'hand 角度范围 0~30，哪端是开未实测'),
         width_open_m=Measurement(0.055, 'm', 'measured',
-                                 '2026-10-21 尺量实物最大开口 55 mm'),
+                                 '尺量实物最大开口 55 mm'),
         angle_closed_deg=Measurement(30.0, 'deg', 'placeholder',
                                      '同 angle_open_deg，方向未实测'),
         width_closed_m=Measurement(0.0, 'm', 'placeholder',
@@ -137,9 +127,9 @@ def unverified_placeholder_model() -> FingerOpeningModel:
 def opening_endpoints_from_measurements(closed_width_m, closed_angle_deg,
                                         open_width_m, open_angle_deg,
                                         where_closed, where_open) -> FingerOpeningModel:
-    """现场量完之后，用这个函数把四个数装成已实测的模型。
+    """现场量完后，用四个数装成已实测的模型。
 
-    参数名按"闭合端点 / 打开端点"分组，就是阶段 0.5 的操作顺序。
+    参数按"闭合端点 / 打开端点"分组。
     """
     return FingerOpeningModel(
         angle_open_deg=Measurement(float(open_angle_deg), 'deg', 'measured', where_open),

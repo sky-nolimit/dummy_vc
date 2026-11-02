@@ -42,8 +42,4 @@ source install/setup.bash
 
 ## 检查
 
-不需要硬件、也不需要 source ROS 即可运行：
-
-```bash
-python ../tools/run_checks.py
-```
+不需要硬件、也不需要 source ROS 即可运行检查，但那些开发工具只在开发机上，不随仓库分发。

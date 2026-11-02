@@ -1,12 +1,9 @@
 """合爪那一步的两件事：闭到多宽、以及"到底夹住没有"。
 
-夹爪只回一个开口（毫米），没有力的回读，所以"夹住"只能靠**位置差**判：
-
-* 手指被方块挡住 → 停在目标之外（实测 > 目标 + 一点点）；
-* 没夹到东西 → 手指会走到目标，甚至被两指自己挡住而更窄。
-
-电流其实也能读（`0x3A1`），但它的单位没标定过，只适合人肉看着比大小，
-**不拿它当判据** —— 否则阈值就是个瞎猜的数，换个方块就得重调。
+夹爪只回一个开口（毫米），没有力的回读，所以"夹住"只能靠**位置差**判：手指被
+方块挡住就停在目标之外，没夹到东西就会走到目标、甚至被两指自己挡住而更窄。
+电流 `0x3A1` 也能读，但单位没标定过，**不拿它当判据** —— 否则阈值就是瞎猜的，
+换个方块就得重调。
 
 纯函数、不 import rclpy，Windows 上能直接跑。
 """
@@ -52,17 +49,12 @@ def close_width(edge_m, clearance_m=DEFAULT_CLEARANCE_M, min_m=DEFAULT_MIN_CLOSE
 def verdict(target_m, measured_m, blocked_m=DEFAULT_BLOCKED_M, timed_out=False):
     """根据目标开口与实测开口判断夹没夹住。
 
-    参数
-    ----
-    target_m : 下发的手指目标开口（米）
-    measured_m : 最近一次回读的开口（米），没有回读就传 `None`
-    blocked_m : 实测比目标宽多少才算被挡住
-    timed_out : 已经等够了时间；只有这时才允许把"走到目标"判成空夹，
-                否则手指可能只是还没合拢
+    target_m：下发的手指目标开口（米）。measured_m：最近一次回读的开口（米），
+    没有回读就传 `None`。blocked_m：实测比目标宽多少才算被挡住。timed_out：
+    已经等够了时间，只有这时才允许把"走到目标"判成空夹，否则手指可能只是还没
+    合拢。
 
-    返回
-    ----
-    `HELD` / `EMPTY` / `BLIND`，或者 `None`（还在等）
+    返回 `HELD` / `EMPTY` / `BLIND`，或者 `None`（还在等）。
     """
     if measured_m is None:
         return BLIND if timed_out else None

@@ -15,10 +15,8 @@ from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64
 
-# MoveIt 的控制器插件只通过 **action** 下发轨迹，所以驱动必须自己当 server。
-# 两个 import 都不能少：control_msgs 给 action 定义，action_msgs 给 GoalStatus
-# 和错误码常量。缺 action_msgs 时 `from control_msgs.action import
-# FollowJointTrajectory` 不会报错，但在模块里引用 GoalStatus 时会 NameError。
+# MoveIt 的控制器插件只通过 action 下发轨迹，驱动必须自己当 server；两个
+# import 都不能少，缺 GoalStatus 时模块里引用它会 NameError。
 from control_msgs.action import FollowJointTrajectory
 from action_msgs.msg import GoalStatus
 
@@ -29,15 +27,10 @@ import numpy as np
 import dummy_cli_tool.ref_tool
 
 # 关机时最多等多久让手臂回到收缩姿态（秒）。见 _retract_and_power_off()。
-#
-# 为什么写死常量而不是加一个参数：这是安全兜底，不是需要标定的值；而且新增
-# 参数必须同时改 config/dummy_controller.yaml 与 launch 里的 DESCRIPTIONS，
-# 否则 launch 直接 RuntimeError（那是刻意的自检，见 launch 文件）。
-#
-# 6 秒的来由：`ros2 launch` 在 sigterm_timeout（默认 5 秒）之后会给子进程发
-# SIGTERM、再 sigkill_timeout（默认 5 秒）之后发 SIGKILL。也就是说"回收缩 +
-# 等它到位 + 断使能"必须在 10 秒内做完，否则会被 SIGKILL 打死在半路 —— 那
-# 正好是我们要避免的"手臂还在动，使能已经掉了"。
+# 写死而不用参数：这是安全兜底、不是标定值，新增参数还要同步 YAML 与 launch
+# 的 DESCRIPTIONS，否则 launch 直接 RuntimeError。6 秒来自 `ros2 launch` 的
+# SIGTERM（默认 5 秒）与 SIGKILL（再 5 秒）：收缩、到位、断使能必须在这 10 秒
+# 内做完，否则手臂还在动、使能已经掉了。
 SHUTDOWN_RETRACT_TIMEOUT_SEC = 6.0
 
 # 日志里用的关节名，顺序与设备一致。
@@ -59,9 +52,7 @@ def describe_home_gap(raw, reference, tol_deg):
     * `mixed`        三个以上、但不到六个偏了。说不清哪种，只报数不猜。
     * `elsewhere`    六个都偏了 —— 多半是把它停在了别的姿态，属于正常。
 
-    为什么要把这几种分开：用户的原话是"不知道什么时候 j6 被旋转了一点点，
-    等驱动上电才发现歪了"。区别就在这里 —— 停错姿态是六轴一起偏，被碰过的
-    是单轴偏。日志里这样说才有用。
+    区别就在这里：停错姿态是六轴一起偏，被碰过的是单轴偏。
     """
     if reference is None or len(reference) != 6:
         return [], 'no_reference'
@@ -83,9 +74,7 @@ class dummy_controller(LifecycleNode):
         # ------------------------------------------------------------------
         # 关节名必须与 dummy2_urdf 一致，否则 robot_state_publisher 匹配不上，
         # TF 树是死的（RViz 里机械臂不动，MoveIt 算不出正确末端位姿）。
-        #
-        # 上游原版用的是 joint_1..joint_6（下划线），URDF 用的是 dummy2_joint1..6，
-        # 两者从来没有对齐过。这是阶段 1 修的第一个问题。
+        # 设备侧用的是 joint_1..joint_6，与 URDF 的 dummy2_joint1..6 对不上。
         # ------------------------------------------------------------------
         self.joint_names = [f'dummy2_joint{i}' for i in range(1, 7)]
 
@@ -113,28 +102,22 @@ class dummy_controller(LifecycleNode):
         #   robot.joint_N.set_position 度
         #   URDF / MoveIt / /joint_states  弧度
         # ------------------------------------------------------------------
-        # 这几个默认值必须与 config/dummy_controller.yaml 完全一致。
-        # launch 会从 YAML 读取并显式传入，所以正常情况下生效的是 YAML；
-        # 这里的默认值只是兜底，但**三处漂移过就出过错**，必须同步。
-        #
-        # joint_sign 的 j2/j3 在 probe_pairs 实测后由 -1 改为 +1：
-        # 读回与指令在 home/reset 之间的位移同向。详见配置文件的说明。
+        # 这几个默认值必须与 config/dummy_controller.yaml 完全一致：launch 从
+        # YAML 读取并显式传入，这里的默认值只是兜底，不同步就会静默跑偏。
+        # joint_sign 的 j2/j3 是 +1：读回与指令在 home/reset 之间的位移同向。
         self.joint_sign = [-1.0, -1.0, -1.0, 1.0, -1.0, -1.0]
         self.joint_offset_deg = [0.215, 74.572, -91.474, -0.910, -0.035, -0.040]
         self.move_j_offset_deg = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
 
-        # 位置参数：单位是**度**，且这里的角度是 **move_j 空间**（设备侧），
-        # **不是** URDF 角度。下发时直接原样交给 move_j，不做任何变换。
-        #
-        # 这是上游驱动里被实体机械臂验证过的值，直接复用。
+        # 位置参数：单位是**度**，且是 **move_j 空间**（设备侧），**不是** URDF
+        # 角度。下发时原样交给 move_j，不做任何变换。
         # home = 7 姿态（手臂自肩部水平前伸），对应 URDF 空间 [0,0,0,0,0,0]。
         self.home_joints = np.array([0.0, 0.0, 90.0, 0.0, 0.0, 0.0])
         self.reset_joints = np.array([0.0, -75.0, 180.0, 0.0, 0.0, 0.0])
 
-        # 内部状态统一用**弧度**（ROS 惯例）。
-        # 名字里带 urdf_rad 是刻意的：这里存的是 URDF 关节角（弧度），
-        # **不是**设备的 angle 回读值（度）。两者之间差一次 angle_to_urdf
-        # 换算；属性名含糊时曾经在急停路径上被混用（把弧度直接当度下发）。
+        # 内部状态统一用**弧度**（ROS 惯例）。名字里带 urdf_rad 是刻意的：
+        # 存的是 URDF 关节角（弧度），**不是**设备的 angle 回读值（度），中间
+        # 差一次 angle_to_urdf 换算；弄混就会把弧度直接当度下发。
         self.current_urdf_rad = np.zeros(6)
         self.current_end_pose = np.zeros(6)
 
@@ -143,9 +126,8 @@ class dummy_controller(LifecycleNode):
         self._last_cmd_movej = None
 
         # 最后一次下发成功的夹爪角度。**夹爪没有回读** —— 设备上 hand 只有
-        # set_angle / set_current_limit / set_enable，没有任何可读属性
-        # （tools/probe_gripper.py --stage 0 实测）。所以发布手指位置时只能
-        # 用这个命令值，而不是测量值。
+        # set_angle / set_current_limit / set_enable，没有任何可读属性，所以
+        # 发布手指位置只能用这个命令值，而不是测量值。
         self._last_gripper_angle = None
 
         # ------------------------------------------------------------------
@@ -153,39 +135,34 @@ class dummy_controller(LifecycleNode):
         #
         # `_traj_executing` 是"机械臂正忙"的单一事实来源，**两条入口共用**：
         #   - 旧的话题订阅 /joint_trajectory_controller/joint_trajectory
-        #     （上游驱动留下来的用法，tools/ 里的脚本还在用，不能删）
         #   - MoveIt 用的 action server（见 init_trajectory_action_server）
         #
-        # `_traj_lock` 保护这件事，因为它有两个线程会碰：执行器线程（两条入口
-        # 的回调都在这里）和 `_traj_thread`（真正下发 waypoint 的线程）。
-        # 没有这把锁时，"检查忙不忙"和"置忙"之间会被另一个回调插进来，
-        # 两条轨迹就会同时在动 —— 而设备的 move_j 是无状态的，结果就是
-        # 两个来源交替下发，机械臂走出一条谁都没规划过的路。
+        # `_traj_lock` 保护它，因为有两个线程会碰：执行器线程（两条入口的回调）
+        # 和 `_traj_thread`。没有这把锁时，"检查忙不忙"和"置忙"之间会被另一个
+        # 回调插进来，两条轨迹就会同时在动 —— 设备的 move_j 是无状态的，结果
+        # 是两个来源交替下发，机械臂走出一条谁都没规划过的路。
         #
-        # 为什么执行要放到线程里：`_execute_trajectory` 按 time_from_start
-        # 逐点 sleep，一条 MoveIt 轨迹动辄几十秒。默认的单线程执行器里，
-        # 它在回调里睡多久，pub_timer（/joint_states）就停多久 —— MoveIt 和
-        # RViz 会看到机器人"消失"，而 execute 的成功判据恰恰依赖 /joint_states。
-        # fibre 协议层自己带锁（protocol.py 的 remote_endpoint_operation），
-        # 所以从别的线程调 move_j / 读关节是安全的。
+        # 执行必须放到线程里：`_execute_trajectory` 按 time_from_start 逐点
+        # sleep，一条轨迹动辄几十秒；默认的单线程执行器里它在回调里睡多久，
+        # pub_timer（/joint_states）就停多久 —— MoveIt 和 RViz 会看到机器人
+        # "消失"，而 execute 的成功判据恰恰依赖 /joint_states。
+        # fibre 协议层自己带锁，所以从别的线程调 move_j / 读关节是安全的。
         # ------------------------------------------------------------------
         self._traj_executing = False
         self._traj_lock = threading.Lock()
         self._traj_thread = None
         self._traj_action_server = None
-        # 进度日志的上一次打印时刻。这里给个初值，免得将来有人在
-        # _execute_trajectory 之外调用 _progress_log_due() 时 AttributeError。
+        # 进度日志的上一次打印时刻。给初值，免得在 _execute_trajectory 之外
+        # 调用 _progress_log_due() 时 AttributeError。
         self._last_progress_log = 0.0
 
         # ------------------------------------------------------------------
         # 关机（安全相关）
         #
         # `_shutdown_lock` + `_shutdown_done` 保证"回收缩姿态、等它到位、再断
-        # 使能"这件事**只做一次**。退出路径不止一条：launch 触发 lifecycle
-        # shutdown 转换、Ctrl+C 的 KeyboardInterrupt、rclpy 关掉 context 之后
-        # spin() 正常返回。它们可能先后甚至并发地进来。后进来的那个会阻塞在
-        # 锁上，等第一个做完、看到 done 再直接返回 —— 这样 main() 的 finally
-        # 不会在手臂还在动的时候就把节点拆掉。
+        # 使能"**只做一次**。退出路径不止一条（lifecycle shutdown、Ctrl+C、
+        # spin() 正常返回），可能并发进来；后进来的阻塞在锁上，看到 done 就
+        # 返回，这样 main() 的 finally 不会在手臂还在动时拆节点。
         #
         # `_shutting_down` 是给轨迹线程看的：关机时必须先把正在下发的
         # waypoint 停掉，否则收缩姿态的命令会和轨迹的 waypoint 交替发给设备，
@@ -205,14 +182,11 @@ class dummy_controller(LifecycleNode):
         # (1) 7 姿态的 angle 回读就是该姿态的偏置（此时 URDF 应为全零）
         default_offset_deg = [0.215, 74.572, -91.474, -0.910, -0.035, -0.040]
         # (2) 下发链零点。与 (1) 之和必须等于 home_joints_deg —— 这是锚点
-        #     处唯一能被约束到的关系，两个参数之间怎么分配不影响锚点行为，
-        #     所以必须配合实测配对一起验证（tools/check_downlink.py）。
+        #     处唯一能被约束到的关系，两者怎么分配不影响锚点行为，要靠实测
+        #     配对验证。
         default_movej_offset_deg = [0.0, 0.0, 90.0, 0.0, 0.0, 0.0]
-        # (3) URDF 空间里的附加偏置，默认全零。
-        #     曾经把 j3 设成 180 想抵消姿态反差，方向加反了，反而把本该为 0
-        #     的值推成 180——那正是问题本身。详见 config 里的推导记录。
-        #     当模型与实物**转向相同但整体差一个固定角度**时才改这里。
-        #     若模型与实物**转向相反**，应改 joint_sign 而不是这里。
+        # (3) URDF 空间里的附加偏置，默认全零。只在模型与实物**转向相同但
+        #     整体差一个固定角度**时改这里；**转向相反**应改 joint_sign。
         default_urdf_offset_deg = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         self.declare_parameter('joint_sign', default_sign)
         self.declare_parameter('joint_offset_deg', default_offset_deg)
@@ -220,10 +194,8 @@ class dummy_controller(LifecycleNode):
         self.declare_parameter('urdf_offset_deg', default_urdf_offset_deg)
         # ---- 启动位姿核对 --------------------------------------------------
         # 标定 home 时的六个原始角不单独存成参数，而是由 joint_offset_deg /
-        # joint_sign / urdf_offset_deg 反推（见 _home_reference）。曾经把它做成
-        # 参数、默认值写 []，rclpy 把空列表推成 BYTE_ARRAY，YAML 里传 double
-        # array 就让 on_configure 抛 InvalidParameterTypeException；而且它本来
-        # 就是上面三张表的函数，存一份只是多一个会不同步的地方。
+        # joint_sign / urdf_offset_deg 反推（见 _home_reference）：它就是上面
+        # 三张表的函数，存一份只会多一个不同步的地方。
         self.declare_parameter('home_check_tol_deg', 1.0)
         # homing 之后等手臂走到位：超时时间与容差。见 _wait_for_pose 的说明。
         self.declare_parameter('home_timeout_s', 20.0)
@@ -240,14 +212,10 @@ class dummy_controller(LifecycleNode):
         self.declare_parameter('grip_angle_open', 30.0)
         # 夹持力上限。这是唯一能防"夹碎"的手段。
         #
-        # **默认 0.1 是刻意取小的。** 这个值在使能夹爪之前就被写进设备
-        # （见 _init_gripper_with_timeout 里"要在使能之前压低电流上限"那段），
-        # 所以一旦 gripper_enable 被打开，它立刻生效。取大了，第一次装夹就
-        # 可能压坏东西。方案 R9 要求从极小值开始扫，实测后再填回配置。
-        #
-        # 固件里 DummyHand::maxCurrent 的默认值是 0.7，范围 0~1；那个值对
-        # 未标定的夹爪偏大，所以没有沿用。DummyHand::SetEnable(true) 做的事
-        # 就是 SetMaxCurrent(0.7)，即"使能"等于"把电流上限写成 0.7"。
+        # **默认 0.1 是刻意取小的**：取大了第一次装夹就可能压坏东西，应从
+        # 极小值开始扫、实测后再填回配置。固件里 DummyHand::maxCurrent 的
+        # 默认值是 0.7（范围 0~1），对未标定的夹爪偏大，所以没有沿用 ——
+        # DummyHand::SetEnable(true) 做的事就是 SetMaxCurrent(0.7)。
         self.declare_parameter('grip_current_limit', 0.1)
         # 兼容旧参数名，避免已有配置直接报"未声明参数"
         self.declare_parameter('hand_max_angle', 30.0)
@@ -256,9 +224,9 @@ class dummy_controller(LifecycleNode):
         self.declare_parameter('wrap_max_deg', 360.0)
         # 单次 move_j 允许的最大行程（度）。超过就报错而不是静默下发。
         #
-        # 设备**会静默忽略够不着的设定值** —— 这正是"下发成功但机械臂不动"
-        # 能藏很久的原因。默认 180：一个关节一次转过半圈以上，几乎肯定是
-        # 整圈折算选错了，或者目标姿态本身有问题。
+        # 设备**会静默忽略够不着的设定值**，所以"下发成功但机械臂不动"能藏
+        # 很久。默认 180：一个关节一次转过半圈以上，几乎肯定是整圈折算选错
+        # 了，或者目标姿态本身有问题。
         self.declare_parameter('max_move_jump_deg', 180.0)
         # 参考位姿微调（度，逐关节）。见配置文件的说明：只补偿驱动用来做
         # 整圈折算的"当前位置"，不改变 homing 到达的物理姿态。
@@ -269,44 +237,41 @@ class dummy_controller(LifecycleNode):
         self.declare_parameter('state_read_hz', 10.0)
         self.declare_parameter('joint_state_pub_hz', 50.0)
         # move_j 可接受区间，逐关节下界/上界交替，共 12 个数，单位度。
-        # **实测得来**（tools/probe_range.py）。区间外的值被设备静默丢弃。
+        # **实测得来**。区间外的值被设备静默丢弃，整条命令一起作废。
         self.declare_parameter('movej_accepted_range_deg', [
             -165.0, 165.0, -75.0, 90.0, 45.0, 180.0,
             -180.0, 165.0, -90.0, 90.0, -180.0, 180.0])
         # URDF 全零时应当下发的 move_j 值，逐关节，单位度。
         #
-        # **这是整条下发链唯一的常数项**，取代了此前把 joint_offset_deg 和
-        # move_j_offset_deg 相加的写法。那个写法对 j3 给出 -1.474，落在设备
-        # 可接受区间 [45, 180] 之外，于是整条命令被静默丢弃 —— 就是那个
-        # "下发成功但机械臂不动"。
+        # **这是整条下发链唯一的常数项**，取代了把 joint_offset_deg 和
+        # move_j_offset_deg 相加的写法：那个写法对 j3 给出 -1.474，落在设备
+        # 可接受区间 [45, 180] 之外，整条命令被静默丢弃。
         #
-        # 取值就是 home_joints_deg：URDF 全零 = 7 姿态，而 7 姿态对应的
-        # move_j 就是 home_joints_deg，这一点由 homing()、probe_pairs 的实测
-        # 配对、以及 probe_range 的可接受区间三方印证。
+        # 取值就是 home_joints_deg：URDF 全零 = 7 姿态。
         self.declare_parameter('movej_urdf_zero_deg',
                                [0.0, 0.0, 90.0, 0.0, 0.0, 0.0])
         # 设备连接超时（秒）。**不要设为 0 或负数**：fibre 的 find_any 在
         # timeout=None 时会永久阻塞，没有设备时会让启动静默卡死。
         self.declare_parameter('connect_timeout_sec', 30.0)
-        # 夹爪初始化超时（秒）。夹爪的 fibre 调用曾经阻塞过，而它若在
-        # on_configure 里同步等待就会冻死整个节点，连 /joint_states 都不发。
+        # 夹爪初始化超时（秒）。夹爪的 fibre 调用会阻塞，若在 on_configure
+        # 里同步等待就会冻死整个节点，连 /joint_states 都不发。
         self.declare_parameter('gripper_init_timeout_sec', 5.0)
-        # 是否在启动时初始化夹爪。**2026-10-29 起这个开关已经无效。**
+        # 是否在启动时初始化夹爪。**这个开关已经无效。**
         #
-        # 主控这条通道封掉了，原因写在 `_init_gripper_with_timeout` 的 docstring
-        # 里：固件把 0x382 当"设角度"发出去，夹爪板把它当"触发编码器标定"；
-        # 固件把 0x381 当"电流上限"发出去，夹爪板把它当 uint32 使能位。两边的
-        # 意思对不上，调用一次就可能把夹爪的标定表擦掉。旧固件还会因为发送
-        # 卡死拖垮整机。夹爪现在由 `dummy_vc_grasp/gripper_can_node` 经 USB-CAN
-        # 适配器直接驱动（`/gripper/width`，单位毫米）。
+        # 主控这条通道封掉了，原因见 `_init_gripper_with_timeout`：固件把
+        # 0x382 当"设角度"发出去，夹爪板把它当"触发编码器标定"；0x381 被固件
+        # 当"电流上限"，夹爪板当 uint32 使能位。调用一次就可能擦掉夹爪的标定
+        # 表，旧固件还会因为发送卡死拖垮整机、只能断电。夹爪现在由
+        # `dummy_vc_grasp/gripper_can_node` 经 USB-CAN 适配器直接驱动
+        # （`/gripper/width`，单位毫米）。
         #
-        # 传 true 不报错、也不再发任何帧，只在日志里明确说"已忽略"。
+        # 传 true 不报错、也不再发任何帧，只在日志里说"已忽略"。
         self.declare_parameter('gripper_enable', False)
         # 夹爪是否初始化成功。失败、超时或被禁用后为 False。
         self.gripper_ready = False
 
         # ------------------------------------------------------------------
-        # MoveIt 执行接口。这一段是整个"规划成功但不动"问题的正面回答。
+        # MoveIt 执行接口
         # ------------------------------------------------------------------
         self.declare_parameter('trajectory_action_enable', True)
         # action server 名必须与 dummy_vc_moveit_config/config/moveit_controllers.yaml
@@ -316,26 +281,20 @@ class dummy_controller(LifecycleNode):
         # action_ns       = follow_joint_trajectory
         # 也就是 /joint_trajectory_controller/follow_joint_trajectory。
         #
-        # **只有两段。** action_ns 本身就叫 follow_joint_trajectory，所以名字
-        # 看起来像"controller + 动作类型"，很容易顺势再补一个
-        # follow_joint_trajectory —— 那是错的，而且报错文本和"名字少一段"
-        # 完全一样：
+        # **只有两段。** action_ns 本身就叫 follow_joint_trajectory，很容易
+        # 顺势再补一个 —— 那是错的，而且报错文本和"名字少一段"完全一样：
         #     Action client not connected to action server: ...
-        # 然后放弃执行 —— 规划一路是绿的，所以这个错误很容易被当成规划问题。
-        # tools/selftest_follow_joint_trajectory.py 会拿 YAML 和这里做交叉核对，
-        # 并把"同一段重复了两次"单独判一次。
+        # 规划一路是绿的，所以这个错误很容易被当成规划问题。
         self.declare_parameter(
             'trajectory_action_name',
             '/joint_trajectory_controller/follow_joint_trajectory')
         # 发给客户端的反馈频率（Hz）。**不能太高**：反馈要和 joint_states
         # 抢同一个执行器线程，而且它不发也能让 MoveIt 正常收尾（它等的是
-        # result）。0 或负数 = 不发反馈，这条路径最省事。
+        # result）。0 或负数 = 不发。
         #
-        # 目前这个值只用来决定**执行进度日志**打多密（见 _execute_trajectory
-        # 里的 _progress_log_due）。真正的 goal_handle.publish_feedback()
-        # 没有实现：MoveIt 等的是 result，feedback 只影响 RViz 里那条进度条，
-        # 而在设备线程上发布反馈的线程安全性我无法在本机验证（本机没有 ROS）。
-        # 要么在虚拟机上验证后补上，要么接受"没有进度条"。
+        # 目前这个值只决定**执行进度日志**打多密（见 _execute_trajectory 里的
+        # _progress_log_due）。goal_handle.publish_feedback() 没有实现：feedback
+        # 只影响 RViz 里的进度条，在设备线程上发布它的线程安全性未验证。
         self.declare_parameter('trajectory_feedback_hz', 5.0)
 
         self.joint_sign = list(self.get_parameter('joint_sign').value)
@@ -447,14 +406,11 @@ class dummy_controller(LifecycleNode):
     #   urdf_deg = sign * (angle - joint_offset_deg)
     #   move_j   = urdf_deg / sign + move_j_offset_deg
     #
-    # 除以 sign 而不是乘，是因为 sign 的物理含义是
-    # "URDF 正方向相对设备正方向是否翻转"，所以进 URDF 时乘、出 URDF 时除。
+    # 除以 sign 而不是乘，是因为 sign 的物理含义是"URDF 正方向相对设备
+    # 正方向是否翻转"，所以进 URDF 时乘、出 URDF 时除。
     #
-    # sign 的确定方法（可重复，逐关节做）：
-    #   用 tools/test_motion.sh 给某个关节一个正向增量，
-    #   看实物与 RViz 模型的转向是否一致。
-    #   实物逆时针而模型顺时针 -> 该关节 sign 应为 -1。
-    #   一次只改一个关节，改完重测。
+    # sign 的确定方法：给某个关节一个正向增量，看实物与 RViz 模型的转向
+    # 是否一致；实物逆时针而模型顺时针则该关节为 -1。一次只改一个关节。
     #
     # 一致性锚点（7 姿态，物理已验证）：
     #   angle  = [0.215, 74.572, -91.474, -0.910, -0.035, -0.040]
@@ -477,10 +433,6 @@ class dummy_controller(LifecycleNode):
             下发  move_j = (urdf - off) / sign + movej_urdf_zero_deg
 
         只进回读：模型显示对了，手臂仍按老零点走；只进下发：反过来。
-
-        **这个参数在之前的版本里一个函数都没用** —— 声明了、打印了、校验了，
-        但没有任何一条链读它，配置里却写着"转向相同但整体差一个固定角度时
-        使用"。于是"改了这个数没反应"是必然的。
         """
         raw = self.get_parameter('urdf_offset_deg').value
         try:
@@ -499,13 +451,9 @@ class dummy_controller(LifecycleNode):
         """标定 home 时的六个原始角（度）—— 由三张表反推，不单独存。
 
         URDF 全零时 `angle = (0 - off) / sign + joint_offset_deg`，所以这组数
-        完全由 joint_offset_deg / joint_sign / urdf_offset_deg 决定。
-
-        为什么不做成参数：它和那三张表是同一个东西的两种写法，存一份就多一个
-        会不同步的地方 —— 改了 urdf_offset_deg 忘了改它，启动核对就会天天报
-        "某个轴被碰过"，而实际上什么都没发生。之前把它做成参数、默认值写成
-        `[]`，rclpy 还会把空列表推成 BYTE_ARRAY，YAML 里的 double array 直接
-        让 on_configure 抛异常。
+        完全由 joint_offset_deg / joint_sign / urdf_offset_deg 决定；存一份就
+        多一个会不同步的地方，改了 urdf_offset_deg 忘了改它，启动核对就会天天
+        报"某个轴被碰过"。
         """
         off = self._urdf_offsets()
         ref = []
@@ -520,9 +468,9 @@ class dummy_controller(LifecycleNode):
     def _check_home_pose(self):
         """上电第一件事：这六轴现在到底在哪？与标定 home 差多少？
 
-        这一步只读、不发命令、不改状态。放在 homing 之前，是因为 homing 会把
-        手臂拉到一个按当前标定算出来的"home"；如果某个轴被动过，那之后看到
-        的"歪"就再也分不清是标定错还是它本来就歪。先记一笔，日志里就有据可查。
+        这一步只读、不发命令、不改状态。必须在 homing 之前做：homing 会把
+        手臂拉到按当前标定算出的"home"，那之后看到的"歪"就分不清是标定错
+        还是它本来就歪。
         """
         if self.home_reference_deg is None:
             self.get_logger().warn(
@@ -565,7 +513,7 @@ class dummy_controller(LifecycleNode):
                 f'coupling that slipped, or a calibration that went stale -- '
                 f'NOT of an arm parked in another pose. The model will be '
                 f'wrong by that amount until it is re-checked '
-                f'(tools/read_angles.py --check-home).')
+                f'(the home pose check).')
         elif verdict == 'elsewhere':
             self.get_logger().info(
                 'startup pose check: all six axes are off the calibrated home, '
@@ -587,10 +535,7 @@ class dummy_controller(LifecycleNode):
         return np.array([float(signed[i]) + off[i] for i in range(6)])
 
     def angle_to_urdf(self, angle_deg):
-        """angle 空间（度）-> URDF 关节角（**弧度**）。
-
-        这是回读发布的唯一入口（/joint_states 需要弧度）。
-        """
+        """angle 空间（度）-> URDF 关节角（**弧度**）。回读发布的唯一入口。"""
         return np.radians(self.angle_to_urdf_deg(angle_deg))
 
     def urdf_to_angle(self, urdf_rad):
@@ -613,20 +558,10 @@ class dummy_controller(LifecycleNode):
     def commanded_movej(self):
         """本节点最后一次下发成功的 move_j 值。
 
-        为什么要有这个东西，而不是从原始回读反推当前位置：
-
-        `move_j` 是只写不读的接口，设备不回读命令值。此前驱动用
-
-            current_move_j = raw - move_j_offset_deg
-
-        反推，但那个式子**没有任何物理依据** —— 它是把两个不同来源的常数
-        硬拼在一起。实测暴露出后果：j3 反推得到 -181.474，而依据实测关系
-        （readback = move_j - 180，gain +1，残差 < 0.011 度）该关节真实的
-        move_j 位置是约 +90。差了 270 度。于是"就近整圈等价"把 j3 的目标从
-        -1.474 推到 -360，落进设备拒绝的取值区间，**整条命令被静默丢弃**。
-
-        驱动自己知道它发过什么，所以直接用命令历史既准确又不需要任何假设。
-        初值取 None，表示"还没发过"，首次使用时回退到回读反推。
+        `move_j` 是只写不读的接口，设备不回读命令值；用原始回读反推
+        （`raw - move_j_offset_deg`）没有物理依据，会把 j3 的值推出设备
+        可接受区间，整条命令被静默丢弃。驱动自己知道它发过什么，所以直接用
+        命令历史。初值取 None 表示"还没发过"，首次使用时回退到回读反推。
         """
         return self._last_cmd_movej
 
@@ -652,27 +587,18 @@ class dummy_controller(LifecycleNode):
     def normalize_movej(self, movej_deg, current_deg=None):
         """把 move_j 目标折算进设备的可接受区间。
 
-        **这个函数修过两次，两次都是同一个教训的不同侧面。**
-
-        第一版把每个角度归一化进 [0, 360)，于是物理意图 -20.22 度被写成
-        339.78 度；设备按字面理解要转将近一整圈，命令被静默拒绝。改成"离
-        当前位置最近的整圈等价"之后，j1 之类的关节好了，**但 j3 仍然不动**。
-
-        第二版失败的教训更重要：**设备有一个实测出来的、很窄而且偏离零点的
-        可接受区间**，而"就近整圈等价"假设区间是绕原点的一整圈。实测区间是
+        **设备有一个实测出来的、很窄而且偏离零点的可接受区间**：
 
             joint_1 [-165, 165]   joint_2 [-75, 90]    joint_3 [45, 180]
             joint_4 [-180, 165]   joint_5 [-90, 90]    joint_6 [-180, 180]
 
-        j3 的最小可接受值是 +45。驱动早期算出的 -1.474 落在区间外，**而且它
-        的任何整圈平移（-361.5、358.5、718.5）也都在区间外** —— 所以整圈折算
-        对它无能为力。区间外的值被设备静默丢弃，整条命令不执行。
+        不能把它当成绕原点的一整圈：j3 的最小可接受值是 +45，任何整圈平移
+        都可能仍落在区间外。正确做法是把每个目标平移整圈、落到该关节的
+        [lo, hi] 之内；区间可能跨过 0/360 接缝（例如 [-180, 165]），所以用
+        带符号的取模而不是夹取。
 
-        正确做法：把每个目标平移整圈，落到该关节的 [lo, hi] 之内。区间可能
-        跨过 0/360 接缝（例如 [-180, 165]），所以用带符号的取模而不是夹取。
-
-        找不到合法等价值时**报错**，不静默下发 —— 静默失败正是这件事能藏这么
-        久的原因。
+        找不到合法等价值时**报错**，不静默下发 —— 区间外的值被设备静默丢弃、
+        整条命令不执行，静默失败正是这件事能藏很久的原因。
         """
         rng = list(self.get_parameter('movej_accepted_range_deg').value)
         if len(rng) != 12:
@@ -743,25 +669,16 @@ class dummy_controller(LifecycleNode):
             move_j = angle + move_j_offset_deg
                    = urdf_deg / sign + joint_offset_deg + move_j_offset_deg
 
-        **曾经漏掉 joint_offset_deg，只写了 `urdf/sign + move_j_offset_deg`。**
-        锚点处 urdf = 0，而 joint_offset_deg 在 j2 是 74.572、j3 是 -91.474，
-        所以漏掉它等于把这两个关节的目标整体挪了那么多：
-
-            j2 偏 +74.572 度，仍落在可接受区间 [-75, 90] 内，所以从未暴露；
-            j3 偏 -91.474 度，把值推出 [45, 180]，设备静默丢弃整条命令 ——
-            这就是那个查了很久的"下发成功但机械臂不动"。
-
-        **这个 bug 靠锚点查不出来**：锚点处 urdf = 0，两个 offset 只以**和**的
-        形式出现，任选一组和相同的值行为完全一样。必须用实测的 (move_j, raw)
-        配对才能定住，见 tools/probe_pairs.py 与 tools/check_downlink.py。
+        漏掉 joint_offset_deg 会把 j3 的值推出可接受区间 [45, 180]，设备静默
+        丢弃整条命令；而锚点处 urdf = 0，两个 offset 只以**和**的形式出现，
+        所以这个错靠锚点查不出来，必须用实测的 (move_j, raw) 配对定住。
 
         current_deg 是设备当前位置（move_j 空间），用于把结果折算进该关节的
-        可接受区间。**不传它会退回旧的 [0,360) 语义**，正常路径都应传入。
+        可接受区间。**不传它就不做区间折算**，正常路径都应传入。
         """
         urdf_deg = np.degrees(np.asarray(urdf_rad, dtype=float))
-        # 常数项经 get_parameter 读取，而不是用实例属性 —— 这样
-        # tools/check_conversions.py 的测试桩（只 exec 方法、不跑
-        # on_configure）也能驱动这个函数，否则它会 AttributeError。
+        # 常数项经 get_parameter 读取，而不是用实例属性 —— 这样只 exec 方法、
+        # 不跑 on_configure 的测试桩也能驱动这个函数。
         zero = list(self.get_parameter('movej_urdf_zero_deg').value)
         if len(zero) != 6:
             self.get_logger().error(
@@ -780,8 +697,7 @@ class dummy_controller(LifecycleNode):
 
             angle = move_j - zero + joff
 
-        **必须与 angle_to_movej 成对修改。** 二者各自看着"合理"却互不逆，
-        是本项目反复踩的坑；check_conversions.py 的对拍就是为了抓这个。
+        **必须与 angle_to_movej 成对修改**：二者各自看着"合理"却互不逆。
         """
         zero = list(self.get_parameter('movej_urdf_zero_deg').value)
         if len(zero) != 6:
@@ -807,21 +723,8 @@ class dummy_controller(LifecycleNode):
         其中 `zero = movej_urdf_zero_deg`（URDF 全零时下发的 move_j，即 7 姿态）。
 
         `urdf_offset_deg` 在这一步**相消**（回读时加、下发时减），所以本函数
-        与它无关。这不是巧合，而是"两条链共用同一个 URDF 空间"的必然结果；
-        检验它的是 check_conversions.py 的 D 与 F 两条断言：F 会把偏置设成
-        非零再跑一遍全部恒等式，一旦有人只把偏置接进一条链就会红。
-
-        **这里改过两次，两次都是同一个毛病：凭"看起来该相消"写公式。**
-
-        第一版写 `angle - joff + mjoff`，而 `mjoff` 与 `joff` 承担的职责不同，
-        整体差 2*joff（j2 差 149 度、j3 差 183 度）。
-
-        第二版写成 `angle + mjoff`（joff 完全抵消），在旧的 down-link 下**恰好
-        与两步链一致**，但那是两个错误互相抵消 —— 旧的 down-link 本身错了
-        （对 j3 给出 -1.474，落在设备可接受区间 [45,180] 之外）。down-link 修正
-        之后，这里就露出不一致了。
-
-        所以现在直接由两步链的公式推出常数项，不再依赖任何"抵消"的直觉。
+        与它无关 —— 这是"两条链共用同一个 URDF 空间"的必然结果，不要凭
+        "看起来该相消"写公式，常数项一律由两步链推出。
 
         **不做整圈归一化**，保持为纯换算。要下发给设备请走 urdf_to_movej
         （它带区间折叠），或自行调用 normalize_movej。
@@ -842,16 +745,8 @@ class dummy_controller(LifecycleNode):
 
             urdf = sign * (move_j - zero)
 
-        这个函数**必须与 urdf_to_movej 成对修改**。它改过两次，两次都是因为
-        只改了一边：
-
-          第一版只减了 move_j_offset_deg，与当时的下滑链不构成互逆对；
-          第二版减了 mjoff 和 joff 两项，与**当时**的下滑链互逆，但那条下滑链
-          本身是错的（对 j3 给出 -1.474，超出设备可接受区间）。下滑链修正为
-          `urdf/sign + zero` 之后，这里就必须跟着简化。
-
-        往返测试当时能通过，只是因为同一个错误在正反两次调用里相互抵消 ——
-        这类"自洽但不对"的组合是本项目反复踩的坑。
+        这个函数**必须与 urdf_to_movej 成对修改**：只改一边时往返测试仍能
+        通过，只是因为同一个错误在正反两次调用里相互抵消。
         """
         zero = list(self.get_parameter('movej_urdf_zero_deg').value)
         if len(zero) != 6:
@@ -868,9 +763,8 @@ class dummy_controller(LifecycleNode):
     def on_configure(self, state: State) -> TransitionCallbackReturn:
         """连接设备并把手臂送到 home 姿态。
 
-        每个阶段都要留日志，并且整体包一层异常捕获。原因：此前这里失败时
-        日志会戛然而止（停在参数打印之后），从外面完全看不出卡在哪一步，
-        表现为"启动脚本只有几行输出、机械臂不动"。
+        每个阶段都要留日志，并整体包一层异常捕获：否则失败时日志戛然而止，
+        从外面看不出卡在哪一步。
         """
         try:
             self.get_logger().info('CONFIGURE 1/4: declaring parameters')
@@ -946,22 +840,17 @@ class dummy_controller(LifecycleNode):
     def on_shutdown(self, state: State) -> TransitionCallbackReturn:
         """lifecycle shutdown 转换：回收缩姿态、等它到位，再断使能。
 
-        这里以前只有 "RGB 0 + off_dummy"，**完全没有回收缩姿态** —— 与
-        dummy_controller/README.md 里写的 shutdown 契约（"手臂回到收回位置、
-        電機關閉、關閉發佈器和接收器、關閉串口"）不符。这正是"用 ros2 launch
-        退出时手臂不回收缩、使能直接掉，单独跑节点却没事"的原因：两条退出
-        路径各写了一遍，只有 Ctrl+C 那条（on_sigint_shutdown）会回收缩，
-        走 launch 时执行的是这个转换。
+        `ros2 launch` 退出时执行的就是这个转换（单独跑节点走
+        on_sigint_shutdown），两条路径共用 _retract_and_power_off。
         """
         self._retract_and_power_off('on_shutdown')
         return TransitionCallbackReturn.SUCCESS
     # ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑ Lifecycle node callback ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑
 
     def on_sigint_shutdown(self):
-        """进程退出前的收尾，现在只是 _retract_and_power_off 的别名。
+        """进程退出前的收尾，只是 _retract_and_power_off 的别名。
 
-        保留这个名字：main() 与文档都按它找关机日志，而且它曾经是**唯一**会
-        回收缩姿态的路径。真正的实现只有一份，两条路径不再各写一遍。
+        保留这个名字：main() 与文档都按它找关机日志，实现只有一份。
         """
         self._retract_and_power_off('shutdown')
 
@@ -972,13 +861,10 @@ class dummy_controller(LifecycleNode):
     def _retract_and_power_off(self, reason):
         """把手臂收回收缩姿态、**等它真的到位**，然后才切断电机使能。
 
-        为什么必须"等"：reset_dummy() 只负责把命令发出去（_send_named_pose
-        发完就返回，不等到位；它那 2/2 步的回读只用来打日志）。紧接着
-        off_dummy() 就把使能关掉，手臂还在走的时候断使能，它会停在半路、
-        甚至直接掉下来。以前 on_sigint_shutdown 里那个"忙等 5 秒"就是在粗糙
-        地替代这件事：5 秒通常够，但既不看有没有到位，也会被 launch 的
-        SIGTERM 打断。现在改成读回读、看有没有真到位，上限
-        SHUTDOWN_RETRACT_TIMEOUT_SEC。
+        为什么必须"等"：reset_dummy() 只把命令发出去（_send_named_pose 发完
+        就返回，不等到位，那 2/2 步的回读只用来打日志），紧接着 off_dummy()
+        就关使能；手臂还在走的时候断使能，它会停在半路、甚至直接掉下来。所以
+        这里读回读、确认真的到位，上限 SHUTDOWN_RETRACT_TIMEOUT_SEC。
 
         reason 只用于日志（on_shutdown / shutdown）。
         """
@@ -1079,9 +965,8 @@ class dummy_controller(LifecycleNode):
     def init_dummy(self):
         """连接设备并使能电机。
 
-        这里每一步都要留日志。此前 connect 与 set_enable 都是静默的,一旦
-        卡住或抛异常,日志会停在 _declare_params() 之后、on_configure() 之前,
-        从外面看就是"什么都没发生",无法判断卡在哪一步。
+        每一步都要留日志：静默的 connect 与 set_enable 一旦卡住，日志就停在
+        参数打印之后，从外面看不出卡在哪一步。
         """
         self.get_logger().info(
             f'connecting to the device (timeout {self.connect_timeout_sec}s) ...')
@@ -1091,7 +976,6 @@ class dummy_controller(LifecycleNode):
             # **必须传 timeout。** fibre 的 find_any 默认 timeout=None，
             # 那是"阻塞到有设备连上为止"——没有设备时会永久挂住，不超时、
             # 不报错、不返回，表现为启动日志戛然而止而机械臂不动。
-            # 参考项目自己的 probe_device.py 用的是 timeout=15.0。
             self.dummy_driver = dummy_cli_tool.ref_tool.find_any(
                 path="usb", timeout=self.connect_timeout_sec)
         if self.dummy_driver is None:
@@ -1104,48 +988,32 @@ class dummy_controller(LifecycleNode):
 
         # 电机设为上电。
         #
-        # 注意这条日志的措辞：**"sent" 不是 "enabled"。** 这行以前写的是
-        # "motors enabled"，而它只是无条件打印的——设备是否真的加上了力矩，
-        # 软件侧看不到。实测中 homing() 能驱动手臂而 move_j 完全无效，所以
-        # "set_enable 到底有没有到达轴" 是一个必须靠人工确认的问题：使能后
-        # 用手推 joint_1，推不动说明力矩在，推得动说明这行根本没生效。
-        #
-        # 不要把这行日志当成"电机已使能"的证据。
+        # 这条日志只说"命令已发出"，**不是 "enabled"**：设备是否真的加上了
+        # 力矩，软件侧看不到。使能后用手推 joint_1，推不动说明力矩在，推得动
+        # 说明根本没生效 —— 不要把这行日志当成"电机已使能"的证据。
         self.get_logger().info('sending set_enable(True) ...')
         self.dummy_driver.robot.set_enable(True)
         self.get_logger().info(
             'set_enable(True) returned. Whether the axes actually hold torque '
             'cannot be read back from here; verify by hand if move_j does '
-            'nothing (see tools/probe_attrs.py).')
+            'nothing (ros2 param list shows what the driver exposes).')
 
         # 夹爪初始化。**必须在带超时的线程里做。**
         #
-        # 实测过一次：日志停在 "motors enabled" 之后就不再前进，/joint_states
-        # 一条也不发。主电机明明使能成功了，所以问题只在夹爪通道——夹爪的
-        # fibre 调用阻塞住了，而它是在 on_configure 里同步执行的，于是整个
-        # 节点冻死，后面的 activate 永远到不了，也就没有发布者。
-        #
-        # 夹爪挂住绝不能拖死整条 bringup：超时就放弃它、继续 configure，
-        # 机械臂本体照样能动，夹爪以后可以单独再弄。
+        # 夹爪的 fibre 调用会阻塞，而它是在 on_configure 里同步执行的；挂住
+        # 就等于整个节点冻死，/joint_states 一条也发不出去。夹爪挂住绝不能
+        # 拖死整条 bringup：超时就放弃它、继续 configure，机械臂本体照样能动。
         self._init_gripper_with_timeout()
 
     def _init_gripper_with_timeout(self):
-        """夹爪不走主控这条路了（2026-10-29 起），这里只留一句说明。
+        """夹爪不走主控这条路了，这里只留说明。
 
-        为什么整条路封掉——两边的固件对同一组 CAN ID 的理解不一样：
-
-        * 主控固件 `DummyHand::SetAngle` 发 **0x382**，以为那是"设角度"；
-          而夹爪板（35 板固件）`case 0x02` 收到 0x382 是**触发编码器标定**，
-          payload 一个字节都不看。夹爪行程只有 55 mm，标定要求电机正反各转
-          两圈多，必然顶死、采样不够、失败后 `ClearFlash()` 擦掉标定表 ——
-          一次调用就能把夹爪变成"读数冻死、位置模式不出力"。
-        * `DummyHand::SetEnable(true)` 的实现是 `SetMaxCurrent(maxCurrent)`，
-          发 **0x381** 带 float；夹爪板 `case 0x01` 把前 4 字节当 **uint32
-          使能位**（等于 1 才转速度模式，否则 MODE_STOP）。所以我们以为在
-          "使能"，实际在"停机"。
-        * 旧主控固件还有一层：`CanSendMessage` 用 `osWaitForever` 拿信号量，
-          而归还点只有发送完成回调；一帧没发完就永久丢失，之后所有 CAN 发送
-          一起卡死，整机失联、只能断电。
+        两边的固件对同一组 CAN ID 的理解不一样：主控以为在"设角度"/"使能"，
+        夹爪板把 0x382 当**触发编码器标定**、把 0x381 的前 4 字节当 uint32
+        使能位。调用一次就可能通过 `ClearFlash()` 擦掉夹爪的标定表，使夹爪
+        读数冻死、位置模式不出力；旧主控固件的 `CanSendMessage` 用
+        `osWaitForever` 拿信号量，一帧没发完就永久丢失，之后所有 CAN 发送
+        一起卡死，整机失联、只能断电。
 
         所以夹爪改由 `dummy_vc_grasp` 的 `gripper_can_node` 经 USB-CAN 适配器
         直接驱动 node 7（话题 `/gripper/width`、`/gripper/position`）。主控这里
@@ -1184,8 +1052,6 @@ class dummy_controller(LifecycleNode):
         )
 
         # 夹爪指令：std_msgs/Float64，0.0 = 全闭，1.0 = 全开。
-        # 用 Float64 而不是 GripperCommand 动作，是为了不引入 control_msgs
-        # 依赖；等接 MoveIt 时再在外面包一层动作即可。
         self.gripper_sub = self.create_subscription(
             Float64,
             '/dummy_gripper/command',
@@ -1207,15 +1073,10 @@ class dummy_controller(LifecycleNode):
         # ------------------------------------------------------------------
         # 两个定时器，**刻意分开**：一个读硬件，一个发话题。
         #
-        # 原来只有一个 20 Hz 的定时器，里面既读 6 个 joint_N.angle、又读
-        # hand.angle、然后才发布 —— 每秒 140 次阻塞式 USB 往返，而且全部在
-        # 执行器线程里。后果：
-        #   - 发布频率被 USB 往返时间拖住，名义 20 Hz 实际更低
-        #   - RViz 收到的是"跳变"而不是连续变化，看起来就是"更新慢、没有过程"
-        #   - 轨迹回调、订阅、服务都要和这些读数抢执行器
-        #
-        # 拆开之后：读数慢一点没关系（关节不会突变），发布则稳定按固定频率
-        # 发缓存值，不碰 USB。这正是 RViz 需要的。
+        # 合在一个定时器里时，读数的阻塞式 USB 往返会把发布频率拖住，而且
+        # 全部挤在执行器线程里，RViz 收到的是"跳变"而不是连续变化。拆开后
+        # 读数慢一点没关系（关节不会突变），发布稳定按固定频率发缓存值、
+        # 不碰 USB。
         # ------------------------------------------------------------------
         read_hz = float(self.get_parameter('state_read_hz').value)
         pub_hz = float(self.get_parameter('joint_state_pub_hz').value)
@@ -1244,14 +1105,14 @@ class dummy_controller(LifecycleNode):
         follow_joint_trajectory**：action_ns 本身已经叫这个名字了。对不上时
         MoveIt 只会在 execute 时报
         `Action client not connected to action server: ...`，
-        规划一路是绿的 —— 这正是当前"规划成功、执行不动"的原因。
+        规划一路是绿的，很容易被当成规划问题。
 
         与话题订阅共用 _execute_trajectory，所以两条入口的下发行为完全一致。
 
-        为什么回调组要 Reentrant：轨迹执行动辄几十秒，默认的互斥回调组会
-        在 execute 回调运行期间挡住这个节点上的其它回调。Reentrant 只是让
-        executor 能继续转；真正的串行化由 _traj_lock + _traj_executing 负责，
-        不是靠回调组。
+        回调组用 Reentrant：轨迹执行动辄几十秒，默认的互斥回调组会在 execute
+        回调运行期间挡住这个节点上的其它回调。Reentrant 只是让 executor 能
+        继续转；真正的串行化由 _traj_lock + _traj_executing 负责，不是靠
+        回调组。
         """
         if not self.trajectory_action_enable:
             self.get_logger().warn(
@@ -1352,9 +1213,8 @@ class dummy_controller(LifecycleNode):
         一睡下去 pub_timer（/joint_states）就停了，MoveIt 和 RViz 会以为
         机器人不见了 —— 而 execute 的成功判据恰恰用得到 /joint_states。
 
-        等线程结束用 join 而不是轮询。rclpy 的 execute_callback 可以直接返回
-        一个 rclpy Future，但那条路要额外引入 Future + 另一个线程来回填，
-        在拿不到 ROS 环境实测的情况下不划算；join 的语义是确定的。
+        等线程结束用 join 而不是轮询：rclpy 的 execute_callback 也可以返回
+        rclpy Future，但那要额外引入 Future 和回填线程；join 的语义是确定的。
         """
         result = FollowJointTrajectory.Result()
         traj = goal_handle.request.trajectory
@@ -1409,15 +1269,10 @@ class dummy_controller(LifecycleNode):
         def _work():
             outcome['value'] = self._execute_trajectory(traj, order)
 
-        # try/finally 是必须的，而且这里以前漏了：_traj_executing 在上面置了
-        # True，如果这条路径不负责把它清掉，这个标记就**永远是 True** ——
-        # _traj_busy() 从此恒为真，于是
-        #   * 之后每一条 action 轨迹都被当成"已有轨迹在执行"而拒绝；
-        #   * home/reset/命名位姿全被 _send_named_pose 静默拒绝（只打一行警告），
-        #     退出时的"回收缩姿态"正是被这一条挡掉的 —— 手臂还停在 MoveIt
-        #     最后放它的位置，接着就断使能。
-        # topic 那条入口（_on_joint_trajectory_cb）一直有 finally，只有 action
-        # 这条漏了。这也是"单独跑驱动没事，一旦用过 MoveIt 退出就危险"的原因。
+        # try/finally 是必须的：上面已把 _traj_executing 置 True，这条路径若
+        # 不负责清掉，标记就**永远是 True**，_traj_busy() 从此恒为真 —— 之后
+        # 每条 action 轨迹都被拒绝，home/reset/命名位姿也全被 _send_named_pose
+        # 静默拒绝（只打一行警告），退出时的"回收缩姿态"正是被这一条挡掉的。
         try:
             self._traj_thread = threading.Thread(
                 target=_work, name='traj_exec', daemon=True)
@@ -1475,10 +1330,9 @@ class dummy_controller(LifecycleNode):
     def read_raw_angles(self):
         """读取设备六个关节的原始角度（angle 空间，**度**）。
 
-        这是本节点唯一直接触碰 robot.joint_N.angle 的地方。设备的这个读数
-        既不等于 URDF 角度，也不等于 move_j 指令值，必须经 angle_to_urdf
-        换算。上游原版直接把原始值当 URDF 弧度发布，所以 j3 差 90 度、模型
-        放大约 57 倍。换算的推导见 config/dummy_controller.yaml。
+        这是本节点唯一直接触碰 robot.joint_N.angle 的地方。这个读数既不等于
+        URDF 角度，也不等于 move_j 指令值，必须经 angle_to_urdf 换算，不能
+        当 URDF 弧度直接发布。
         """
         robot = self.dummy_driver.robot
         return [
@@ -1508,10 +1362,8 @@ class dummy_controller(LifecycleNode):
     def current_joints_callback(self):
         """读取设备原始关节角，换算成 URDF 关节角（弧度）。
 
-        设备的 robot.joint_N.angle 是**原始编码器读数**（度），既不等于
-        URDF 角度，也不等于 move_j 指令值，必须经过 angle_to_urdf 换算。
-        上游原版直接把原始值当 URDF 弧度发布，所以 j3 差 90 度、模型放大约
-        57 倍。换算的推导见 config/dummy_controller.yaml。
+        robot.joint_N.angle 是**原始编码器读数**（度），既不等于 URDF 角度，
+        也不等于 move_j 指令值，必须经过 angle_to_urdf 换算。
         """
         return self.angle_to_urdf(self.read_raw_angles())
 
@@ -1529,25 +1381,16 @@ class dummy_controller(LifecycleNode):
         "No transform from [dummy_leftfinger_v1_1] to [base_link]"。
 
         **夹爪没有回读。** 设备上 `hand` 只有 `set_angle` /
-        `set_current_limit` / `set_enable` 三个方法，**没有任何可读属性**
-        （tools/probe_gripper.py --stage 0 实测：set_* 3 个，其余 0 个）。
+        `set_current_limit` / `set_enable` 三个方法，**没有任何可读属性**，
         所以这里只能返回**最近一次下发的角度**换算出的位置，而不是量出来的
-        位置。
-
-        这意味着：
-          * 手指的 TF 是**命令值**，不是实际值。夹住东西时手指被挡住，
-            RViz 里会显示成"已经合拢到位"，与实际不符。
-          * 此前写的是 `getattr(hand, 'angle', 0.0)` —— 属性不存在，于是
-            **永远返回 0，而且不报错**。结果是手指 TF 恒为全闭位置，看起来
-            像"手指不动"，却没有任何日志提示。这类静默默认值是本项目反复
-            踩的坑，所以改成显式跟踪命令值，并在启动时把"没有回读"这件事
-            明确记进日志。
+        位置：手指的 TF 是**命令值**，夹住东西时手指被挡住，RViz 里仍显示
+        "已经合拢到位"，与实际不符。
 
         映射：命令角度线性映射到归一化开合度，再乘以单指行程。
             frac   = (angle - grip_angle_closed) / (grip_angle_open - grip_angle_closed)
             travel = finger_travel_m * frac
-        grip_angle_closed / grip_angle_open 必须**看着手指实测**（阶段 0.4），
-        当前是占位值；填错只影响 RViz 里手指张开的幅度，不影响夹持力。
+        grip_angle_closed / grip_angle_open 必须**看着手指实测**，当前是占位
+        值；填错只影响 RViz 里手指张开的幅度，不影响夹持力。
         """
         angle = self._last_gripper_angle
         if angle is None:
@@ -1621,17 +1464,13 @@ class dummy_controller(LifecycleNode):
     def pub_current_end_pose(self):
         """不发布手写 TF。
 
-        上游原版在这里广播 joint6 -> tool0 和 joint6 -> camera_frame，
-        但 URDF 里根本没有叫 joint6 的 frame（只有 dummy2_joint6 这个**关节**
-        和 link7_v1_1 这些**链接**），相机节点的 frame_id 又是第三个名字
-        fingerprint_camera。结果是 TF 树断裂，RViz 里坐标系对不上。
+        手写 TF 会与 URDF 里的 frame 名对不上，TF 树断裂、RViz 里坐标系
+        对不上。tool0 / gripper_tcp / camera_link / camera_color_optical_frame
+        全部在 dummy2_urdf.xacro 里静态定义，由 robot_state_publisher 统一
+        发布；本节点只负责发 /joint_states。
 
-        阶段 1 起，tool0 / gripper_tcp / camera_link / camera_color_optical_frame
-        全部在 dummy2_urdf.xacro 里静态定义，由 robot_state_publisher 统一发布。
-        本节点只负责发 /joint_states，不再碰 TF。
-
-        如果将来需要末端位姿，正确做法是从 /joint_states 做正运动学，
-        或者直接用 tf2 查询 base_link -> gripper_tcp。
+        如果将来需要末端位姿，正确做法是从 /joint_states 做正运动学，或者
+        直接用 tf2 查询 base_link -> gripper_tcp。
         """
         return
 
@@ -1698,9 +1537,8 @@ class dummy_controller(LifecycleNode):
         输入是 **move_j 空间**的角度（度），也就是 home_joints /
         reset_joints 的格式。**直接原样交给 move_j，不做任何变换。**
 
-        为什么不做逆变换：home/reset 这些值是从上游驱动继承的，而上游
-        是把它们直接发给 move_j 的，中间没有任何换算（上游根本没有换算
-        函数）。实体机械臂已验证这些值能到达预期姿态，所以它们必然就是
+        为什么不做逆变换：这些值从上游驱动继承，上游直接发给 move_j、中间
+        没有任何换算；实体机械臂已验证它们能到达预期姿态，因此必然就是
         move_j 空间的。再套一层换算反而会把姿态改错。
 
         日志同时打印回读侧换算出的 URDF 角度，方便与 RViz 对照。
@@ -1720,9 +1558,8 @@ class dummy_controller(LifecycleNode):
                 'it to finish (or cancel it from RViz) and try again.')
             return
 
-        # 每一步都记日志。此前这段是"发指令 -> 回读 -> 打印"一口气走完，
-        # 一旦 move_j 或回读阻塞，日志就停在上一行不动，无法判断卡在哪一个。
-        # 实测正是如此：卡在 CONFIGURE 3/4 之后完全看不出是 move_j 还是回读。
+        # 每一步都记日志：move_j 或回读一旦阻塞，日志会停在上一行不动，
+        # 无法判断卡在哪一个。
         self.get_logger().info(f'{label}: step 1/2 sending move_j ...')
         try:
             self.move_joints(movej_deg)
@@ -1731,9 +1568,8 @@ class dummy_controller(LifecycleNode):
             return
         self.get_logger().info(f'{label}: step 1/2 sent')
 
-        # 回读仅用于日志对照，与上一步的 try 分开。回读失败时如果也报
-        # "{label} failed"，就又会制造"日志说失败、实物其实已经动了"这种
-        # 最难查的假故障——那正是这里当初少一个 read_device() 时的症状。
+        # 回读仅用于日志对照，与上一步的 try 分开：回读失败若也报
+        # "{label} failed"，就成了"日志说失败、实物其实已经动了"的假故障。
         self.get_logger().info(f'{label}: step 2/2 reading back ...')
         try:
             # read_device() 返回的是 angle 空间的**度**，正好是
@@ -1752,10 +1588,9 @@ class dummy_controller(LifecycleNode):
         """轮询 raw 角度，直到六轴都进 target 的容差以内（或超时）。
 
         为什么需要它：`_send_named_pose` 在发完 move_j 之后 25 ms 就回读一次，
-        那时电机还没动完 —— 日志因此看起来像"命令发了、读数毫无变化"，最容易
-        被读成"命令没生效"。2026-10-29 就是这样把"j2 不动"误读成"所有关节都
-        没动"的。这里改成真的等：每 100 ms 读一次，判据用**标定 home 的原始角**
-        （raw 空间，度），不掺 URDF 换算。
+        那时电机还没动完 —— 日志看起来像"命令发了、读数毫无变化"，容易被读成
+        "命令没生效"。这里真的等：每 100 ms 读一次，判据用**标定 home 的原始
+        角**（raw 空间，度），不掺 URDF 换算。
 
         返回 (ok, last, elapsed, before, moved)：moved 是逐轴位移（度）。
         """
@@ -1828,13 +1663,11 @@ class dummy_controller(LifecycleNode):
     def stop_dummy(self):
         """急停：把设备**此刻的实际姿态**换算回 move_j 空间再下发一次。
 
-        走 angle -> URDF -> move_j 这条被 tools/selftest_conversion.py 覆盖的
-        标准两步链，不另拼公式。
+        走 angle -> URDF -> move_j 这条标准两步链，不另拼公式。
 
-        这里曾经有两个叠加的错误：把缓存 self.current_urdf_rad（URDF 弧度）
-        喂给按"度"入参的换算函数，而且所用的 angle_to_movej 还漏了
-        joint_offset_deg 项。两者合起来使下发的目标与当前姿态差了几十度，
-        一旦真的接上急停按钮，按下去就是一次大角度抽动而不是停住。
+        喂给换算函数的必须是 angle 空间的**度**，不是缓存的 URDF 弧度；拿弧度
+        去喂，下发的目标会与当前姿态差几十度，急停按下去就是一次大角度抽动
+        而不是停住。
         """
         # read_device() 返回 angle 空间（度）的原始读数；move_j 空间就是它
         # 减去 move_j_offset_deg。急停要下发的正是"当前位置"，所以它同时
@@ -1885,20 +1718,16 @@ class dummy_controller(LifecycleNode):
     def joints_callback(self, msg: JointTrajectory):
         """执行一条关节轨迹。
 
-        上游原版只取 msg.points[0]，等于把整条插值路径丢掉、直接跳到终点。
-        MoveIt 规划出来的是几十个 waypoint，这样写轻则动作难看，重则瞬时
-        大角度跳变损伤减速器。
-
-        阶段 1 起按 time_from_start 节拍依次下发**全部** waypoint。
+        按 time_from_start 节拍依次下发**全部** waypoint：只取 msg.points[0]
+        等于丢掉整条插值路径，轻则动作难看，重则瞬时大角度跳变损伤减速器。
 
         joint_names 的顺序可能与我们的关节顺序不同，必须按名字重排，
         不能假设它们已经是 dummy2_joint1..6 的顺序。
 
-        **这里仍然在本线程里阻塞**（与 action 那条入口不同）。这是刻意保留的：
-        topics 的用法是 tools/ 下的脚本在压测和标定，它们要的是"回调结束 =
-        这条轨迹走完了"这个简单语义，放进线程反而让脚本变复杂。代价是执行
-        期间 /joint_states 会停 —— 那条入口不接 MoveIt，所以这个代价可以接受。
-        action 那条入口必须让出线程，原因见 _on_traj_execute 的 docstring。
+        **这里仍然在本线程里阻塞**（与 action 那条入口不同）：话题入口要的是
+        "回调结束 = 这条轨迹走完"的简单语义，代价是执行期间 /joint_states
+        会停；它不接 MoveIt，这个代价可以接受。action 入口必须让出线程，
+        原因见 _on_traj_execute 的 docstring。
 
         占用标记是加了锁再判再置的：`if self._traj_executing` 之后再置位，
         中间可能被 action 那条入口插进来，两条轨迹就会同时下发。
@@ -1987,11 +1816,9 @@ class dummy_controller(LifecycleNode):
             f'Executing trajectory: {total} waypoints, '
             f'joint order map {order}')
 
-        # 进度日志的节拍基准。原来只有"每 10 个 waypoint 打一次"，而一条
-        # MoveIt 轨迹的 waypoint 是按时间均匀铺开的：300 个点、每个 0.1 秒，
-        # 就是每 1 秒一条，几十秒的执行里日志会淹掉别的东西。改由
-        # trajectory_feedback_hz 决定节奏（默认 5 Hz 上限），并在关键点
-        # （第一个 / 每 10 个 / 最后一个）强制打印。
+        # 进度日志的节拍由 trajectory_feedback_hz 决定（默认 5 Hz 上限），
+        # 并在关键点（第一个 / 每 10 个 / 最后一个）强制打印 —— MoveIt 的
+        # waypoint 按时间均匀铺开，只按数量打会把几十秒的执行淹在日志里。
         self._last_progress_log = time.monotonic()
 
         # 当前命令位置（move_j 空间），作为"就近整圈等价"的参考。

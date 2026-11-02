@@ -1,16 +1,10 @@
 """把分割出来的掩膜变成 base_link 下的抓取目标。纯 numpy，可离线自测。
 
-这一层是"几何"的下游、"ROS 节点"的上游，夹在中间的两个理由：
+这一层只吃"掩膜 + 相机内参 + 一个 4x4 变换"，不依赖 cv2 和 ROS；掩膜质心投平面、
+朝向拟合、抓取点取多高，每一步都能用合成数据离线验证，错了都只表现为抓取点偏。
 
-1. 它真的会算错。掩膜质心投到平面上、朝向拟合、抓取点取多高，每一项错了
-   外观都一样：抓取点偏几毫米到几厘米。而这些都能用合成数据离线验证，
-   不必等相机、不必上真机。
-2. 它不该知道 cv2 和 ROS 的存在。`vision_node.py` 负责拿图、分割、查 TF；
-   这里只吃"掩膜 + 相机内参 + 一个 4x4 变换"，所以本机（没 cv2、没 ROS）
-   就能跑 `tools/selftest_vision_geometry.py` 把它钉死。
-
-坐标系约定（与 `geometry.py` 一致）：像素是 (u, v)，u 向右、v 向下，
-原点在左上角；输出的位置一律在 base_link 下、单位米。
+坐标系约定（与 geometry.py 一致）：像素是 (u, v)，u 向右、v 向下，原点在左上角；
+输出的位置一律在 base_link 下、单位米。
 """
 
 import math
@@ -23,8 +17,8 @@ from .geometry import (GeometryError, backproject_pixel_to_plane,
                        invert_transform, object_center_on_table,
                        top_down_grasp_quaternion)
 
-# 640x480 上，24 mm 方块在 0.6 m 处大约 20x20 像素 = 400 px。留一个数量级的
-# 余量当门限，既能滤掉噪点，也不会把远处的方块误杀掉。
+# 640x480 上，24 mm 方块在 0.6 m 处约 20x20 像素 = 400 px。门限留一个数量级的
+# 余量，既能滤掉噪点，也不会把远处的方块误杀掉。
 MIN_BLOB_AREA_PX = 40
 
 # 投影到平面上之后，少于这么多个点就没法可靠地拟合朝向。
@@ -117,12 +111,8 @@ def project_blob_to_plane(blob, camera, T_base_optical, plane_z,
                           max_points=2000) -> np.ndarray:
     """把一个 blob 的像素投影到 z = plane_z 平面上，返回 (N, 2) 的 base 坐标。
 
-    为什么要在平面上拟合朝向，而不是在图像里拟合：相机不是正对着平面时，
-    图像里的角度和平面上差一个视角引起的畸变（透视会把矩形压成梯形）。
-    在平面上拟合就与相机姿态无关了。
-
-    投不上去的像素（射线朝上、到不了平面）直接丢掉；丢得太多就抛异常，
-    因为那说明相机装反了或者平面高度填错了。
+    在平面上拟合朝向与相机姿态无关（图像里透视会把矩形压成梯形）。投不上去的
+    像素丢掉，丢得太多就抛异常：说明相机装反了或者 plane_z 填错了。
     """
     pts = np.asarray(blob.points, float)
     if pts.shape[0] > max_points:
@@ -154,14 +144,11 @@ def _rotated_extent(xy, yaw_rad):
 def fit_edge_yaw(xy, coarse_step_deg=COARSE_STEP_DEG,
                  fine_step_deg=FINE_STEP_DEG,
                  fine_window_deg=FINE_WINDOW_DEG) -> EdgeYaw:
-    """拟合平面内那个矩形的朝向和外接尺寸（最小面积外接矩形）。
+    """拟合平面内矩形的朝向和外接尺寸（最小面积外接矩形）。
 
-    正方形在 [0, pi/2) 里就够：转 90 度还是同一个正方形，两指也从另一条边
-    夹进去，抓出来的姿态等价。
-
-    不用二阶矩（`atan2(2*mu11, mu20-mu02)`）是因为正方形在二阶矩下是
-    各向同性的 —— mu20 == mu02 且 mu11 == 0，朝向在数学上就没有定义。
-    最小外接矩形没有这个问题。
+    正方形在 [0, pi/2) 里就够：转 90 度还是同一个正方形，两指从另一条边夹进去，
+    抓出来的姿态等价。不用二阶矩（`atan2(2*mu11, mu20-mu02)`），因为正方形在
+    二阶矩下各向同性（mu20 == mu02、mu11 == 0），朝向在数学上没有定义。
     """
     pts = np.asarray(xy, float)
     if pts.ndim != 2 or pts.shape[1] != 2:
@@ -194,14 +181,13 @@ def fit_edge_yaw(xy, coarse_step_deg=COARSE_STEP_DEG,
 
 
 def shadow_bias(centre_xy, camera_xyz, plane_z, height_m):
-    """斜视看一个立在工作面上的物体时，"影子"质心离相机比真实底面中心更远。
+    """斜视看立在工作面上的物体时，"影子"质心比真实底面中心更远离相机。
 
-    物体高 h、视线与平面的夹角 θ：把它沿视线投影到平面上，得到的是"底面轮廓
-    ⊕ 一段长 h·cotθ 的平移"，质心因此沿视线方向多走了 h·cotθ/2。24 mm 的方块、
-    30° 的视线下约 20 mm，正是之前测到的 +18 mm 那个偏置。
+    物体高 h、视线与平面夹角 θ：把它沿视线投到平面上，相当于把底面轮廓沿背离
+    相机的方向平移 h·cotθ，质心因此多走 h·cotθ/2，24 mm 方块在 30° 视线下约 20 mm。
 
     h 是这个物体的**高度**（不是宽度）；平贴在面上的标记物传 0，这时没有影子
-    偏置，不该硬减。返回需要从影子质心减掉的二维向量（沿"背离相机"的方向）。
+    偏置。返回需要从影子质心减掉的二维向量（沿"背离相机"的方向，米）。
     """
     cam = np.asarray(camera_xyz, float)
     d = np.array([float(centre_xy[0]) - cam[0], float(centre_xy[1]) - cam[1], 0.0])
@@ -216,11 +202,8 @@ def shadow_bias(centre_xy, camera_xyz, plane_z, height_m):
 def short_edge_error(extent_a_m, extent_b_m, edge_m):
     """短边离"边长"或"对角线"最近差多少（米）。
 
-    为什么不直接拿短边减边长：方块绕竖直轴转 θ 之后，它在地面上那块影子的
-    最小外接矩形，短边是**底面外接矩形的短边**，θ=0 时等于边长 e、θ=45° 时
-    等于对角线 e·√2，中间连续过渡。现场随手一放就是 20°~45°，只拿 e 当真值，
-    24 mm 的方块会被报成 34 mm、判成"不是方块"直接丢掉（实测那次短边
-    34.1 mm、误差 10.1 mm，刚好卡在 10.0 的门限外）。
+    方块绕竖直轴转 θ 后，影子的最小外接矩形短边在边长 e（θ=0）与对角线 e·√2
+    （θ=45°）之间连续过渡，所以 e 和 e·√2 都算对，取较小的差。
     """
     short = min(float(extent_a_m), float(extent_b_m))
     edge = float(edge_m)
@@ -231,11 +214,10 @@ def detection_from_blob(blob, camera, T_base_optical, plane_z, object_edge_m,
                         max_points=2000, object_height_m=None) -> SceneDetection:
     """blob -> 抓取目标：在平面上定质心、拟合朝向、算抓取点与顶抓姿态。
 
-    `object_height_m` 只有算影子偏置时才用得上，默认等于边长（立方体）。
+    `object_height_m` 只用于影子偏置，默认等于边长（立方体）。
 
-    朝向（yaw）只在"影子"不够长时才可信：影子被拉成 e × e(1+cotθ) 的矩形，
-    当方块正好转过 45° 时，最小外接矩形会贴着视线方向而不是方块的边。夹爪还
-    没通，这一条的影响等做抓取时再处理。
+    朝向（yaw）只在影子不够长时才可信：方块正好转过 45° 时，最小外接矩形会
+    贴着视线方向而不是方块的边，这一条的影响等抓取时再处理。
     """
     if not float(object_edge_m) > 0.0:
         raise GeometryError('方块边长必须为正：{}'.format(object_edge_m))
@@ -262,9 +244,8 @@ def detection_from_blob(blob, camera, T_base_optical, plane_z, object_edge_m,
         raise GeometryError(
             '抓取点在相机背后（光学系 z = {:.4f}）'.format(distance))
 
-    # 只看短边，理由同 depth.detection_from_points：斜向下看立在平面上的方块，
-    # 轮廓沿视线方向必然被拉长，长边不可信，短边才挨着真实尺寸 —— 而且它随
-    # 方块转过的角度在 e 与 e√2 之间变，两种都算"对"（见 short_edge_error）。
+    # 只看短边：斜视下轮廓沿视线必然被拉长，长边不可信；短边随方块转角在
+    # e 与 e√2 之间变，两种都算对（见 short_edge_error）。
     edge_error = short_edge_error(fit.extent_a_m, fit.extent_b_m, object_edge_m)
     return SceneDetection(position=np.asarray(position, float),
                           yaw_rad=fit.yaw_rad,
@@ -279,11 +260,10 @@ def detections_from_blobs(blobs, camera, T_base_optical, plane_z,
                           object_edge_m, max_edge_error_m=0.01,
                           rejects=None, object_height_m=None,
                           centres=None) -> List[SceneDetection]:
-    """批量版本：尺寸对不上的直接丢掉（多半是反光、阴影、或者别的物体）。
+    """批量版本：尺寸对不上的直接丢掉（多半是反光、阴影或者别的物体）。
 
-    `rejects` 不是 None 时，被丢掉的 blob 会以 `(blob, 原因)` 追加进去。理由：
-    现场跑一轮很贵，"没检测到"如果只报一个 blob 数量，就只能靠猜是分割没切出来、
-    反投影没落到平面上、还是尺寸对不上 —— 这三件事的修法完全不同。
+    `rejects` 不是 None 时，被丢掉的 blob 以 `(blob, 原因)` 追加进去，便于分辨
+    是分割没切出来、反投影没落到平面上、还是尺寸对不上。
     """
     out = []
     for blob in blobs:
@@ -308,7 +288,6 @@ def detections_from_blobs(blobs, camera, T_base_optical, plane_z,
             continue
         out.append(det)
         if centres is not None:
-            # 一起把像素交出去：标定相机位姿时，"报出的坐标 + 它来自哪个像素"
-            # 这一对才是完整约束，光有坐标解不出位姿。
+            # 一起交回像素：标定相机位姿需要"坐标 + 对应像素"这一对。
             centres.append((float(blob.u), float(blob.v)))
     return out

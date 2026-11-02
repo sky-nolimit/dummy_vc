@@ -15,12 +15,11 @@
 | `dummy_vc_perception/vision_node.py` | ROS 层：取彩色+深度、查 TF、HSV 分割、发 `/detected_objects` + RViz 标记 | 不能（要 ROS） |
 | `config/vision.yaml` | 节点参数（话题、工作面、边长、HSV 范围、合格判据、深度开关） | — |
 
-分层不是洁癖：这一层将来要在真机上调坐标轴约定，而真机调试一轮很贵。
-把它写成纯 numpy，本机（没有 ROS）就能用
-`python tools/selftest_vision_geometry.py` 把约定钉死；
-`tools/selftest_vision_geometry.py` 里还有一条检查专门盯着这一层
-**不许 import ROS / OpenCV**，免得以后有人顺手 import 进来
-（`vision_node.py` 是唯一允许碰 cv2 / rclpy 的文件，它不在那道检查的名单里）。
+分层不是洁癖：这一层将来要在真机上调坐标轴约定，而真机调试一轮很贵。把它写成
+纯 numpy，本机（没有 ROS）就能跑。这一层**不许 import ROS / OpenCV**，免得以后
+有人顺手 import 进来（`vision_node.py` 是唯一允许碰 cv2 / rclpy 的文件）。
+
+离线自测与标定脚本只在开发机上，不随仓库分发。
 
 ## 跑起来（在 VM 上）
 

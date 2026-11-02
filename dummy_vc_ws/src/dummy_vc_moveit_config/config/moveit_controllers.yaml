@@ -10,15 +10,15 @@
 #               sends that waypoint
 #
 # 所以**规划（demo）没问题、执行（真机）走不通**：MoveIt 会去找
-# /joint_trajectory_controller/follow_joint_trajectory 这个 action server，
-# 驱动原来没有，于是不会真正动。这不是配置错误，是接口形态不匹配。
+# /joint_trajectory_controller/follow_joint_trajectory 这个 action server，驱动
+# 原来没有，于是不会真正动。这不是配置错误，是接口形态不匹配。
 #
 # **驱动侧已补上**：dummy_controller 现在创建 FollowJointTrajectory action
-# server（trajectory_action_enable 默认 true），内部复用上面那条轨迹执行
-# 逻辑，原来那条 topic 入口也保留。不是给 MoveIt 写插件。
+# server（trajectory_action_enable 默认 true），内部复用上面那条轨迹执行逻辑，
+# 原来那条 topic 入口也保留。不是给 MoveIt 写插件。
 #
-# 这里仍然要写对 type，否则 move_group 会当作"没有控制器"（见下面的注释），
-# 连规划组和控制器都关联不上。
+# 这里仍然要写对 type，否则 move_group 会当作"没有控制器"（见下面的注释），连
+# 规划组和控制器都关联不上。
 
 trajectory_execution:
   # Give a trajectory time to start moving before declaring failure.
@@ -38,29 +38,18 @@ trajectory_execution:
   disable_collision_checks: false
   wait_for_trajectory_completion: true
 
-# 控制器名字与驱动的关系。
-#
-# FollowJointTrajectory handle 用的是
+# 控制器名字与驱动的关系：FollowJointTrajectory handle 用的是
 #     /<controller_name>/<action_ns>
 # 也就是 /joint_trajectory_controller/follow_joint_trajectory —— **只有两段**。
-# action_ns 的值本身就叫 follow_joint_trajectory，不要再补一段（重复一段和
-# 少一段报的错一模一样）。参考：
+# action_ns 的值本身就叫 follow_joint_trajectory，不要再补一段（重复一段和少一段
+# 报的错一模一样）。参考：
 # https://moveit.picknik.ai/main/doc/examples/controller_configuration/controller_configuration_tutorial.html
 #
-# 而驱动原来订阅的是
-#     /joint_trajectory_controller/joint_trajectory
-#
-# 两者**对不上**，这是"接口形态不匹配"，不是名字写错：驱动是 topic，插件要
-# action。**驱动侧已经补上 FollowJointTrajectory action server**（默认开，
-# 名字就是上面那个，见 dummy_controller.yaml 的 trajectory_action_* 参数），
-# 所以这一项不再是待办。
-#
-# 注意：驱动**同时**保留原来的 topic 入口（tools/ 下的脚本依赖它），所以
-# `ros2 topic list` 里那条 joint_trajectory 话题还在，那是正常的。
-#
-# tools/check_moveit_config.py 会检查"驱动源码里有没有 action server"，并据此
-# 决定要不要报这条待办；tools/selftest_follow_joint_trajectory.py 则进一步核对
-# 名字是否逐字相等。
+# 驱动订阅的是 /joint_trajectory_controller/joint_trajectory，两者**对不上**：驱动
+# 是 topic，插件要 action。**驱动侧已经补上 FollowJointTrajectory action server**
+# （默认开，名字就是上面那个，见 dummy_controller.yaml 的 trajectory_action_*
+# 参数），所以这一项不再是待办。驱动**同时**保留原来的 topic 入口，`ros2 topic
+# list` 里那条 joint_trajectory 话题还在是正常的。
 
 moveit_controller_manager: moveit_simple_controller_manager/MoveItSimpleControllerManager
 
@@ -77,9 +66,9 @@ moveit_simple_controller_manager:
     #     [INFO]  Returned 0 controllers in list
     # 然后当作"没有控制器"，不报错、不退出。
     #
-    # 2026-10 这里原来写的是 'moveit_simple_controller_manager/
-    # JointTrajectoryControllerHandle' —— 那是 ROS 1 的名字，MoveIt 2 里不存在。
-    # 参考：https://moveit.picknik.ai/humble/doc/examples/controller_configuration/controller_configuration_tutorial.html
+    # 'moveit_simple_controller_manager/JointTrajectoryControllerHandle' 是 ROS 1
+    # 的名字，MoveIt 2 里不存在。参考：
+    # https://moveit.picknik.ai/humble/doc/examples/controller_configuration/controller_configuration_tutorial.html
     type: FollowJointTrajectory
     action_ns: follow_joint_trajectory
     default: true
@@ -93,8 +82,7 @@ moveit_simple_controller_manager:
 
 # The gripper is deliberately NOT listed.
 #
-# Its hand interface on the device blocks forever and produces no motion (see
-# the gripper notes in the local docs/04). Registering a controller for it would let MoveIt
-# believe it can grip, and a plan that includes a close command would then hang
-# on a call that never returns. Leaving it out means MoveIt plans the arm only,
-# which is what actually works today.
+# Its hand interface on the device blocks forever and produces no motion.
+# Registering a controller for it would let MoveIt believe it can grip, and a plan
+# that includes a close command would then hang on a call that never returns.
+# Leaving it out means MoveIt plans the arm only, which is what works today.

@@ -9,7 +9,7 @@
      可调参数
      ==========================================================================
      下面这几个值决定夹持点和相机在模型里的位置。凡是标了「实测」的，
-     都要按实测量出来再改（标定手册在本机 docs/02，不上传）。
+     都要按实测量出来再改。
 
      数值偏 5 mm，IK 就会把末端整体偏移 5 mm，抓取时表现为
      「对准了但没夹住」——而且你会先怀疑视觉，浪费大量时间在后处理上。
@@ -18,7 +18,7 @@
 <!-- 手指伸出的方向：URDF 里手爪挂在 link7 的 +y 方向 -->
 <xacro:property name="hand_axis" value="y"/>
 
-<!-- 实物夹爪的实测几何（2026-10-21 用尺子在整机上量的）。
+<!-- 实物夹爪的实测几何。
      ==========================================================
      腕部(link7 端面) -> 指尖            130 mm
        其中 80 mm 是舵机 + 驱动板 + 导轨那些不动的结构
@@ -29,11 +29,10 @@
      单指板厚：三角截面，最厚 10 mm、最薄约 3 mm，这里按 8 mm 的均值
      指尖宽度：这次没量，先按 25 mm 占位
 
-     之前这里写的是 15 mm —— 那次量的不是夹取中心（从照片和 130 mm 的
-     总长看，量到的是夹爪本体的某个面），已作废。这个数是 A1 的修复：
-     URDF 原来用的是原作者通用夹爪的网格，指尖落在腕部以下 116 mm，比
-     实物长了约 100 mm —— 于是一开碰撞检查，抓取位姿就整只手埋进桌面，
-     MoveIt 报 "Unable to sample any valid states for goal tree"。 -->
+     这个量法量到的是夹取中心：早先写的 15 mm 量的是夹爪本体的某个面，不是
+     夹取中心。用原作者通用夹爪的网格时，指尖落在腕部以下 116 mm，比实物长约
+     100 mm，于是一开碰撞检查，抓取位姿就整只手埋进桌面，MoveIt 报
+     "Unable to sample any valid states for goal tree"。 -->
 <xacro:property name="gripper_wrist_to_tip_m" value="0.130"/>
 <xacro:property name="gripper_body_y_m" value="0.080"/>
 <xacro:property name="gripper_finger_y_m" value="0.050"/>
@@ -294,12 +293,11 @@
   <child link="link1_v1_1"/>
   <axis xyz="0.0 -0.0 -1.0"/>
   <!--
-    Limits throughout this file are the DEVICE's real travel, measured with
-    tools/probe_range.py and classified with tools/analyse_range.py. They are
-    NOT the vendor's datasheet values, and the difference matters: the device
-    silently drops an entire command that contains a move_j value it will not
-    act on, so a limit that is looser than the device lets MoveIt plan a motion
-    the arm will then ignore with no error anywhere.
+    Limits throughout this file are the DEVICE's real travel, measured on the
+    device. They are NOT the vendor's datasheet values, and the difference
+    matters: the device silently drops an entire command that contains a move_j
+    value it will not act on, so a limit that is looser than the device lets
+    MoveIt plan a motion the arm will then ignore with no error anywhere.
 
     Mapping used for every joint:
         urdf_deg = sign * (move_j - movej_urdf_zero_deg)
@@ -313,7 +311,6 @@
 
     Bounds here are rounded outward from the measurements (floor for the lower,
     ceil for the upper) so they are never tighter than what was observed.
-    tools/check_urdf_limits.py enforces that they are at least not looser.
   -->
   <limit upper="2.879793" lower="-2.879793" effort="100" velocity="100"/>
 </joint>
@@ -324,9 +321,8 @@
   <child link="link2_3_v4_1"/>
   <axis xyz="1.0 0.0 0.0"/>
   <!--
-    Limits below are the DEVICE's real travel, not the vendor's datasheet, and
-    they come from measuring what move_j the arm will actually accept
-    (tools/probe_range.py, classified with tools/analyse_range.py).
+    Limits below are the DEVICE's real travel, not the vendor's datasheet, from
+    measuring which move_j values the arm actually accepts.
 
     The device silently drops a command containing a value it will not act on,
     taking the whole command with it. So a limit here that is LOOSER than the
@@ -404,8 +400,7 @@
   <axis xyz="-1 0 0"/>
   <!--
     行程 27.5 mm = 最大开口 55 mm 的一半，q=0 时两指内侧面刚好接触（全闭），
-    q=27.5 mm 时开口 55 mm（全开）。原来的 0~0.023 与整个夹爪几何都来自
-    原作者的通用夹爪模型，与实物不符（本机 docs/04 的 A1），已按实测重建。
+    q=27.5 mm 时开口 55 mm（全开）。这个行程与整个夹爪几何都按实测重建过。
     SRDF 里 gripper 组的 open/closed 组状态用的是同一个数，改这里要一起改。
   -->
   <limit upper="${gripper_finger_travel_m}" lower="0.0" effort="100" velocity="100"/>
@@ -421,11 +416,8 @@
 </joint>
 
 <!-- ==========================================================================
-     末端坐标系（阶段 1 新增）
+     末端坐标系
      ==========================================================================
-     原来的 URDF 到 dummy_hand_v1_1 就结束了，没有 TCP、没有相机坐标系，
-     所以无法定义 MoveIt 的规划链，也无法把图像投到基座坐标系。
-
      坐标链（注意：XML 注释里不能出现连续两个连字符，所以这里用箭头文字替代）
        link7_v1_1  ->  tool0  ->  gripper_tcp
                            ->  camera_link  ->  usb_camera_optical_frame
@@ -472,16 +464,12 @@
          方案 B：给下面这个关节加条件，标定后不再展开
        首期用方案 A，简单直接。
 
-     2026-10-20 用四个已知位置的方块把位姿**解**出来了，不是手量的：
+     位姿是用四个已知位置的方块**解**出来的，不是手量的：
      方块放在 (0, +0.31)、(+0.10, +0.31)、(0, +0.21)、(0, +0.41)（米，相对
      base_link 原点），每个位置记下节点日志里的"绿斑中心 (u, v)"，再用
      "像素 → 去畸变射线 → 落地面 → 减影子偏置 = 真实位置" 做最小二乘，
      解出位置和两个角。四个点残差 RMS 8.4 mm；用解出来的位姿做正向仿真，
-     四个点算出的坐标与真值差都在 1 mm 以内。
-
-     注意：2026-10-19 那次"按一个点把 x/y 各推 2 cm"的校正被这次取代了，
-     而且那次本身就是错的 —— 三组数据摆出来只有 0.36 倍的压缩，说明差的
-     不是一个平移，里面还压着一个角度错。 -->
+     四个点算出的坐标与真值差都在 1 mm 以内。 -->
 <xacro:property name="camera_offset_x" value="-0.302"/>
 <xacro:property name="camera_offset_y" value="0.317"/>
 <xacro:property name="camera_offset_z" value="0.097"/>
@@ -493,10 +481,9 @@
      0.2~0.4 m 的工作范围里两者算出的点是同一处。所以这组数先用着；
      要把高度定死，只能靠手眼标定（相机看得见机械臂末端在动）。
 
-     俯角 4.44°、yaw -1.32°：这两个角以前靠深度拟合地面来定，但地面拟合
-     只能给倾角、**永远给不出 yaw**（一个水平面绕自己的法向转多少度都还是
-     它自己），而且现场深度在 0.34 m 上没有回波。现在用已知位置的方块解，
-     两个角一起出来了。
+     俯角 4.44°、yaw -1.32°：这两个角不是拟合地面来的 —— 地面拟合只能给
+     倾角、**永远给不出 yaw**（一个水平面绕自己的法向转多少度都还是它自己），
+     所以是上面那组已知位置的方块把两个角一起解出来的。
 
      写错位置会怎样：这个角必须写在 **pitch** 上 —— camera_link 的 +x 才是
      镜头方向（orbbec 驱动把光学系的 z 指向 camera_link 的 +x），绕 y 轴转
@@ -521,12 +508,11 @@
      深度对应光学系的 z（前，正值朝景物）。
 
      camera_color_optical_frame 不在这里定义 —— 它由 orbbec_camera 驱动自己发布
-     （camera_link -> camera_color_frame -> camera_color_optical_frame）。
-     以前这里也定义过一份同名的，结果是那个 frame 同时挂在 xacro 的
-     camera_link 与驱动的 camera_color_frame 两个父节点下，TF 树出现两条边；
-     查出来的变换不可信，而且不报错，只是数字不对。两个名字分开之后，
-     接 Gemini 用驱动的 camera_color_optical_frame，跑裸 USB 相机用本文件的
-     usb_camera_optical_frame，互不干扰。
+     （camera_link -> camera_color_frame -> camera_color_optical_frame）。同一个
+     frame 若同时挂在 xacro 的 camera_link 与驱动的 camera_color_frame 两个父节点
+     下，TF 树会出现两条边，查出来的变换不可信，而且不报错，只是数字不对。两个
+     名字分开之后，接 Gemini 用驱动的 camera_color_optical_frame，跑裸 USB 相机
+     用本文件的 usb_camera_optical_frame，互不干扰。
 
      rpy="-1.5707963 0 -1.5707963" 是 REP-103 -> 光学系的标准变换：
      绕 x 转 -90° 把 z 从朝上掰到朝前，再绕 z 转 -90° 对齐 x/y。 -->

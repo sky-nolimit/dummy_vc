@@ -2,10 +2,8 @@
 
 Why this launch file exists:
 
-1. The lifecycle node creates its subscriptions only in on_activate. Upstream
-   has no launch file for that, so the node silently does nothing until you
-   manually run two `ros2 lifecycle set` commands. Here the configure and
-   activate transitions are emitted automatically.
+1. The lifecycle node creates its subscriptions only in on_activate. Here the
+   configure and activate transitions are emitted automatically.
 
 2. robot_state_publisher needs the URDF to compute TF from /joint_states.
    Running it alongside the driver makes "does the model follow the real arm"
@@ -22,11 +20,8 @@ Why this launch file exists:
    Explicit launch arguments are the dependable path.
 
    The DEFAULT of every one of these arguments is read from the YAML when the
-   launch description is built. Nothing is repeated here. That is deliberate:
-   a second hardcoded copy of the calibration values is exactly what used to
-   drift and then silently override the config, so editing the YAML appeared
-   to do nothing. config/dummy_controller.yaml is the single source of truth;
-   tools/selftest_conversion.py enforces that this file holds no second copy.
+   launch description is built; nothing is hardcoded here.
+   config/dummy_controller.yaml is the single source of truth.
 
 Usage:
     ros2 launch dummy_controller dummy_controller.launch.py
@@ -37,14 +32,11 @@ Usage:
 About the lifecycle commands below
 ----------------------------------
 They are issued by the `ros2` CLI, which needs the node to have registered
-with DDS first. A single attempt can therefore fail with "Node not found" if it
-runs too early, and it is NOT retried by anything. Two attempts per transition
-are scheduled a few seconds apart; the first may fail harmlessly, the second
-normally lands. The node itself also keeps working while unconfigured, so even
-a missed command does not corrupt anything.
-
-Do not be alarmed by a stray "Node not found" on a boot that nevertheless ends
-with /joint_states publishing.
+with DDS first. A single attempt can fail with "Node not found" if it runs
+too early; two attempts per transition are scheduled a few seconds apart,
+and the node keeps working while unconfigured, so a missed command corrupts
+nothing. A stray "Node not found" on a boot that ends with /joint_states
+publishing is harmless.
 """
 import os
 
@@ -112,7 +104,7 @@ DESCRIPTIONS = {
     'movej_accepted_range_deg':
         'Per-joint lo,hi of move_j values the device accepts (12 numbers). '
         'Values outside are dropped SILENTLY, taking the whole command with '
-        'them. Measured with tools/probe_range.py.',
+        'them. Measured on the real device.',
     'movej_current_trim_deg':
         'Per-joint trim (deg) added to the reference pose the driver keeps '
         'for whole-turn folding. Use it only to compensate a mis-anchored '
@@ -180,7 +172,7 @@ def load_config_defaults(params_file):
     declared as one.
 
     Raising on a malformed config is intentional: a silent fallback to
-    hardcoded defaults is what hid the drift this function exists to prevent.
+    hardcoded defaults would hide the drift this function exists to prevent.
     """
     with open(params_file, encoding='utf-8') as fh:
         doc = yaml.safe_load(fh)
@@ -300,7 +292,7 @@ def generate_launch_description():
         actions=[LogInfo(msg=(
             '[bringup] lifecycle attempts finished. If /joint_states is '
             'publishing the driver is live; inspect the pose chain with: '
-            'python3 tools/debug_pose_chain.py'))],
+            'ros2 topic echo /joint_states'))],
     ))
 
     return LaunchDescription(actions)

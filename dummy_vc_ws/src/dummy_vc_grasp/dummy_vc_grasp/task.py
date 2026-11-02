@@ -1,11 +1,6 @@
 """抓取任务的状态机 —— 纯逻辑，不 import ROS，可以离线跑通所有分支。
 
-为什么把状态机单独拎出来：真正的坑几乎都在"某一步失败了怎么办"。真机上每次
-失败都要重开一次相机、重摆一次方块，一天试不了几次；而迁移逻辑本身是纯函数，
-可以用几十行自测把每条边都走一遍（`tools/selftest_grasp_task.py`）。ROS 那边
-只负责"执行动作、把结果翻译成事件"。
-
-一次抓取的顺序（和 docs/01 阶段 5 一致）：
+一次抓取的顺序：
 
     IDLE ─START→ OBSERVE ─看到目标→ MOVE_PRE_GRASP → APPROACH → CLOSE_GRIPPER
          → LIFT → MOVE_PLACE → OPEN_GRIPPER → RETREAT → DONE
@@ -100,10 +95,10 @@ class TaskMachine:
     （起手位、下探都能验），但走到 CLOSE_GRIPPER 会直接进 FAULT 并说明原因。
     这样在没有 USB-CAN 适配器的时候也能真机验证前面四步，而不是整条链一起干等。
 
-    2026-10-27 起 `gripper_ready` 的含义变了：以前指"角度<->开口映射实测过"，
-    现在指"有能下发的通道"（`pick_place_node` 把它接到 `gripper_enabled`）。
-    驱动里的 `hand.*` 已经确认不能用（`0x382` 在真板子上是触发标定），
-    夹爪改走 `gripper_can_node` 的 `/gripper/width`。
+    `gripper_ready` 的含义是"有能下发的通道"（`pick_place_node` 把它接到
+    `gripper_enabled`），不是"角度<->开口映射实测过"。驱动里的 `hand.*` 不能用
+    （`0x382` 在真板子上是触发标定），夹爪走 `gripper_can_node` 的
+    `/gripper/width`。
     """
 
     def __init__(self, max_retries=2, gripper_ready=False):

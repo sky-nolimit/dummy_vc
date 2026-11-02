@@ -1,43 +1,19 @@
 """把 `/gripper/width`（毫米）变成夹爪板的位置帧，并把回读转成 ROS 话题。
 
-为什么要有这个节点：主控固件里的 `hand.*` 会把整机锁死（`docs/04` A2：
-`CanSendMessage` 只在发送完成回调里归还信号量，出错路径都不归还），而且它发的
-0x382 在这块板上是**触发标定**（详见 `gripper_frames.py` 的说明）。所以夹爪不走
-主控，由 PC 经 USB-CAN 适配器直接对它说话，主控继续管它的六个关节。
+夹爪不走主控：主控的 `hand.*` 会锁死整机，而且它发的 0x382 在这块板上是
+**触发标定**。所以夹爪由 PC 经 USB-CAN 适配器直接控制，主控继续管它的六个
+关节。位置命令发 0x385，位置回读是 0x3A3。
 
-先虚拟总线试（不需要任何硬件）：
+`-p channel:=vcan0`（虚拟总线）或 `-p channel:=can0`（UTC-T01 这类 CANable
+兼容适配器，1 Mbps）；`-p dry_run:=true` 只打印要发的帧、不打开 socket。
 
-    sudo modprobe vcan
-    sudo ip link add dev vcan0 type vcan
-    sudo ip link set up vcan0
-    ros2 run dummy_vc_grasp gripper_can_node --ros-args -p channel:=vcan0
+两个前提：板子必须**已经标定过**，否则固件那道闸会让位置命令恒为零输出、
+回读却照常在动；位置是**绝对电机圈数**，不是相对量。
 
-真适配器（UTC-T01 是 CANable 兼容，内核 gs_usb 直接给出 can0）：
-
-    sudo modprobe gs_usb
-    sudo ip link set can0 type can bitrate 1000000 sample-point 0.667
-    sudo ip link set up can0
-    ros2 run dummy_vc_grasp gripper_can_node --ros-args -p channel:=can0
-
-发一个开口宽度（毫米），15 mm 是个安全起点：
-
-    ros2 topic pub --once /gripper/width std_msgs/msg/Float64 "{data: 15.0}"
-
-回读在 `/gripper/position`（毫米）：
-
-    ros2 topic echo /gripper/position
-
-两个前提，不然一定白费：
-
-1. 板子必须**已经标定过**（`encoder->IsCalibrated()`），否则固件那道闸
-   （`Ctrl/Motor/motor.cpp:96-103`）会让输出恒为零，位置命令一点反应都没有，
-   而回读照样在动——这看起来像"命令没进去"，其实是被闸挡了。
-2. 位置是**绝对电机圈数**，不是相对量。断电再上电，同一圈数对应同一开口。
-
-还有一条会打架的地方：主控的 `power_on()` 会发 0x381 带一个 float（`maxCurrent`），
-而这块板只认 uint32 == 1 才是使能，其余一律 `MODE_STOP` —— **主控一启动就把夹爪
-置停**。所以 `enable_before_move` 默认开着，每次下位置前补一帧使能；主控重启过
-也不用管它。主控那边绝不能再调 `hand.*`。
+主控的 `power_on()` 会发 0x381 带一个 float（`maxCurrent`），而这块板只认
+uint32 == 1 才是使能，其余一律 `MODE_STOP` —— **主控一启动就把夹爪置停**。
+所以 `enable_before_move` 默认开着，每次下位置前补一帧使能；主控那边绝不能
+再调 `hand.*`。
 """
 
 import argparse
@@ -63,16 +39,15 @@ class GripperCanNode(Node):
         self.declare_parameter('channel', 'vcan0')
         self.declare_parameter('width_topic', '/gripper/width')
         self.declare_parameter('position_topic', '/gripper/position')
-        #: 主动问一次位置（板子自己也会被主控轮询，这里只是不依赖主控）
+        #: 主动问位置的频率（Hz）；板子自己也会被主控轮询，这里只是不依赖主控。
         self.declare_parameter('poll_hz', 5.0)
         self.declare_parameter('enable_on_start', True)
-        #: 每次下位置前再补一帧使能。主控的 power_on 会把夹爪置停（见下方
-        #: `_on_width` 的注释），所以这个默认开着。
+        #: 每次下位置前再补一帧使能：主控的 power_on 会把夹爪置停（见 `_on_width`）。
         self.declare_parameter('enable_before_move', True)
         #: 只打印不发送：用来在没开 can0 的机器上先看一眼要发什么。
         self.declare_parameter('dry_run', False)
-        #: 启动时先量一次合拢点。**默认开着**：宽度那条线性关系的截距跟着编码器
-        #: 零点走，零点会因为"重新标定一次"就平移，所以不能假设上电时手指在哪。
+        #: 启动时先量一次合拢点。**默认开着**：宽度映射的截距跟着编码器零点走，
+        #: 零点会被重新标定平移，不能假设上电时手指在哪。
         self.declare_parameter('home_on_start', True)
         #: 找零点时命令目标超过止位多少圈（整段行程才 4.7 圈）。
         self.declare_parameter('home_span_revs', gh.DEFAULT_SPAN_REVS)
@@ -81,57 +56,45 @@ class GripperCanNode(Node):
                                gh.DEFAULT_STROKE_TOL_REVS)
         #: 量完之后张到多宽（不要让手指一直顶在止位上）。
         self.declare_parameter('idle_width_mm', 50.0)
-        #: 退出时合拢到多宽。0 = 完全闭合：手指收回去更不容易磕碰、也不容易
-        #: 进灰；想停在半开就改这个数。
+        #: 退出时合拢到多宽。0 = 完全闭合，手指收回更不容易磕碰和进灰。
         self.declare_parameter('park_width_mm', 0.0)
         #: 退出时要不要做上面那步。
         self.declare_parameter('park_on_shutdown', True)
         #: 退出时合拢要等多久再读回读（手指走 0~50 mm 约 1 s）。
         self.declare_parameter('park_settle_s', 1.5)
 
-        #: 位置模式是 DCE（比例型）控制，负载和齿条摩擦下会停在离目标一截的
-        #: 地方：真机上"要 50 mm"经常停在 52~54 mm。所以发完不等它自己收敛，
-        #: 而是读回实测、按"目标 = 当前 + 差值"补发一次，最多补 `width_max_iters`
-        #: 次。容差 0.8 mm 比手指和物块的接触变形大，不会来回抖。
+        #: 位置模式是比例型控制，负载和齿条摩擦下会停在离目标一截的地方。所以发完
+        #: 不等它自己收敛，而是读回实测、按"上一条命令 + 实测差"补发，最多
+        #: `width_max_iters` 次。容差 0.8 mm 比接触变形大，不会来回抖。
         self.declare_parameter('width_tol_mm', 0.8)
         self.declare_parameter('width_max_iters', 4)
-        #: 命令发出后至少等这么久，才认为回读可能是"停稳"的值。位置模式有加减
-        #: 速，0~50 mm 要走 1 s 以上；原来的 0.4 s 读到的是半路上的位置，拿它
-        #: 算补发量会把目标来回推 —— 2026-10-30 真机日志里"要 50 mm"实测在
-        #: 46.9 / 53.0 之间来回跳、补发 4 次还没到位，就是从这里开始的。
+        #: 命令发出后至少等这么久，才把回读当成"停稳"值：位置模式有加减速，
+        #: 0~50 mm 要走 1 s 以上，早了读到的是半路上的位置，拿它算补发量会把
+        #: 目标来回推。
         self.declare_parameter('width_settle_s', 1.0)
-        #: 时间判据之外的第二条：相邻两帧回读差超过这么多圈，就认为手指还在
-        #: 动，继续等。慢慢爬的时候只靠时间判据不够。
+        #: 时间判据之外的第二条：相邻两帧回读差超过这么多圈就认为手指还在动，继续等。
         self.declare_parameter('width_settle_revs', 0.02)
         #: 判"板子卡死"要**同时**满足两条：连续这么多次主动查询都没答……
         self.declare_parameter('link_miss_max', 8)
-        #: ……并且已经这么久没收到 0x3A3（秒）。2026-10-30 之前只看时间
-        #: （3 s，真机上还被配成 2 s）：空闲时 1 Hz 查询，**丢一帧就等于
-        #: "2 秒没回"**，于是一次偶发丢帧就把夹爪判死（_may_move=False），
-        #: 之后张爪/合爪全被拒、只能断电重启 —— 日志里 13:29:40 那句
-        #: "2.0 秒没回过一帧" 紧跟在一帧成功的回读后面，就是个假警报。
-        #: 现在丢一帧只让计数 +1，要连丢 8 次（且空够 3 s）才判死。
+        #: ……并且已经这么久没收到 0x3A3（秒）。只看时间不行：空闲时 1 Hz 查询，
+        #: 丢一帧就等于"2 秒没回"，一次偶发丢帧就会把夹爪永久判死、只能断电重启。
+        #: 现在要连丢 link_miss_max 次且空够这么久才判死。
         self.declare_parameter('link_timeout_s', 3.0)
         #: 空闲时的查询频率（Hz）。发得越少，撞上 35 板那条"一帧没发出去就
         #: 永久锁死发送"的固件缺陷的机会越小；有目标在跟的时候仍按 poll_hz 问。
         self.declare_parameter('idle_poll_hz', 1.0)
-        #: 找零点之前先等板子回一帧位置，最多等这么久。**默认 30 秒**：这个节点
-        #: 是跟 `pick_place_demo` 一起起的，那一刻往往正是主控在给自己归位的几秒
-        #: —— 总线被 5 ms 一轮的运动命令占满，夹爪的帧号最大、优先级最低，回帧
-        #: 成片被丢。手动跑 `tools/gripper_home.py` 时臂早停了、总线很空，所以
-        #: 同一个操作手动能通、脚本里 2 秒就判死。别再把它调小。
+        #: 找零点之前先等板子回一帧位置，最多等这么久。**默认 30 秒**：启动时主控
+        #: 往往正在归位，总线被 5 ms 一轮的运动命令占满，夹爪回帧成片被丢。别再调小。
         self.declare_parameter('home_board_timeout_s', 30.0)
-        #: 等到了板子之后，**量零点那一次读**最多给它多久。默认 3 秒：能等到
-        #: 板子第一帧，说明它活着，接下来只可能是总线又被挤了一段，就别再用
-        #: 0.3 秒的窗口去赌（2026-10-30 13:57 那次就是赌输了直接弃用整场）。
+        #: 等到板子之后，量零点那一次读最多给它多久。默认 3 秒：板子既然答过，
+        #: 剩下的就是总线又被挤了一段，别用 0.3 秒的窗口去赌。
         self.declare_parameter('home_first_read_timeout_s', 3.0)
         #: 零点没量成时后台隔多久补量一次（秒），以及最多补几次。0 = 不补。
         #: 一次启动撞上总线高峰不该让整场机器人报废，但也不能无限重试。
         self.declare_parameter('home_retry_s', 10.0)
         self.declare_parameter('home_retry_max', 12)
         #: 零点没量成时，要不要退回出厂合拢点继续用。**默认不要**：出厂值是别的
-        #: 板子的状态，在这块板上整体偏了 12.6 mm（实测），拿它张爪会顶到限位、
-        #: 拿它合爪会留 11 mm 缝 —— 比"一步不动"更难查。
+        #: 板子的状态，在这块板上整体偏 12.6 mm，拿它张爪会顶到限位、合爪会留缝。
         self.declare_parameter('home_allow_default', False)
         #: 零点状态发在这里：ready / default_zero / no_zero。
         self.declare_parameter('status_topic', '/gripper/status')
@@ -149,7 +112,7 @@ class GripperCanNode(Node):
         #: 零点量准了吗（量准了才敢按毫米指挥）。
         self.zero_known = False
         #: 允不允许动夹爪。零点没量成、又没被允许退回出厂值时为 False：
-        #: 张爪、合爪、收手全部跳过，并且每次收到命令都说明原因。
+        #: 张爪、合爪、收手全部跳过，并说明原因。
         self._may_move = True
         self._last_refusal = 0.0
 
@@ -163,9 +126,8 @@ class GripperCanNode(Node):
         self._last_width = None
         #: 上一帧回读的圈数（判"停稳"用：相邻两帧差得够小才算停了）。
         self._prev_revs = None
-        #: 最后一次实际发出去的圈数命令，以及发它的时间。补发量按
-        #: "上次命令 + 实测差" 算，不能按 "2*目标 − 实测" 算 —— 后者默认
-        #: 上一条命令就是目标，一旦上一条已经放大过，就会越补越偏。
+        #: 最后一次实际发出去的圈数命令，以及发它的时间。补发量按 "上次命令 + 实测差"
+        #: 算，不能按 "2*目标 − 实测" 算 —— 后者会把已经放大过的误差继续放大。
         self._command_revs = None
         self._command_at = 0.0
         #: 闭环修正的当前目标：None = 没有在跟的目标。
@@ -178,8 +140,7 @@ class GripperCanNode(Node):
         #: 连续收帧失败次数（看门狗与日志用）。
         self._recv_errors = 0
         self._poll_tick = 0
-        #: 收到过几帧回读、同步读超时过几次（诊断用：看日志就知道板子答得有多
-        #: 慢、丢帧有多频繁，不用再猜"是不是 0.3 秒太短"）。
+        #: 收到过几帧回读、同步读超时过几次（诊断用）。
         self._reply_count = 0
         self._read_timeouts = 0
         #: 同步读（量零点）期间让接收线程停在原地，别两边抢同一个 socket。
@@ -199,7 +160,7 @@ class GripperCanNode(Node):
         if self.sock is not None and bool(
                 self.get_parameter('home_on_start').value):
             self._home_on_start()
-        # 状态每秒重发一次：抓取节点可能比夹爪节点晚起，晚订阅也能收到。
+        # 状态每秒重发一次：抓取节点比夹爪节点晚起时，晚订阅也能收到。
         self.create_timer(1.0, self._publish_status)
 
         if not self.dry_run:
@@ -241,8 +202,7 @@ class GripperCanNode(Node):
     def _read_revs(self, timeout=0.3, attempts=1):
         """同步读一次位置（圈），读不到返回 None。
 
-        只在找零点时用 —— 那会儿接收线程还没起来，没人跟它抢帧。`attempts > 1`
-        时会连着重发查询：刚打开 socket 的那一瞬间板子往往还没答上来。
+        只在找零点时用 —— 那会儿接收线程还没起来，没人跟它抢帧。
         """
         for _ in range(max(1, int(attempts))):
             revs = self._read_revs_once(timeout)
@@ -277,8 +237,8 @@ class GripperCanNode(Node):
             self._last_feedback_at = time.time()
             self._polls_since_reply = 0
             self._reply_count += 1
-            # 头三帧记下往返时间：量零点再失败时，日志能直接回答"是板子慢，
-            # 还是这边读的窗口太短"，不用再凭猜。
+            # 头三帧记下往返时间：量零点失败时，日志能回答是板子慢还是读的窗口
+            # 太短。
             if self._reply_count <= 3:
                 self.get_logger().info(
                     '回帧 0x{:03X}：往返 {:.0f} ms，{:.4f} 圈'.format(
@@ -289,10 +249,10 @@ class GripperCanNode(Node):
         return None
 
     def _wait_for_board(self, timeout=None):
-        """等板子第一次回位置。刚开 socket 时它可能正在上电，别立刻判死刑。
+        """等板子第一次回位置：刚开 socket 时它还没就绪，别立刻判死刑。
 
-        等待期间每 2 秒说一声"还在等"，因为这段时间主控往往正在归位、总线很挤，
-        夹爪的回帧被丢是常态 —— 沉默比报错更让人以为卡死了。
+        等待期间每 2 秒说一声"还在等"：主控归位时总线很挤，夹爪回帧被丢是常态，
+        沉默比报错更让人以为卡死了。
         """
         if timeout is None:
             timeout = float(self.get_parameter('home_board_timeout_s').value)
@@ -314,12 +274,7 @@ class GripperCanNode(Node):
         return False
 
     def _home_on_start(self):
-        """启动时量一次零点；量不成就在后台隔一会儿再试。
-
-        2026-10-30 13:57 真机：日志里刚说"1.2 秒后板子开始回位置了"，紧接着量
-        零点却"板子没答"，于是整场抓取被拒（/gripper/status=no_zero）。一次
-        启动撞上主控归位、总线挤满不该让机器人报废；但也不能无限重试。
-        """
+        """启动时量一次零点；量不成就在后台隔一会儿再试，但也不能无限重试。"""
         if self._attempt_home():
             return
         if self._may_move:                       # 已按 home_allow_default 放行
@@ -345,16 +300,15 @@ class GripperCanNode(Node):
                 log.info('补量成功：合拢点 {:.4f} 圈，接下来可以正常夹了'
                          .format(self.rev_closed))
                 return
-        log.error('补量 {} 次都没成，夹爪这次不参与抓取。先跑 '
-                  'tools/gripper_home.py，或者按 _check_link 里那两条 '
-                  'candump/cansend 判板子死活'.format(tries))
+        log.error('补量 {} 次都没成，夹爪这次不参与抓取。按 _check_link 里那'
+                  '两条 candump/cansend 先判板子死活'.format(tries))
 
     def _attempt_home(self, quiet=False):
         """走一遍"等板子 → 量两头 → 张到待命"。返回零点是否量准。
 
         这一步是宽度映射可靠的前提：截距跟着编码器零点走，而零点会被一次重新
         标定平移掉。量不到就**不动**（除非显式允许退回出厂值）—— 用错零点张爪
-        会顶到限位、合爪会留缝，比不动作更难查。
+        会顶到限位、合爪会留缝。
         """
         log = self.get_logger()
 
@@ -363,8 +317,8 @@ class GripperCanNode(Node):
 
         board_timeout = float(
             self.get_parameter('home_board_timeout_s').value)
-        # 量零点期间让接收线程停在原地：两边都 recv 同一个 socket 时，谁抢到
-        # 那一帧是随机的（2026-10-30 之前"时成时不成"就是这么来的）。
+        # 量零点期间让接收线程停在原地：两边都 recv 同一个 socket 时，谁抢到那一帧
+        # 是随机的。
         self._sync_reading = True
         try:
             if not self._wait_for_board(board_timeout):
@@ -421,7 +375,7 @@ class GripperCanNode(Node):
         log.error(
             '没量成：{}。零点未知，**这次不会动夹爪**（张/合/收手都跳过），'
             '抓取会在合爪那一步失败。每 {:.0f} 秒会自动再试一次（最多 {} 次）；'
-            '也可以先跑 tools/gripper_home.py 量一次，或把 home_allow_default '
+            '或者把 home_allow_default '
             '设成 true（不推荐）'.format(
                 reason, float(self.get_parameter('home_retry_s').value),
                 int(self.get_parameter('home_retry_max').value)))
@@ -463,21 +417,11 @@ class GripperCanNode(Node):
     def _check_link(self):
         """板子还活着吗？活着才允许继续动。
 
-        2026-10-28 真机：一次成功的抓取之后，夹爪板突然不再回 0x3A3，
-        `candump` 上一条都没有，只有整机断电重启才恢复。35 板固件那条
-        "一帧发不出去就永久丢掉 TX 信号量" 的缺陷（见 docs/04 A2-补充2）
-        完全能解释这个现象 —— 板子自己的 CAN 发送路径锁死了，它不会再收
-        也不会再答。
+        判据要**两条同时成立**：连续 link_miss_max 次主动查询都没答，且已经空够
+        link_timeout_s 秒 —— 只看时间的话，一次偶发丢帧就会把夹爪永久判死。
 
-        我们没法从这边把它救回来（它连 reboot 帧都不处理），能做的是：
-        立刻停止发命令、把状态改成 no_zero，并明确告诉人"断电重启"。
-
-        **2026-10-30 修正：判据不能只看时间。** 原来"3 秒（或被配成 2 秒）没
-        收到 0x3A3 就判死"，而空闲时查询只有 1 Hz —— 丢一帧就等于"1~2 秒没
-        回"，于是实测里一帧刚成功的回读之后紧接着就冒出一句"2.0 秒没回过一帧"，
-        夹爪被永久判死。CAN 上一帧偶发被挤掉是常态（主控归位时总线是满的），
-        所以现在要求"连续 link_miss_max 次主动查询都没答"**且**"空够
-        link_timeout_s 秒"两条同时成立才判死。
+        板子卡在自己的 CAN 发送上时没法从这边救回来（它连 reboot 帧都不处理），
+        能做的是立刻停发命令、把状态改成 no_zero，并明确告诉人"断电重启"。
         """
         if not self.zero_known or self._last_feedback_at <= 0.0:
             return
@@ -508,7 +452,7 @@ class GripperCanNode(Node):
         if now - self._last_refusal >= 2.0:
             self._last_refusal = now
             self.get_logger().error(
-                '不动夹爪：{}。先跑 tools/gripper_home.py 量零点'
+                '不动夹爪：{}。先确认夹爪零点（重跑夹爪节点会自己重试）'
                 '（或把 home_allow_default 设成 true 强行用出厂值）'.format(note))
 
     # -- 传输层 -----------------------------------------------------------
@@ -579,9 +523,8 @@ class GripperCanNode(Node):
             except socket.timeout:
                 continue
             except OSError as exc:
-                # 以前这里直接 break：接收线程静默退出，现象和"板子不回帧"
-                # 一模一样（看门狗也是"没收到回帧"），日志里却完全分不出来。
-                # 现在留痕、计数，连续失败太多次才放弃。
+                # 别在这里直接退出：接收线程静默消失和"板子不回帧"现象一样，日志里
+                # 分不出来。现在留痕、计数，连续失败太多次才放弃。
                 self._recv_errors += 1
                 self.get_logger().error('收帧失败（{}），连续第 {} 次'.format(
                     exc, self._recv_errors))
@@ -655,19 +598,17 @@ class GripperCanNode(Node):
                 '要 {:.2f} mm，机械行程只有 {:g}~{:g} mm，按 {:.2f} mm 发'.format(
                     raw, gf.MIN_WIDTH_MM, gf.MAX_WIDTH_MM, width))
         revs = gf.width_to_revs(width, self.anchor, self.span)
-        # 每发一次位置都补一帧使能。原因：主控固件的 power_on 会调
-        # hand.set_enable(true)，而它发的是 0x381 带一个 float（如 0.5A），
-        # 35 板那边只认 uint32 == 1 才是使能，其余一律 MODE_STOP —— 主控
-        # 一启动就会把夹爪置停。所以不能信任"节点启动时那一次使能"。
+        # 每发一次位置都补一帧使能：主控的 power_on 发的是 0x381 带 float（如 0.5A），
+        # 而 35 板只认 uint32 == 1 才是使能，其余一律 MODE_STOP —— 主控一启动就会把
+        # 夹爪置停，所以不能信任"节点启动时那一次使能"。
         if self._enable_before_move:
             self._send(gf.ENABLE_FRAME_ID, gf.encode_enable(True))
         sent = self._send(gf.POSITION_FRAME_ID, gf.encode_position(revs))
         self.get_logger().info(
             '开口 {:.2f} mm → 位置 {:.4f} 圈{}'.format(
                 width, revs, '' if sent else '（没发出去）'))
-        # 从这一刻起盯着这个目标，等它停稳再由 _correct_once 补发。
-        # 没发出去就不记"上一条命令"：补发时退回开环，别拿一条没发生的命
-        # 令当基准（否则补发量会多出一整段）。
+        # 从这一刻起盯着这个目标，等它停稳再由 _correct_once 补发。没发出去就不记
+        # "上一条命令"，补发时退回开环，别拿一条没发生的命令当基准。
         self._target_width_mm = float(width)
         self._target_iters = 0
         self._command_revs = float(revs) if sent else None
@@ -676,14 +617,10 @@ class GripperCanNode(Node):
     def _correct_once(self):
         """按回读补发一次位置，把"要 50 停在 52~54"的静差补掉。
 
-        位置模式是比例型控制，负载越大停得越偏；它自己不会收敛到目标。
+        位置模式是比例型控制，负载越大停得越偏，它自己不会收敛到目标。
 
-        补发量按"**上一条命令 + 这次实测差**"算，不是"2×目标 − 实测"。
-        老写法的前提是上一条命令正好等于目标；一旦上一条已经补过（目标 50 mm
-        而命令是 51.5 圈对应的值），它会把那次放大当成新误差继续放大 ——
-        再加上 0.4 s 就去读回读（手指还在走），2026-10-30 真机日志里就出现了
-        46.9 → 53.0 → 待发 51.5 的来回跳。新写法只补"命令与实际之间差的那一
-        段"，静差一次补平，不会越补越大。
+        补发量按"**上一条命令 + 这次实测差**"算，不是"2×目标 − 实测"：后者默认
+        上一条命令就是目标，一旦上一条已经放大过，就会越补越偏。
         """
         if self._target_width_mm is None or self._last_revs is None:
             return
@@ -707,7 +644,7 @@ class GripperCanNode(Node):
             self.get_logger().warn(
                 '开口停在 {:.1f} mm（要 {:.1f} mm）：补发 {} 次、每次都等停稳了'
                 '才补，还差 {:+.1f} mm。先确认手指有没有顶到东西；没顶到就是'
-                '"宽度↔圈数"这条线偏了，重新量零点（tools/gripper_home.py）'
+                '"宽度↔圈数"这条线偏了，重新量零点'
                 .format(self._last_width, self._target_width_mm,
                         self._target_iters, error))
             self._target_width_mm = None

@@ -1,28 +1,23 @@
 #!/usr/bin/env python3
 """彩色方块 -> base_link 下的抓取目标（vision_msgs/Detection3DArray）。
 
-这一层只做"脏活"：拿图、查 TF、调 cv2 分割，然后交给
-`dummy_vc_perception/detection.py` 做几何。分割以外的数学都在那一层，
-所以那边能离线自测，这边只能上真机验。
+这一层只做"脏活"：拿图、查 TF、调 cv2 分割，几何交给
+`dummy_vc_perception/detection.py`，所以那边能离线自测，这边只能上真机验。
 
-现在默认对着 driver 里那个 USB 相机（`dummy_fingerprint.launch.py`），
-深度相机（Orbbec Gemini 335L）接进来时：
-
-    image_topic        /camera/color/image_raw
-    camera_info_topic  /camera/color/camera_info
-    frame_id           /camera/color/image_raw 的 header 自己带 optical frame
+深度相机接入时用 /camera/color/image_raw 与 /camera/color/camera_info，
+frame_id 由图像 header 自带的光学系给出。
 
 有两条算抓取点的路，`use_depth` 选：
 
 * **深度（`use_depth:=true`）**：掩膜里的像素去查深度图，直接得到 3D 点，在顶面上定
-  xy、z 减半个边长。不依赖"相机水平、地面等高处"这两个假设，也就没有
-  单目那条路对俯角的病态敏感（本机斜下 33°，1° 就能让落点差 8 mm）。
-* **单目（默认）**：把像素投到"工作面"平面上（`table_z`，
-  本机是地面 -0.0405），物体有高度时顶面中心会往外偏十几毫米。留着它
-  是为了深度不可用（没接相机、深度流坏了）时还能跑，不是首选。
+  xy、z 减半个边长。不依赖"相机水平、地面等高处"这两个假设，也没有单目那条路
+  对俯角的病态敏感。
+* **单目（默认）**：把像素投到"工作面"平面上（`table_z`）。物体有高度时顶面中心会
+  往外偏十几毫米；本机斜下安装，俯角差 1° 落点就差 8 mm，标定没做完前别信它的
+  绝对精度。留着它，是为了深度不可用（没接相机、深度流坏了）时还能跑。
 
-`calibrate_plane:=true` 会每隔一阵用整幅深度图拟合一次地面，把"相机实际
-倾了多少度、离地多高"打出来 —— 那是标定 `camera_mount_pitch_deg` 的依据。
+`calibrate_plane:=true` 会每隔一阵用整幅深度图拟合一次地面，把"相机实际倾了多少度、
+离地多高"打出来 —— 那是标定 `camera_mount_pitch_deg` 的依据。
 """
 
 import math
@@ -58,44 +53,36 @@ class VisionNode(Node):
         self.declare_parameter('output_topic', '/detected_objects')
         self.declare_parameter('marker_topic', '/detected_objects/markers')
         self.declare_parameter('base_frame', 'base_link')
-        # 下面两个数的默认值来自本机的实测记录（geometry.project_scene_measurements）。
-        # 用 yaml 覆盖也可以，但两者不一致时日志会指出来。
+        # 默认值来自 geometry.project_scene_measurements()；yaml 覆盖后
+        # 不一致时日志会指出。
         self.declare_parameter('table_z', scene.table_z.value)
         self.declare_parameter('object_edge', scene.object_edge.value)
-        # 彩色方块的 HSV 门限，一条 6 个数：[H_lo, S_lo, V_lo, H_hi, S_hi, V_hi]，
-        # 多条就顺着往后接（节点按 6 个数一组切）。用扁平数组而不是
-        # [[...], [...]]，是因为 ROS 2 的参数不支持"数组套数组"。
-        # 给成多条而不是一对上下界，是因为红色在 OpenCV 的 H 上跨界
-        # （0~10 与 170~180 两头都有），只写一条会抓不全半个方块。
-        # 默认是绿色块；红色块写成两条：
+        # 彩色方块的 HSV 门限，每 6 个数一条：[H_lo, S_lo, V_lo, H_hi, S_hi, V_hi]，
+        # 多条顺接（节点按 6 个一组切）。用扁平数组是因为 ROS 2 参数不支持
+        # "数组套数组"；红色在 H 上跨 0~10 与 170~180 两头，要写成两条。
+        # 默认是绿色块：
         #   hsv_ranges: [0, 120, 70, 10, 255, 255, 170, 120, 70, 180, 255, 255]
         self.declare_parameter('hsv_ranges', [40, 80, 60, 80, 255, 255])
         self.declare_parameter('min_area_px', detection.MIN_BLOB_AREA_PX)
         self.declare_parameter('max_area_fraction', 0.2)
-        # 短边是拿"边长"和"对角线"两个假设比过的（见 detection.short_edge_error）。
-        # 门限 12 mm：这套斜视安装下掩膜边缘本身就有几个像素的肥边（0.35 m 处
-        # 1 px ≈ 0.58 mm），棱角正对相机时实测短边能到 41.6 mm —— 卡在 10 mm
-        # 就会把真正的方块丢掉。远处那个 0.75 m 的绿斑交给 max_distance 挡。
+        # 短边门限 12 mm（见 detection.short_edge_error）：斜视安装下掩膜边缘有
+        # 几个像素的肥边，棱角正对相机时短边会明显偏大，门限太紧会丢掉真方块。
+        # 远处的绿斑交给 max_distance 挡。
         self.declare_parameter('max_edge_error', 0.012)
         self.declare_parameter('max_distance', 1.5)
         self.declare_parameter('max_rate_hz', 10.0)
         self.declare_parameter('publish_markers', True)
         # 深度路径。关掉就退回"像素投到平面上"的单目路。
-        # 默认关：2026-10-19 实测 0.34 m 处的方块在深度图里只有 5% 的像素有
-        # 有效深度（掩膜 3206 px 里 168 点），拟合出的顶面只有 4.7x8.0 mm。
-        # 相机最近 0.25 m、又斜着看低反射的绿色方块，凑不出可用点云。
+        # 默认关：相机最近 0.25 m，又斜看低反射的绿色方块，深度图里有效点太少。
         self.declare_parameter('use_depth', False)
         self.declare_parameter('depth_topic', '/camera/depth/image_raw')
         # 0 表示按图像编码自动定（16UC1 -> 毫米，32FC1 -> 米）。
         self.declare_parameter('depth_scale', 0.0)
-        # 掩膜抽稀步长：24 mm 方块在 0.3 m 处有上千个像素，隔一个取一个
-        # 已经把定位钉到毫米级，全用只是让 2 Hz 的节点更卡。
+        # 掩膜抽稀步长：24 mm 方块在 0.3 m 处上千像素，隔一个取一个已够毫米级定位。
         self.declare_parameter('depth_step', 2)
         self.declare_parameter('depth_max_range', depth3d.DEFAULT_MAX_RANGE_M)
-        # 单目影子偏置的系数：`detection.shadow_bias()` 按"半个物体高"修，这个
-        # 系数是它的乘子。1.0 = 照模型全修，0 = 完全不修（标定时想看原始偏差
-        # 就用 0）。2026-10-30 之前这里和 pick_place 的 shadow_fix 各修了一次，
-        # 等于修两倍；现在只由这里修。改这个值不用改代码。
+        # 单目影子偏置的系数，乘 detection.shadow_bias() 的修正量：1.0 = 全修，
+        # 0 = 不修（标定时看原始偏差）。只在这里修，pick_place 不再重复修。
         self.declare_parameter('shadow_bias_scale', 1.0)
         # 打开后每隔一阵用整幅深度图拟合地面，报相机真实的倾角和离地高度。
         self.declare_parameter('calibrate_plane', False)
@@ -221,10 +208,10 @@ class VisionNode(Node):
             for lower, upper in self.hsv_ranges)
 
     def _log_rejects(self, rejects):
-        """把"为什么这些 blob 没被采用"打出来，最多三条，按面积大的优先。
+        """打印被丢弃的 blob：最多三条，按面积从大到小。
 
-        两种路径的 `rejects` 元素形状不同：单目路径是 `(Blob, 原因)`，
-        深度路径是 `(label, 像素数, 原因)`。这里统一成"多少像素 + 为什么"。
+        单目路径的元素是 `(Blob, 原因)`，深度路径是 `(label, 像素数, 原因)`，
+        这里统一成"多少像素 + 为什么"。
         """
         if not rejects:
             self.get_logger().warn(
@@ -246,12 +233,7 @@ class VisionNode(Node):
             self.get_logger().warn('  被丢掉的 blob：{}'.format(describe(item)))
 
     def _log_blobs(self, blobs):
-        """画面里到底有几块绿的、最大那几块在哪儿。
-
-        认错对象时（比如抓到一个远处的绿东西、而方块根本没进掩膜），这是唯一
-        能定案的证据：方块按几何该落在某个像素上，掩膜里有没有东西在那儿，一眼
-        就知道是"分割没切到"还是"切到了但被后面的判据拒了"。
-        """
+        """打印画面里绿斑的数量和最大的几个，用来区分"分割没切到"与"切到了但被后续判据拒掉"。"""
         if not blobs:
             self.get_logger().warn(
                 '  画面里一个绿斑都没有（HSV 范围 {}）'.format(self._ranges_text()))
@@ -307,7 +289,7 @@ class VisionNode(Node):
                     self.camera.fx, self.camera.fy))
             self.camera = None
             return
-        # 8 个畸变系数的驱动（Gemini 335L 就是）只用到前 5 个，说一声。
+        # 8 个畸变系数的驱动只用到前 5 个，说一声。
         if self.camera.ignored_distortion and not self.distortion_warned:
             self.distortion_warned = True
             self.get_logger().warn(
@@ -318,9 +300,8 @@ class VisionNode(Node):
 
     def _on_image(self, msg):
         if self.camera is None:
-            # 没有内参就算不了坐标。但**不能安静地 return**：话题名打错一个字母
-            # 时，节点会一条日志都不打，看起来像卡死（2026-10-19 真机就这么
-            # 卡了一次：camera_info_topic 写成了 /camera/coolor/camera_info）。
+            # 没有内参就算不了坐标；不能静默 return，否则话题名写错时
+            # 节点看起来像卡死。
             if not self.no_info_warned:
                 self.no_info_warned = True
                 self.get_logger().error(
@@ -385,13 +366,11 @@ class VisionNode(Node):
                 self.misses))
             self.misses = 0
 
-        # 终端里就把坐标打出来：单目 0.3 Hz 的环境下 `topic echo` 很容易错过
-        # 那一帧，日志是唯一一定能拿到的证据。
+        # 终端里就把坐标打出来：低频下 `topic echo` 容易错过那一帧，日志是唯一证据。
         self.hits += 1
         if self.hits == 1 or self.hits % 10 == 0:
             best = detections[0]
-            # 像素中心也打出来：标定相机位姿要的是"这个坐标来自哪个像素"，
-            # 少了它，光有一堆坐标也反解不出相机在哪。
+            # 像素中心也打出来：标定相机位姿需要"坐标 + 对应像素"这一对。
             where = ''
             if centres:
                 where = '，绿斑中心 ({:.0f}, {:.0f})'.format(*centres[0])
@@ -408,9 +387,7 @@ class VisionNode(Node):
                 self._log_depth_probe(labels, depth_frame, T)
             self._log_blobs(blobs)
             if self.hits == 1 and rejects:
-                # 首次命中时也把丢掉的 blob 报出来。只打"取最大的那个"没法判断
-                # 认的是不是方块：2026-10-22 现场视野里另有一块 18192 像素的
-                # 绿东西被尺寸判据拒了，而命中路径原来一个字都不说。
+                # 首次命中时也报出被丢弃的 blob，便于判断认出来的是不是方块。
                 self._log_rejects(rejects)
 
         array = self._to_message(detections, msg.header)
@@ -419,15 +396,12 @@ class VisionNode(Node):
             self.pub_markers.publish(self._to_markers(detections, msg.header))
 
     # ------------------------------------------------------------------
-    # 深度：取帧，以及"用地面把相机自己标出来"
+    # 深度：取帧与地面标定
     # ------------------------------------------------------------------
 
     def _log_depth_probe(self, labels, depth, T):
-        """把"深度这一层实际看到什么"压成一行。
-
-        只有最终坐标时，抓取点偏了分不清是掩膜偏、深度不对、还是 TF 的平移
-        不对。这一行把原始深度值、以及这些点在 base_link 下的 z 摊开：和
-        `table_z`（工作面）一比，就知道差在哪儿。
+        """把深度这一层实际看到的东西压成一行：原始深度值、以及这些点在 base_link
+        下的 z，和 `table_z` 一比就知道抓取点偏在哪。
         """
         scale = self.depth_scale
         if not scale:
@@ -461,9 +435,8 @@ class VisionNode(Node):
     def _check_depth_size(self):
         """深度图必须和彩色图同尺寸，也就是同一个像素坐标系。
 
-        为什么要单独查：没开 depth_registration 时两者尺寸不同（Gemini 335L 的
-        深度原生 848x480、彩色 1280x720），按彩色像素去查深度会取到完全无关的
-        位置。这个错不会报错，只会让"几千像素的斑"拟合出几毫米的边长。
+        没开 depth_registration 时两者尺寸不同，按彩色像素查深度会取到无关位置，
+        而且不报错，只会让"几千像素的斑"拟合出几毫米的边长。
         """
         cam, size = self.camera, self.depth_size
         if cam is None or size is None or self.size_reported:
@@ -501,12 +474,8 @@ class VisionNode(Node):
     def _calibrate_from_plane(self, msg):
         """整幅深度图拟合地面，反解相机真实的倾角和离地高度。
 
-        为什么值得做：单目那条路在 33° 安装角下，俯角差 1° 抓取点就差 8 mm；
-        手量角度到不了 1°，而地面在点云里占一片，拟合出来的法向精度在 0.1°
-        量级。这是唯一能替代"手扫角度试出来"的办法。
-
-        注意只标得动俯仰和高度：水平面绕竖直轴转多少度都还是它自己，
-        偏航要靠已知位置的物体另做。
+        只标得动俯仰和高度：水平面绕竖直轴转多少度都还是它自己，偏航要靠已知
+        位置的物体另做。
         """
         if self.camera is None:
             return
@@ -521,7 +490,7 @@ class VisionNode(Node):
         arr = np.asarray(frame)
         height = int(self.camera.height or arr.shape[0])
         width = int(self.camera.width or arr.shape[1])
-        # 按彩色图坐标抽样（深度已对齐到彩色），步长 8 已经够拟合一个平面。
+        # 按彩色图坐标抽样（深度已对齐到彩色），步长 8 够拟合一个平面。
         grid_v, grid_u = np.mgrid[0:height:8, 0:width:8]
         us = grid_u.ravel().astype(float)
         vs = grid_v.ravel().astype(float)
@@ -544,9 +513,8 @@ class VisionNode(Node):
         inliers, total, rms = depth3d.plane_quality(p_opt, normal_opt, offset)
         self.plane_reports += 1
         nx, ny, nz = report['normal']
-        # 平面在 base_link 里过 z = plane_z（在 z 轴上截距）。这个数和 table_z
-        # 一比，就知道差的是"相机装高了"还是"工作面不在 z=0 上"——两者的症状
-        # 都是抓取点 z 偏，只有这个数能分开。
+        # 平面在 base_link 里过 z = plane_z（z 轴截距）。与 table_z 一比，能分开
+        # "相机装高了"和"工作面不在 z=0 上"这两种都会让抓取点 z 偏的原因。
         normal_base = np.asarray(report['normal'], float)
         point_on_plane = (T[:3, :3] @ (normal_opt * offset)) + T[:3, 3]
         if abs(normal_base[2]) > 1e-6:
@@ -567,8 +535,8 @@ class VisionNode(Node):
                 ('{:.4f}'.format(self.last_plane_z)
                  if self.last_plane_z is not None else '测不出'),
                 self.table_z, report['pitch_correction_deg']))
-        # 这个数本身要能判"能不能用"：内点太少或残差到厘米级，就说明这堆点里
-        # 混了机械臂/底座/方块，拟合出来的距离和角度都是被拉偏的，不能照着改。
+        # 内点太少或残差到厘米级，说明点里混了机械臂/底座/方块，报出的距离和
+        # 角度不可照改。
         share = inliers / float(total) if total else 0.0
         if share >= 0.4 and rms < 0.008:
             self.get_logger().info(text)
@@ -589,9 +557,8 @@ class VisionNode(Node):
             return None
         T = self._lookup_once(frame_id, Time.from_msg(header.stamp))
         if T is None:
-            # 相机节点的时钟和 TF 的时间戳不一定对得上（尤其刚起来时），
-            # 退一步用最新的一帧。eye-to-hand 下这条链不随关节变化，
-            # 用最新值在物理上是等价的，只是少了对"标定时序"的检验。
+            # 相机时钟和 TF 时间戳不一定对得上，退一步用最新一帧。eye-to-hand 下
+            # 这条链不随关节变化，用最新值在物理上等价。
             T = self._lookup_once(frame_id, Time())
         if T is None and not self.tf_warned:
             self.tf_warned = True
@@ -641,8 +608,7 @@ class VisionNode(Node):
     def _segment(self, frame):
         """BGR 图 -> (labels 图, [Blob])。纯几何在 detection.py 里，这里只碰 cv2。
 
-        返回 labels 是为了深度路径：它要按"每个 blob 的像素"去查深度值，
-        而 `Blob` 只带像素坐标、不带 label。
+        返回 labels 供深度路径按每个 blob 的像素查深度（`Blob` 不带 label）。
         """
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         mask = np.zeros(hsv.shape[:2], np.uint8)
@@ -677,8 +643,7 @@ class VisionNode(Node):
             item.bbox.size = Vector3(x=self.object_edge, y=self.object_edge,
                                      z=self.object_edge)
             hyp = ObjectHypothesisWithPose()
-            # vision_msgs 4.x（Humble）：ObjectHypothesis 的字段是 class_id/score，
-            # 外面包一层 hypothesis；3.x 直接叫 id 的写法在这里不适用。
+            # vision_msgs 4.x（Humble）：字段是 class_id/score，包在 hypothesis 里。
             hyp.hypothesis.class_id = 'block'
             hyp.hypothesis.score = float(max(0.0, 1.0 - det.edge_error_m / 0.02))
             hyp.pose.pose = item.bbox.center

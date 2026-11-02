@@ -1,18 +1,15 @@
 """Drive the REAL arm from MoveIt.
 
-Run the driver first, in another terminal:
+Run the driver first, in another terminal, then this:
 
     ros2 launch dummy_controller dummy_controller.launch.py
-
-Then:
-
     ros2 launch dummy_vc_moveit_config moveit_hardware.launch.py
+    ros2 launch dummy_vc_moveit_config moveit_hardware.launch.py rviz:=false
 
-This launch deliberately does NOT start the driver. The driver is a lifecycle
-node that talks to the device over fibre, and only one process may hold that
-link; starting it from here would make the bringup depend on hardware being
-present before anything else can be inspected. Keeping the two separate means a
-MoveIt configuration problem can be debugged while the arm is idle.
+This launch deliberately does NOT start the driver. The driver is a lifecycle node
+that talks to the device over fibre and only one process may hold that link;
+keeping the two separate means a MoveIt configuration problem can be debugged
+while the arm is idle.
 
 What this starts:
   * a second robot_state_publisher, fed by the DRIVER's /joint_states
@@ -22,10 +19,8 @@ What this starts:
     topic the driver also subscribes to is for hand-run scripts, not for MoveIt
 
 Deliberately NOT started: joint_state_publisher. The driver owns /joint_states,
-and a second publisher on that topic is exactly the kind of silent conflict that
-is hard to see -- the model would jump between two sources.
-
-    ros2 launch dummy_vc_moveit_config moveit_hardware.launch.py rviz:=false
+and a second publisher on that topic is the kind of silent conflict that is hard
+to see -- the model would jump between two sources.
 """
 import os
 
@@ -49,7 +44,7 @@ def generate_launch_description():
     urdf_path = os.path.join(urdf_share, 'urdf', 'dummy2_urdf.xacro')
     if not os.path.isfile(urdf_path):
         raise RuntimeError(
-            f'URDF 不在 {urdf_path}。先跑 python3 tools/check_moveit_vm_paths.py')
+            f'URDF 不在 {urdf_path}。先跑 确认 install/ 下有 dummy2_urdf 的 share 目录')
 
     moveit_config = (
         MoveItConfigsBuilder('dummy2', package_name='dummy_vc_moveit_config')

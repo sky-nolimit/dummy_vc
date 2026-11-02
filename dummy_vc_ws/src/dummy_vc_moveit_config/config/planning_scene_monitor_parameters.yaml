@@ -1,38 +1,34 @@
 # Planning scene monitor settings.
 #
-# **NOT LOADED YET.** Keeping the file because the reasoning is worth recording,
-# but nothing reads it right now: the launch files set the builder up without
-# `planning_scene_monitor`, because that method's parameter names differ between
-# MoveIt releases and guessing one costs a launch attempt each time. move_group
-# falls back to its own defaults, which are adequate for planning.
+# **NOT LOADED YET.** Nothing reads this file right now: the launch files set the
+# builder up without `planning_scene_monitor`, because that method's parameter
+# names differ between MoveIt releases and guessing one costs a launch attempt
+# each time. move_group falls back to its own defaults, which are adequate for
+# planning.
 #
-# The settings that actually matter for hardware (allowed_start_tolerance,
+# The settings that matter for hardware (allowed_start_tolerance,
 # allowed_execution_duration_scaling) are NOT here -- they live in
-# moveit_controllers.yaml, which IS loaded. So nothing important is being lost.
+# moveit_controllers.yaml, which IS loaded. Nothing important is being lost.
 #
-# To wire this up: run `python3 tools/probe_moveit_api.py` on the target machine
-# and use the signature it prints.
-#
-# What is being watched: /joint_states from the driver. That is the ONLY source
-# of the arm's real state, and its accuracy is bounded by the driver's readback
-# behaviour -- the published pose lags the device somewhat (the driver polls the
-# device and republishes a cached value). MoveIt plans from whatever it last
-# received, so a stale reading means it plans from slightly the wrong start
-# state.
+# What is being watched: /joint_states from the driver. That is the ONLY source of
+# the arm's real state, and its accuracy is bounded by the driver's readback: the
+# published pose lags the device somewhat (the driver polls it and republishes a
+# cached value). MoveIt plans from whatever it last received, so a stale reading
+# means it plans from a slightly wrong start state.
 
 planning_scene_monitor:
   publish_planning_scene: true
   publish_geometry_updates: true
   publish_state_updates: true
   publish_transforms_updates: true
-  # Same rate as the driver's publish rate (joint_state_pub_hz, default 50).
-  # Polling faster than it publishes buys nothing.
+  # Matches the driver's publish rate (joint_state_pub_hz, default 50). Polling
+  # faster than it publishes buys nothing.
   publish_planning_scene_hz: 30.0
 
 # The octomap monitor turns depth data into collision geometry automatically.
-# It is DISABLED for now: the camera has not arrived, and enabling it without a
-# depth source only adds a sensor that never produces data. Turn it on when the
-# camera is integrated (stage 4), together with the point cloud topic.
+# DISABLED for now: the camera is not integrated yet, and enabling it without a
+# depth source only adds a sensor that never produces data. Turn it on with the
+# point cloud topic once the camera is in (stage 4).
 octomap_monitor:
   octomap_frame: base_link
   octomap_resolution: 0.02

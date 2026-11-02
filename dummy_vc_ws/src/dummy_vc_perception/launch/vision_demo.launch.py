@@ -1,15 +1,9 @@
 """一条命令把"看"这一侧的三个节点起起来：URDF -> TF，相机，视觉节点。
 
-手工等价的三条命令（出问题时用它们逐个排查，launch 会把日志混在一起）：
-
-    xacro src/dummy2_urdf/urdf/dummy2_urdf.xacro > /tmp/dummy2.urdf
-    ros2 run robot_state_publisher robot_state_publisher \
-      --ros-args -p robot_description:="$(cat /tmp/dummy2.urdf)"
-    ros2 launch orbbec_camera gemini_330_series.launch.py depth_registration:=true
-    ros2 run dummy_vc_perception vision_node --ros-args \
-      --params-file <share>/dummy_vc_perception/config/vision.yaml \
-      -p image_topic:=/camera/color/image_raw \
-      -p camera_info_topic:=/camera/color/camera_info
+三个节点也可以手工逐个起（launch 会把几路日志混在一起，出问题时逐个起更好
+排查）：xacro 出 URDF 交给 `robot_state_publisher`，起 Orbbec 相机，再用
+`ros2 run dummy_vc_perception vision_node --params-file <share>/dummy_vc_perception/config/vision.yaml`
+起视觉节点。
 
 几个刻意的默认值：
 
