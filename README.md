@@ -1,114 +1,25 @@
 # Dummy 机械臂视觉抓取
 
-在稚晖君 Dummy 六轴机械臂上实现基于视觉的抓取。
+Dummy 六轴机械臂 + 舵机夹爪 + Orbbec 相机，抓桌面上的方块。
 
-- **硬件**：Dummy 机械臂（6 旋转关节 + 舵机夹爪）+ 深度相机
-- **软件**：Ubuntu 22.04 + ROS 2 Humble
-- **开发方式**：Windows 编辑、Ubuntu 构建；GitHub 同步
-- **仓库**：https://github.com/sky-nolimit/dummy_vc
+- 系统：Ubuntu 22.04，ROS 2 Humble
+- 工作区：`dummy_vc_ws/`（唯一的 ROS 2 工作区）
+- 硬件：Dummy 机械臂（USB 串口）、Orbbec Gemini 335L、USB-CAN 适配器（夹爪）
 
----
+抓取成功的演示：[Dummy_vc.mp4](Dummy_vc.mp4)
 
-## 这个仓库里有什么，没有什么
+## 目录
 
-**推送到 GitHub 的只有代码。** 文档和外部参考资料留在本机，因为虚拟机上
-测试时用不到它们，而 `reference/` 体积可观且会持续增加。
+| 路径 | 内容 |
+|---|---|
+| `dummy_vc_ws/src/dummy2_urdf` | 机械臂模型（URDF/Xacro + STL） |
+| `dummy_vc_ws/src/dummy_controller` | 硬件驱动，经 fibre 控臂 |
+| `dummy_vc_ws/src/dummy_vc_moveit_config` | MoveIt 2 配置（运动规划） |
+| `dummy_vc_ws/src/dummy_vc_perception` | 相机接入 + 视觉检测 |
+| `dummy_vc_ws/src/dummy_vc_grasp` | 夹爪 CAN 节点、抓取规划、抓取状态机 |
+| `dummy_vc_ws/src/dummy_vc_calibration` | 关节标定，只在换板子/换零位时用 |
 
-| 目录 | 上传 | 内容 |
-|---|---|---|
-| `dummy_vc_ws/` | ✅ | **唯一的 ROS 2 工作区**，所有构建在这里发生 |
-| `tools/` | ✅ | 不依赖 ROS 的独立检查与探测脚本（索引见 [tools/README.md](tools/README.md)） |
-| `README.md`、`.gitignore` | ✅ | 本文件与构建产物忽略规则 |
-| `docs/` | ❌ | 设计文档、标定手册、缺陷记录、咨询材料 |
-| `reference/` | ❌ | 外部参考资料：Dummy 固件源码、参考 MoveIt 工作空间、上游 diff |
-
-**❌ 的两项目前只在本机磁盘上**（`docs/` 8 个文件，`reference/` 约 3900 个
-文件）。`.gitignore` 已按路径忽略，所以 `git add -A` 不会再带上它们；
-要用 `git add -f` 才能强制入库。**同样的目录名在本机仍然存在且可读可改。**
-
-> **git 历史里仍有它们的旧版本**，所以 `.git` 不会因此变小。要彻底清掉需要
-> 重写历史，那会改动已有提交的哈希；有需要再说。
-
----
-
-## 工作区结构
-
-```
-Dummy_vc/
-├── README.md              ← 当前文件：总入口
-├── .gitignore
-│
-├── dummy_vc_ws/           ★ 唯一的 ROS 2 工作区，所有构建在这里发生
-│   └── src/
-│       ├── dummy2_urdf/           机械臂模型（URDF/Xacro + STL）—— 唯一模型来源
-│       ├── dummy_controller/      ROS 2 控制器（lifecycle 节点 + fibre 驱动）—— 唯一硬件通道
-│       ├── dummy_vc_calibration/  阶段 0 硬件标定节点（预览-确认-执行）
-│       ├── dummy_vc_perception/   视觉感知（几何/检测层已离线自测，节点待 VM 验证）
-│       ├── dummy_vc_grasp/        抓取规划 + 任务状态机（纯层已离线自测，节点待 VM 验证）
-│       └── dummy_vc_moveit_config/ MoveIt 2 配置（SRDF、限位、规划器、RViz）
-│
-├── tools/                 不依赖 ROS 的独立工具（索引见 tools/README.md）
-│   ├── run_checks.py               ★ 一条命令跑完全部离线检查
-│   ├── check_syntax.py             全仓库 Python 语法检查
-│   ├── check_downlink.py           下发链对实测配对，抓"静默丢弃"那类故障
-│   └── selftest_conversion.py      坐标换算 + 标定自测（改了换算必跑）
-│
-├── docs/                  ❌ 本地：设计文档、标定手册、缺陷记录
-│   ├── 01-视觉抓取方案.md          完整技术方案（分阶段计划与风险清单）
-│   ├── 02-阶段0标定操作手册.md      阶段 0 的逐步操作指引
-│   ├── 03-进展与问题报告.md        历史快照（问题已解决，部分结论已过时）
-│   ├── 04-已知缺陷与未决问题.md     ★ 动 URDF 几何或排查"不动"之前先看
-│   ├── 05-固件源码事实.md          固件源码摘录与行号（权威依据）
-│   ├── 06-夹爪问题咨询材料.md       可直接发给商家/原作者的说明
-│   ├── 07-夹爪协议逆向.md          夹爪 CAN 协议逆向记录
-│   └── 08-MoveIt虚拟机验证清单.md   ★ 在虚拟机上验证 MoveIt 的逐步清单
-│
-└── reference/             ❌ 本地：只读参考资料，永不参与构建
-    ├── Firmware/                  Dummy 固件源码（含带注释的核心 7 个文件）
-    ├── dummy_moveit_ws/           他人 MoveIt 工作空间（仅参考）
-    └── upstream-local-changes/    上游未提交改动的存档
-```
-
-### 两类目录必须分清
-
-| | 位置 | 是否构建 | 能否修改 |
-|---|---|---|---|
-| **可构建代码** | `dummy_vc_ws/src/` | 是 | 是，我们在这里开发 |
-| **参考资料** | `reference/` | **否** | 只读，仅供查阅 |
-
-### 为什么参考项目必须移出工作区
-
-`reference/dummy_moveit_ws` 顶层含 5 个带 `package.xml` 的 ROS 包，且都没有
-`COLCON_IGNORE`。若留在工作区内：
-
-1. colcon 会把 5 个包全部编译，拖慢每次构建；
-2. **更危险的是** `dummy_moveit_config` 会装出另一份 `dummy-ros2.urdf.xacro`，
-   其关节名是 `joint1..joint6`，而本机机械臂是 `dummy2_joint1..dummy2_joint6`。
-   两份模型同名概念、不同关节名，`find_package` / `ros2 launch` / MoveIt 参数
-   加载都可能**静默**摸到错的那份 —— 表现为 MoveIt 能正常规划但 IK 全错，
-   极难定位。
-
-移到 `reference/` 后，构建范围内不存在第二份机器人模型。
-
-### dummy_cli_tool 有且只有一份
-
-`reference/dummy_moveit_ws/dummy_controller/dummy_controller/dummy_cli_tool/`
-下另有一份同名库，但**两份不可合并**：
-
-- `dummy_ros2_driver` 版：把 `import fibre.protocol` 改写为
-  `import dummy_cli_tool.fibre.protocol`，使其能作为正式 Python 包被
-  `setup.py` 安装，避免 `fibre` 这个名字污染全局命名空间。**这是唯一能用的版本。**
-- 参考项目版：保留原始 `fibre.*` import，另外附了一个 5.2 MB 的 Windows USB
-  驱动安装程序 `zadig-2.5.exe`。
-
-两者的 Python 源码差异除 import 改写外几乎为零。**合并会破坏包导入**，
-因此不合并，只保留 driver 版。
-
----
-
-## 常用命令
-
-### 构建
+## 构建
 
 ```bash
 cd dummy_vc_ws
@@ -116,140 +27,114 @@ colcon build --symlink-install
 source install/setup.bash
 ```
 
-### 离线检查（不需要硬件，也不需要 ROS）
+每个新终端都要先 `source install/setup.bash`。
 
-改完代码先跑这个，**16 项一次过**：
+## 跑一次抓取（三个终端）
 
-```bash
-python tools/run_checks.py
-```
-
-它覆盖：Python 语法、编码/BOM、换行符、URDF 结构与限位、MoveIt 配置与 URDF
-及设备实测行程的一致性、坐标换算恒等式、下发链对实测配对、标定自洽
-（锚点/收缩折叠/往返/三处默认值一致）、等待逻辑（对模拟的慢速设备）、
-MoveIt 的 action 接口、视觉几何与检测层（顶抓轴向/畸变/桌面反投影/边长与朝向/夹爪映射）。
-
-### 起驱动
+**终端 1 —— 机械臂驱动**
 
 ```bash
-# 机械臂本体（夹爪默认关闭 —— 见下方"已知阻塞"）
 ros2 launch dummy_controller dummy_controller.launch.py
-
-# 另开终端看状态
-ros2 topic echo /joint_states
 ```
 
-### 起 MoveIt
+**终端 2 —— MoveIt（接真机）**
 
 ```bash
-# 纯规划，不需要硬件：先在 RViz 里验证配置是否正确
-ros2 launch dummy_vc_moveit_config demo.launch.py
-
-# 接真机：先起上面的驱动，再起这个
 ros2 launch dummy_vc_moveit_config moveit_hardware.launch.py
 ```
 
-### 动一下某个关节
+**终端 3 —— 视觉 + 夹爪 + 抓取**
 
 ```bash
-# URDF 空间，弧度，绝对目标
-ros2 topic pub --once /joint_trajectory_controller/joint_trajectory \
-  trajectory_msgs/JointTrajectory \
-  "{joint_names: [dummy2_joint1], points: [{positions: [0.3], time_from_start: {sec: 3}}]}"
+ros2 launch dummy_vc_grasp pick_place_demo.launch.py execute:=true gripper:=true auto_start:=true
 ```
 
-### 看图（视觉）
+流程：等相机 → 检测方块 → 算抓取点 → 规划 → 下降合爪 → 抬起 → 移动到放置点 → 松手。
+
+- `execute:=true` 才真的动；不给就只规划，RViz 里看轨迹。
+- 相机已经在别的终端起过时加 `vision:=false`，否则两个进程抢同一个相机。
+- 不用 `auto_start:=true` 时，节点等触发：
+
+  ```bash
+  ros2 topic pub --once /pick_place/start std_msgs/msg/Empty "{}"
+  ```
+
+## 夹爪
+
+夹爪不走机械臂那条总线，走 USB-CAN 适配器。先把它拉起来：
 
 ```bash
-# 一条命令起"看"这一半：URDF/TF + Orbbec 相机 + vision_node
-ros2 launch dummy_vc_perception vision_demo.launch.py
+sudo ip link set can0 up type can bitrate 1000000
+```
 
-# 看检测结果
+`gripper:=true` 才会起 `gripper_can_node`。它启动时先把手指推到底量一次零点，日志里能看到 `合拢止位 … 张开止位 …`。没接适配器时可以 `gripper_channel:=vcan0` 干跑。
+
+| 话题 | 内容 |
+|---|---|
+| `/gripper/width` | 下发的开口宽度，mm |
+| `/gripper/position` | 回读的开口宽度，mm |
+| `/gripper/status` | `ready` / `default_zero` / `no_zero` |
+
+手动动一下夹爪：
+
+```bash
+ros2 topic pub --once /gripper/width std_msgs/msg/Float64 "{data: 30.0}"
+ros2 topic echo /gripper/position
+```
+
+`no_zero` 表示零点没量出来，抓取节点会停下不动；重跑节点它会自己再量一次。
+
+## 只看、不抓（视觉调试）
+
+```bash
+ros2 launch dummy_vc_perception vision_demo.launch.py
 ros2 topic echo /detected_objects
 ```
 
-### 看 + 抓
+## 换方块、换放置点
+
+改 `dummy_vc_ws/src/dummy_vc_grasp/config/pick_place.yaml`，也可以在启动时当参数传（如 `place_x:=0.0`）。
+
+| 参数 | 作用 |
+|---|---|
+| `place_x` / `place_y` | 放置点（base_link 下，米） |
+| `place_surface_m` | 放置台顶面离桌面多高（米），默认 0.055 |
+| `place_lift_edges` | 松手前再多抬几个方块边长，默认 0.5 |
+| `grasp_offset_x_m` / `grasp_offset_y_m` | 补实际抓取与目标之间的固定偏差（米） |
+| `grasp_open_ratio` | 开口 = 边长 × 该倍数，默认 1.8；超过 55 mm 自动截到上限并警告 |
+| `vision_homography` | 视觉检测到真值的 2D 单应修正，8 个数，全 0 = 不修 |
+| `vision_homography_region` | 单应可信范围 `[x0, x1, y0, y1]`，超出会警告（不拦） |
+| `execute` | `false` 只规划，`true` 真下发 |
+| `max_velocity_scaling` | 关节速度比例，默认 0.15 |
+
+`--symlink-install` 下改 yaml 不用重新构建，重启节点即可。
+
+## 常用查看
 
 ```bash
-# 终端 1：MoveIt
-ros2 launch dummy_vc_moveit_config moveit_hardware.launch.py
-
-# 终端 2：视觉 + 抓取规划/状态机（默认只规划不执行）
-ros2 launch dummy_vc_grasp pick_place_demo.launch.py auto_start:=true
+ros2 topic echo /joint_states           # 六个关节角（弧度）
+ros2 topic echo /gripper/status         # 夹爪能不能动
+ros2 topic echo /detected_objects       # 检测到的方块
+ros2 topic hz /camera/color/image_raw   # 相机帧率
 ```
 
----
-
-## 当前进度
-
-| 阶段 | 内容 | 状态 |
-|---|---|---|
-| — | 工作区整合、硬件接口探测 | ✅ 完成 |
-| 0 | 关节角度标定（锚点、两个偏置、六个符号） | ✅ 完成 |
-| **1** | **修驱动**：关节名、单位、TF、轨迹、坐标换算 | ✅ 完成 |
-| 1b | 逐个关节验证方向（几何折叠 + 实测命令双重校验） | ✅ 完成 |
-| 1c | 夹爪实测 | ⛔ **阻塞** —— 见下方 |
-| **2** | **MoveIt 配置** | ✅ 真机 Plan & Execute 已连续可用（含安全退出）；配置见 `docs/08` |
-| 3 | 驱动补强（限速、急停、GripperCommand 动作） | 部分完成（FollowJointTrajectory 动作已完成） |
-| 4 | 视觉感知 | ✅ 单目检测真机跑通：四个已知位置的方块，报出坐标与真值差 ≤1 cm（相机位姿是解出来的，见 `ad2f8ed`）。深度路径在这套安装下不可用（0.34 m 处无回波） |
-| 5 | 抓取规划 + 任务状态机 | 🔸 规划链**真机跑通**：视觉给目标 → 抓取规划 → MoveIt 规划到位（`error_code=1`），地面/地台碰撞体与笛卡尔竖直下降都已接上；默认只规划不执行，夹爪那一步在 A2 未解决前会主动停在 CLOSE_GRIPPER |
-| 6 | 深度相机接入 + 手眼标定 | 部分：相机已接入并标定到位姿（四点法）；手眼标定本身未做（要机械臂能动） |
-
-### 已知阻塞：夹爪
-
-**6 个关节都能正常控制；但只要调用一次夹爪命令，夹爪不动，而且此后整个
-机械臂失去响应，必须断电重启。**
-
-已确认的事实：
-
-- fibre 链路健康（读一个关节角 1 秒返回）
-- `hand.set_angle` / `set_enable` / `set_current_limit` **三个都永不返回**
-- 夹爪调用**之后**关节命令也不再应答
-- 舵机**是通电的**（整机使能后手指变硬、有力矩），线没断、插头没空位
-
-推断：固件卡在自己的 CAN 发送里（`CanSendMessage` 用 `osWaitForever` 取
-`sem_can1_tx` 且自己不释放），电机与夹爪共用这一函数和同一条 CAN1。
-**根因未定** —— 可能是 CAN 总线进入 error-passive/bus-off，也可能是固件 bug。
-
-**咨询商家/原作者的完整材料在 `docs/06-夹爪问题咨询材料.md`（本地）。**
-
-### 另外两点
-
-- **`docs/04`（本地）里有全部已知缺陷与未决问题**，每条写清现象、证据、
-  影响、以及处理它需要什么。动夹爪或 URDF 几何之前先看它。
-- **URDF 的夹爪几何与实物不符**（原作者模型 vs 实物的齿轮齿条+直线导轨），
-  形状与抓取中心都不同，差几十毫米。`gripper_tcp` 目前是占位值。
-
----
-
-## 关键事实（速查）
+## 约定
 
 | 项 | 值 |
 |---|---|
-| 关节名 | `dummy2_joint1` … `dummy2_joint6` + `dummy2_finger_joint1/2` |
-| 单位约定 | 设备侧（`angle` 回读、`move_j` 指令）是**度**；URDF / `/joint_states` / MoveIt 是**弧度** |
-| 规划链 | `base_link` → `gripper_tcp`（**不是** `link7`） |
-| 设备关系 | `raw = move_j + [0, 75, −180, 0, 0, 0]`（两个命名姿态互差 0.01°） |
-| 下发链 | `move_j = urdf/sign + movej_urdf_zero_deg` |
-| 可接受区间 | j1 ±165°、j2 −75…90°、j3 **45…180°**、j4 −180…165°、j5 ±90°、j6 ±180° |
-| 夹爪 CAN | 节点 **7**，角度 **0…30**（mode 0x02）、电流 **0…1**（mode 0x01），约 1 Mbit/s |
-| 相机内参 | fx 495.23 / fy 494.59 / cx 303.81 / cy 249.03，640×480（**未标定**） |
+| 关节名 | `dummy2_joint1` … `dummy2_joint6`，夹爪 `dummy2_finger_joint1/2` |
+| 角度单位 | `/joint_states`、MoveIt 用弧度；设备侧 `move_j` 用度 |
+| 规划末端 | `gripper_tcp` |
+| 夹爪话题单位 | mm（节点内部换算成米） |
+| 相机画面 | 640×480 |
 
-**越界的 `move_j` 会被设备静默丢弃** —— 整条命令不执行，日志里什么都没有。
-`normalize_movej` 会按区间折叠，找不到合法等价值时**报错**而不是静默下发。
+## 已知限制
 
----
+- 深度路径不可用，检测走单目。
+- 单应修正只在标定范围内可信：x −0.10…+0.10 m、y 0.15…0.35 m，超范围只警告。
+- 在 VirtualBox 里跑时相机偶尔丢帧（`color frame is not decoded`），表现为帧率下降，不影响抓取。
 
-## 原始来源
+## 来源
 
 - 机械臂与固件：[peng-zhihui/Dummy-Robot](https://github.com/peng-zhihui/Dummy-Robot)
-- 驱动与 URDF：原作者分享的 `dummy_ros2_driver` / `dummy2_urdf`
-- MoveIt 参考（仅查阅）：`reference/dummy_moveit_ws`（本地）
-
----
-
-## 版本控制说明
-
-**AI 负责提交，人负责推送。** 改动完成并通过 `tools/run_checks.py` 后直接
-`git commit`，commit message 用中文说明**为什么**改。`git push` 由人决定时机
-（通常先在虚拟机上验证）。
+- 本仓库：https://github.com/sky-nolimit/dummy_vc
